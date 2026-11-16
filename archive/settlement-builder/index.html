@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <title>SettleOn</title>
+    <link rel="stylesheet" href="/src/client/style.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header id="hud">
+        <div class="brand">SettleOn</div>
+        <div id="resources"></div>
+        <div id="status"></div>
+      </header>
+      <main id="board-wrap">
+        <canvas id="board"></canvas>
+        <div id="tile-info"></div>
+        <div id="cam-controls">
+          <button data-cam="left" title="Rotate left (Q)">⟲</button>
+          <button data-cam="right" title="Rotate right (E)">⟳</button>
+          <button data-cam="out" title="Zoom out">−</button>
+          <button data-cam="in" title="Zoom in">+</button>
+        </div>
+        <div id="overlay" hidden></div>
+      </main>
+      <aside id="side">
+        <section>
+          <h2>Build</h2>
+          <div id="palette"></div>
+        </section>
+        <section>
+          <h2>Market</h2>
+          <div id="market"></div>
+        </section>
+        <section>
+          <h2>Settlers</h2>
+          <ol id="players"></ol>
+          <ul id="log"></ul>
+        </section>
+      </aside>
+    </div>
+    <div id="toast" hidden></div>
+    <div id="loading">Connecting…</div>
+    <script type="module" src="/src/client/main.js"></script>
+  </body>
+</html>

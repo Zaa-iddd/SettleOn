@@ -1,0 +1,1575 @@
+import '@fontsource/pixelify-sans/400.css';
+import '@fontsource/pixelify-sans/700.css';
+import * as THREE from 'three';
+import { finishWorld, spawnPoint, groundAt, toCell, toWorld, WORLD, SEA, STEP, K, cellKey, keyX, keyZ, PICK, isWood, PILE_MAX } from '../shared/world.js';
+import { createEndlessWorld } from '../shared/endless.js';
+import { decodeMap, isEndlessMap, decodeEndless, endlessMap, encodeMap, cleanEdits, cleanChops, cleanBenches, cleanPicks, cleanPiles } from '../shared/mapfile.js';
+import { getSave, putSave } from './saves.js';
+import { Inventory, ITEMS } from './inventory.js';
+import { Editor } from './editor.js';
+import { identify, inDiscord } from './discord.js';
+import { Menu } from './menu.js';
+import { PLAYER_COLORS } from '../shared/world.js';
+import { PixelRenderer, TILT } from './pixelfx.js';
+import { WorldScene, DEFAULT_TIME, benchGeometry, logGeo, logOffset } from './world3d.js';
+import { makeCharacter, animateCharacter, ANIM, TOOLS, setTool, swingTool, SWING_SECS, setLantern } from './character.js';
+import { GridController, IMPACT_DROP } from './controller.js';
+import { Input } from './input.js';
+import { PathFinder } from './pathfind.js';
+
+const $ = (id) => document.getElementById(id);
+const SEND_MS = 80;
+
+const pixel = new PixelRenderer($('view'));
+// Fixed ¾ top-down camera that follows the player (no rotation).
+const CAM_PITCH = 0.66; // radians above the horizon (~38°, a ¾ view that shows faces)
+const CAM_FOV = 35;
+const camera = new THREE.PerspectiveCamera(CAM_FOV, pixel.aspect, 0.5, 110);
+camera.layers.enable(2); // clouds (see WorldScene: layer 2, cast through the cloud sun; layers 1 and 31 are shadow-only)
+const input = new Input($('view'), (x, y, first) => onTap(x, y, first));
+
+const game = {
+  mode: 'boot', // 'menu' | 'single' (offline, local only) | 'multi' (connected to a room)
+  me: null,
+  seed: null,
+  world: null,
+  scene: null,
+  ctrl: null,
+  local: null, // { char, color }
+  roster: new Map(), // id -> { name, color }
+  remotes: new Map(), // id -> { char, color, pos, target, ry, targetRy, a, speed, label }
+  // ?zoom=N sets the starting camera distance (handy for screenshots)
+  // yaw: camera angle around the player (0 = looking north); fixed 45 degree angles, Q/E ease yaw to yawTarget
+  cam: { dist: Number(new URLSearchParams(location.search).get('zoom')) || 9.5, focus: new THREE.Vector3(), yaw: 0, yawTarget: 0 },
+  paths: null, // PathFinder
+  marker: null,
+  ruinsFound: new Map(), // ruin id -> ruin
+  lastSent: { x: 0, y: 0, z: 0, ry: 0, a: -1, at: 0 },
+  tool: 0, // held tool: 0 hand, 1 shovel, 2 pickaxe (TOOLS)
+  digHits: new Map(), // cellKey -> hits so far (stone takes 2)
+  pendingDig: null, // { ix, iz }: dig once we've walked next to it
+  nextDig: 0, // clock time the next swing may start
+  saveName: null, // singleplayer on a saved world: digging is saved to it
+};
+
+let socket;
+let identity;
+
+// ---------- networking ----------
+
+function connect() {
+  game.leaving = false;
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  socket = new WebSocket(`${proto}://${location.host}/ws`);
+  socket.onopen = () => socket.send(JSON.stringify({ type: 'hello', room: identity.room, ...identity.hello }));
+  socket.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    if (msg.type === 'welcome') onWelcome(msg);
+    else if (msg.type === 'map') onMap(msg);
+    else if (msg.type === 'roster') onRoster(msg.players);
+    else if (msg.type === 'snap') onSnap(msg.p);
+    else if (msg.type === 'dig') onDig(msg);
+    else if (msg.type === 'chop') onChop(msg);
+    else if (msg.type === 'bench') onBench(msg);
+    else if (msg.type === 'pick') onPick(msg);
+    else if (msg.type === 'pile') onPile(msg);
+    else if (msg.type === 'error') { toast(msg.message); editor.playPending = false; }
+  };
+  socket.onclose = () => {
+    if (game.mode !== 'multi' || game.leaving) return;
+    $('loading').hidden = false;
+    $('loading').textContent = 'Reconnecting…';
+    setTimeout(() => { if (game.mode === 'multi' && !game.leaving) connect(); }, 1500);
+  };
+}
+
+const send = (obj) => {
+  if (socket?.readyState !== WebSocket.OPEN) return false;
+  socket.send(JSON.stringify(obj));
+  return true;
+};
+
+function onWelcome({ you, seed, map, edits, chops, benches, picks, piles }) {
+  game.me = you;
+  if (mapKey(seed, map) !== game.mapKey) buildWorld(seed, map, cleanEdits(edits), cleanChops(chops), cleanBenches(benches), cleanPicks(picks), cleanPiles(piles));
+  else { // reconnected: catch up
+    for (const [ix, iz, lvl, k, ul, uk] of cleanEdits(edits)) applyDig(ix, iz, lvl * STEP, k, ul >= 0 ? [ul * STEP, uk] : null);
+    for (const [ix, iz] of cleanChops(chops)) applyChop(ix, iz);
+    for (const [ix, iz, r] of cleanBenches(benches)) applyBench(ix, iz, r, true);
+    for (const [ix, iz, t] of cleanPicks(picks)) applyPick(ix, iz, t);
+    for (const [ix, iz, r, n] of cleanPiles(piles)) applyPile(ix, iz, r, n);
+  }
+  $('loading').hidden = true;
+  game.lastSent.a = -1; // force a position update
+  // multiplayer menu: "Bring a world" plays it in the room once we're in
+  if (game.bringMap) {
+    send({ type: 'map', map: game.bringMap });
+    game.bringMap = null;
+  }
+  // ?editor opens the map editor right away (handy for testing)
+  if (new URLSearchParams(location.search).has('editor') && !game.editorOpened) {
+    game.editorOpened = true;
+    openEditor();
+  }
+}
+
+// identifies what the room is playing: a random endless world (seed), a saved endless world or an island map
+const mapKey = (seed, map) => (!map ? `seed:${seed}` : isEndlessMap(map) ? `endless:${map.seed}`
+  : `map:${map.name}:${map.seed}:${hashStr(map.h + map.k + JSON.stringify(map.trees) + JSON.stringify(map.rocks) + JSON.stringify(map.ruins) + map.camp)}`);
+function hashStr(str) {
+  let h = 2166136261;
+  for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return (h >>> 0).toString(36);
+}
+
+// someone in the room played a custom map (or went back to a random island)
+function onMap({ map, seed, by }) {
+  // leave the editor only when this is the map we just played (someone else's map loads in the
+  // background so unsaved edits aren't lost)
+  if (editor.active && editor.playPending) editor.close();
+  editor.playPending = false;
+  buildWorld(seed, map);
+  toast(map ? `${by} loaded the world "${map.name}"` : `${by} started a new endless world`);
+}
+
+function buildWorld(seed, map = null, roomEdits = [], roomChops = [], roomBenches = [], roomPicks = [], roomPiles = []) {
+  game.seed = seed;
+  game.mapKey = mapKey(seed, map);
+  // no map: the endless world from the seed; otherwise a saved endless world or an island map
+  let base = null, endless = null;
+  try {
+    if (isEndlessMap(map)) endless = decodeEndless(map);
+    else if (map) base = decodeMap(map);
+  } catch (err) { toast(`Couldn't load the room's world: ${err.message}`); }
+  game.world = base ? finishWorld(base) : createEndlessWorld(endless ? endless.seed : seed);
+  game.mapName = base ? base.name : endless ? endless.name : 'Endless world';
+  // player digging: saved with the world, then the room's (before anything is built from the terrain)
+  for (const [ix, iz, lvl, k, ul = -1, uk = 0] of [...(endless?.edits ?? []), ...roomEdits]) game.world.setEdit(ix, iz, lvl * STEP, k, ul >= 0 ? ul * STEP : -1, uk);
+  for (const [ix, iz] of [...(endless?.chops ?? []), ...roomChops]) game.world.removeTree(ix, iz); // trees already chopped down
+  // workbenches: saved with the world (endless saves, or an island save's extra field), then the room's
+  const savedBenches = endless?.benches ?? (map && !isEndlessMap(map) ? cleanBenches(map.benches) : []);
+  for (const [ix, iz, r] of [...savedBenches, ...roomBenches]) game.world.benches.set(cellKey(ix, iz), [ix, iz, r]);
+  // log piles: saved with the world, then the room's
+  const savedPiles = endless?.piles ?? (map && !isEndlessMap(map) ? cleanPiles(map.piles) : []);
+  for (const [ix, iz, r, n] of [...savedPiles, ...roomPiles]) game.world.piles.set(cellKey(ix, iz), [ix, iz, r, n]);
+  // broken bushes, picked berries and pebbles: saved with the world, then the room's
+  const savedPicks = endless?.picks ?? (map && !isEndlessMap(map) ? cleanPicks(map.picks) : []);
+  for (const [ix, iz, t] of [...savedPicks, ...roomPicks]) game.world.setPick(ix, iz, t);
+  game.pendingAct = null;
+  hideCtx();
+  game.chopHits = new Map();
+  game.digHits.clear();
+  game.pendingDig = null;
+  game.scene?.dispose();
+  game.scene = new WorldScene(game.world);
+  game.scene.setBenches(game.world.benches);
+  game.scene.setPiles(game.world.piles);
+  for (const r of game.remotes.values()) r.label.remove();
+  game.remotes.clear();
+  game.ruinsFound.clear();
+  game.paths = new PathFinder(game.world);
+  // spawn on the center of the nearest open tile by the campfire
+  const spawn = spawnPoint(game.world, game.me);
+  // dev/testing: ?spawn=deep starts in the middle of the biggest deep (redwood) forest near the camp
+  if (new URLSearchParams(location.search).get('spawn') === 'deep') {
+    const { world } = game, R = world.endless ? 90 : WORLD / 2;
+    let best = null, bn = -1;
+    for (let iz = world.camp.iz - R; iz < world.camp.iz + R; iz += 2) {
+      for (let ix = world.camp.ix - R; ix < world.camp.ix + R; ix += 2) {
+        if (world.kind(ix, iz) !== K.DEEP || !game.paths.passable(ix, iz)) continue;
+        let n = 0;
+        for (let dz = -3; dz <= 3; dz++) for (let dx = -3; dx <= 3; dx++) if (world.kind(ix + dx, iz + dz) === K.DEEP) n++;
+        if (n > bn) { bn = n; best = [ix, iz]; }
+      }
+    }
+    if (best) { spawn.x = toWorld(best[0]); spawn.z = toWorld(best[1]); }
+  }
+  // dev/testing: ?spawn=trail starts on the mountain trail nearest the camp
+  if (new URLSearchParams(location.search).get('spawn') === 'trail') {
+    const { world } = game;
+    let best = null;
+    for (let r = 1; r < 160 && !best; r++) {
+      for (let a = 0; a < 8 * r && !best; a++) {
+        const ix = Math.round(world.camp.ix + Math.cos((a / (8 * r)) * 6.2832) * r), iz = Math.round(world.camp.iz + Math.sin((a / (8 * r)) * 6.2832) * r);
+        if (world.kind(ix, iz) === K.TRAIL && game.paths.passable(ix, iz)) best = [ix, iz];
+      }
+    }
+    if (best) { spawn.x = toWorld(best[0]); spawn.z = toWorld(best[1]); }
+  }
+  // dev/testing: ?spawn=shore starts on the dry shore nearest the camp with shallow water next to it
+  if (new URLSearchParams(location.search).get('spawn') === 'shore') {
+    const { world } = game, R = world.endless ? 120 : WORLD / 2;
+    let best = null, bd = Infinity;
+    for (let iz = world.camp.iz - R; iz < world.camp.iz + R; iz++) {
+      for (let ix = world.camp.ix - R; ix < world.camp.ix + R; ix++) {
+        const d = Math.hypot(ix - world.camp.ix, iz - world.camp.iz);
+        if (d >= bd || world.kind(ix, iz) === K.SEABED || !game.paths.passable(ix, iz)) continue;
+        let wet = 0;
+        for (let dz = -3; dz <= 3; dz++) for (let dx = -3; dx <= 3; dx++) if (world.kind(ix + dx, iz + dz) === K.SEABED && world.H(ix + dx, iz + dz) >= SEA - 1.1) wet++;
+        if (wet >= 14) { bd = d; best = [ix, iz]; }
+      }
+    }
+    if (best) { spawn.x = toWorld(best[0]); spawn.z = toWorld(best[1]); }
+  }
+  const [six, siz] = game.paths.nearestOpen(toCell(spawn.x), toCell(spawn.z), 8) ?? [toCell(spawn.x), toCell(spawn.z)];
+  game.ctrl = new GridController(game.paths, six, siz);
+  game.ctrl.ry = 0; // face the camera
+  game.ctrl.onLand = (drop) => {
+    const c = game.ctrl, p = c.pos;
+    game.scene.effects.impact(p.x, p.y, p.z, drop, game.world.kind(c.ix, c.iz));
+  };
+  game.scene.preload(game.ctrl.pos); // endless: build the chunks around the spawn before the first frame
+  game.cam.focus.set(game.ctrl.pos.x, game.ctrl.pos.y + 0.5, game.ctrl.pos.z);
+  applyTime(game.time);
+  game.marker = makeMarker();
+  game.scene.scene.add(game.marker);
+  game.outline = makeOutline();
+  game.scene.scene.add(game.outline);
+  game.local = null;
+  miniOrigin = null;
+  drawMinimapBase();
+  updateRuinsHud();
+  for (const [id, p] of game.roster) ensureCharacter(id, p);
+}
+
+// ---------- time of day (local only, not synced between players) ----------
+const TIME_KEY = 'settleon.time';
+function initialTime() {
+  const q = new URLSearchParams(location.search).get('time');
+  if (q !== null && !Number.isNaN(Number(q))) return Number(q);
+  try { const v = localStorage.getItem(TIME_KEY); if (v !== null && !Number.isNaN(Number(v))) return Number(v); } catch {}
+  return DEFAULT_TIME;
+}
+function applyTime(h) {
+  game.time = h;
+  game.scene?.setTimeOfDay(h);
+  const hh = Math.floor(h) % 24, mm = Math.round((h - Math.floor(h)) * 60);
+  $('time-label').textContent = `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
+  $('time-icon').classList.toggle('night', h < 6 || h >= 19.5);
+  $('time-slider').value = h;
+}
+{
+  const slider = $('time-slider');
+  slider.addEventListener('input', () => {
+    applyTime(Number(slider.value));
+    try { localStorage.setItem(TIME_KEY, slider.value); } catch {}
+  });
+  // don't keep focus, so WASD / arrows keep moving the character instead of the slider
+  slider.addEventListener('pointerup', () => slider.blur());
+  slider.addEventListener('keydown', (e) => e.preventDefault());
+}
+applyTime(initialTime());
+
+function onRoster(players) {
+  game.roster = new Map(players.map((p) => [p.id, p]));
+  if (game.scene) {
+    for (const [id, p] of game.roster) ensureCharacter(id, p);
+    for (const [id, r] of game.remotes) {
+      if (!game.roster.has(id)) {
+        game.scene.scene.remove(r.char.root);
+        r.label.remove();
+        game.remotes.delete(id);
+      }
+    }
+  }
+  $('players').innerHTML = players.map((p) => `
+    <li><i style="background:${p.color}"></i>${esc(p.name)}${p.id === game.me ? ' (you)' : ''}</li>`).join('');
+}
+
+function ensureCharacter(id, p) {
+  const scene = game.scene.scene;
+  if (id === game.me) {
+    if (game.local?.color === p.color) return;
+    if (game.local) scene.remove(game.local.char.root);
+    game.local = { char: makeCharacter(id, p.color), color: p.color };
+    setTool(game.local.char, game.tool);
+    scene.add(game.local.char.root);
+    return;
+  }
+  const existing = game.remotes.get(id);
+  if (existing && existing.color === p.color) {
+    existing.label.textContent = p.name;
+    return;
+  }
+  if (existing) { scene.remove(existing.char.root); existing.label.remove(); }
+  const char = makeCharacter(id, p.color);
+  char.root.visible = false;
+  scene.add(char.root);
+  const label = document.createElement('div');
+  label.className = 'label';
+  label.textContent = p.name;
+  label.style.color = p.color;
+  label.hidden = true;
+  $('labels').append(label);
+  game.remotes.set(id, {
+    char, color: p.color, label, pos: new THREE.Vector3(), target: new THREE.Vector3(),
+    ry: 0, targetRy: 0, a: ANIM.IDLE, speed: 0, seen: false,
+  });
+}
+
+function onSnap(list) {
+  for (const [id, x, y, z, ry, code] of list) {
+    if (id === game.me) continue;
+    const r = game.remotes.get(id);
+    if (!r || y < -50) continue; // not placed yet
+    const a = code % 10; // animation; the tens digit is the held tool
+    setTool(r.char, Math.floor(code / 10) % TOOLS.length);
+    // landing impacts for other players: an AIR hop that ends 2+ blocks lower, on dry ground
+    if (r.seen && a === ANIM.AIR && r.a !== ANIM.AIR) r.airFrom = r.target.y;
+    if (r.seen && a !== ANIM.AIR && r.a === ANIM.AIR && a !== ANIM.SWIM && r.airFrom - y >= IMPACT_DROP - 0.01) {
+      const ix = toCell(x), iz = toCell(z);
+      game.scene.effects.impact(toWorld(ix), y, toWorld(iz), r.airFrom - y, game.world.kind(ix, iz));
+    }
+    r.target.set(x, y, z);
+    r.targetRy = ry;
+    r.a = a;
+    if (!r.seen) {
+      r.seen = true;
+      r.pos.copy(r.target);
+      r.ry = ry;
+      r.char.root.visible = true;
+    }
+  }
+}
+
+function sendPosition(now) {
+  const c = game.ctrl, l = game.lastSent;
+  if (!c || now - l.at < SEND_MS) return;
+  const moved = Math.abs(c.pos.x - l.x) + Math.abs(c.pos.y - l.y) + Math.abs(c.pos.z - l.z) > 0.01;
+  const a = c.anim + 10 * game.tool; // animation + held tool
+  if (!moved && a === l.a && Math.abs(c.ry - l.ry) < 0.02) return;
+  send({ type: 'move', x: c.pos.x, y: c.pos.y, z: c.pos.z, ry: c.ry, a });
+  Object.assign(l, { x: c.pos.x, y: c.pos.y, z: c.pos.z, ry: c.ry, a, at: now });
+}
+
+// ---------- per-frame ----------
+
+const clock = new THREE.Clock();
+const tmp = new THREE.Vector3();
+
+function frame() {
+  const dt = Math.min(clock.getDelta(), 0.1);
+  const t = clock.elapsedTime;
+  if (editor.active) { editor.frame(dt, t); return; }
+  if (menu.active) { menu.frame(dt, t); return; }
+  if (!game.world || !game.ctrl) return;
+
+  const cam = game.cam;
+  cam.dist = Math.min(34, Math.max(6, cam.dist * (1 + input.takeZoom() * 0.1)));
+  // fixed camera angles: Q/E turn 45 degrees, eased
+  cam.yawTarget += input.takeRotate() * (Math.PI / 4);
+  cam.yaw += (cam.yawTarget - cam.yaw) * (1 - Math.exp(-dt * 10));
+
+  // local player (tile-locked); keyboard overrides tap-to-go inside the controller.
+  // WASD are screen directions, so turn them by the camera yaw and snap to the 8 grid directions.
+  const c = game.ctrl;
+  const keys = input.read(); // read even when ignored, so a queued jump doesn't fire later
+  c.update(dt, inventory.isOpen ? { x: 0, z: 0, run: false, jump: false } : screenToGrid(keys, cam.yaw));
+  if (!c.moving && game.marker.visible && !game.marker.userData.bad) game.marker.visible = false;
+  if (game.local) {
+    const root = game.local.char.root;
+    root.position.set(c.pos.x, c.pos.y, c.pos.z);
+    root.rotation.y = c.ry;
+    animateCharacter(game.local.char, c.anim, c.speed, dt, t);
+  }
+  updateMarker(t);
+  updateOutline();
+  // walked next to a block we clicked with a tool: dig it (a movement key cancels the walk, and the dig)
+  if (game.pendingDig && (keys.x || keys.z)) game.pendingDig = null;
+  if (game.pendingCatch != null && (keys.x || keys.z)) game.pendingCatch = null;
+  if (game.pendingChop && (keys.x || keys.z)) game.pendingChop = null;
+  if (game.pendingAct && (keys.x || keys.z)) game.pendingAct = null;
+  if (game.pendingAct && !c.moving) { // walked over to a bush or pebble we clicked
+    const a = game.pendingAct;
+    game.pendingAct = null;
+    if (Math.hypot(a.x - c.pos.x, a.z - c.pos.z) <= a.reach + 0.3) a.run(); else toast("Can't reach that");
+  }
+  if (game.pendingChop && !c.moving) {
+    const t = game.pendingChop;
+    game.pendingChop = null;
+    if (Math.hypot(t.x - c.pos.x, t.z - c.pos.z) <= CHOP_REACH + 0.3 && TOOLS[game.tool] === 'axe') chopTree(t);
+  }
+  if (game.pendingCatch != null && !c.moving) { // walked over to a frog: catch it if it's still there
+    const f = game.scene.ambient.catchableFrogs().find((q) => q.i === game.pendingCatch);
+    game.pendingCatch = null;
+    if (f && Math.hypot(f.x - c.pos.x, f.z - c.pos.z) <= CATCH_REACH + 0.4) catchFrog(f);
+    else toast('The frog hopped away!');
+  }
+  if (game.pendingDig && !c.moving) {
+    const { ix, iz } = game.pendingDig;
+    game.pendingDig = null;
+    if (Math.max(Math.abs(ix - c.ix), Math.abs(iz - c.iz)) === 1) actAt(ix, iz);
+  }
+
+  // remote players: smooth toward the latest snapshot
+  const k = 1 - Math.exp(-dt * 12);
+  for (const r of game.remotes.values()) {
+    if (!r.seen) continue;
+    const before = tmp.copy(r.pos);
+    r.pos.lerp(r.target, k);
+    r.speed = before.distanceTo(r.pos) / Math.max(dt, 1e-3);
+    let d = r.targetRy - r.ry;
+    d = Math.atan2(Math.sin(d), Math.cos(d));
+    r.ry += d * k;
+    r.char.root.position.copy(r.pos);
+    r.char.root.rotation.y = r.ry;
+    animateCharacter(r.char, r.a, r.speed, dt, t);
+  }
+
+  // lanterns at night: everyone carries one; real lights for you and the 3 nearest other players
+  const lit = (game.scene.timeNight ?? 0) > 0.02;
+  if (game.local) setLantern(game.local.char, lit);
+  const others = [];
+  for (const r of game.remotes.values()) {
+    setLantern(r.char, lit && r.seen);
+    if (lit && r.seen) others.push([r.pos.distanceToSquared(c.pos), { x: r.pos.x, y: r.pos.y, z: r.pos.z, ry: r.ry }]);
+  }
+  others.sort((a, b) => a[0] - b[0]);
+  game.scene.setLanterns(lit ? [{ x: c.pos.x, y: c.pos.y, z: c.pos.z, ry: c.ry }, ...others.slice(0, 3).map((o) => o[1])] : [], t);
+
+  // fixed-angle follow camera
+  cam.focus.lerp(tmp.set(c.pos.x, c.pos.y + 0.5, c.pos.z), 1 - Math.exp(-dt * 6));
+  placeCamera(camera, cam.focus, cam.dist, cam.yaw);
+
+  pixel.setZoom(cam.dist);
+  // tilt-shift: subtle up close, a little stronger zoomed out (where the miniature look reads best)
+  pixel.setTiltShift(TILT.strength * (0.7 + 0.6 * Math.min(1, Math.max(0, (cam.dist - 8) / 20))));
+  game.scene.cloudRes.value.set(pixel.rt.width, pixel.rt.height);
+  game.scene.update(t, dt, c.pos, cam.dist);
+  camera.updateMatrixWorld();
+  game.scene.setSeeThrough(camera, c.pos, pixel.rt.width, pixel.rt.height);
+  pixel.render(game.scene.scene, camera);
+
+  updateLabels();
+  updateArea(t);
+  sendPosition(performance.now());
+  if (t - (frame.lastMini ?? 0) > 0.12) { frame.lastMini = t; drawMinimap(); }
+}
+
+/** Put the camera at `dist` from `focus`, CAM_PITCH above the horizon, turned `yaw` around it. */
+function placeCamera(cam, focus, dist, yaw) {
+  const flat = Math.cos(CAM_PITCH) * dist;
+  cam.position.set(focus.x + Math.sin(yaw) * flat, focus.y + Math.sin(CAM_PITCH) * dist, focus.z + Math.cos(yaw) * flat);
+  cam.lookAt(focus);
+}
+
+/**
+ * Screen-space keys (x = right, z = up) -> grid step keys for the controller (which reads
+ * x = +x step, z = -z step), turned by the camera yaw and snapped to 8 directions.
+ */
+function screenToGrid(keys, yaw) {
+  if (!keys.x && !keys.z) return keys;
+  // screen right = (cos yaw, -sin yaw), screen up (forward) = (-sin yaw, -cos yaw) in world x/z
+  const wx = Math.cos(yaw) * keys.x - Math.sin(yaw) * keys.z;
+  const wz = -Math.sin(yaw) * keys.x - Math.cos(yaw) * keys.z;
+  const a = Math.round(Math.atan2(wz, wx) / (Math.PI / 4)) * (Math.PI / 4);
+  return { ...keys, x: Math.round(Math.cos(a)), z: -Math.round(Math.sin(a)) };
+}
+
+// ---------- tap to go ----------
+
+// Screen point -> where the ray meets the ground or water, by marching along the ray.
+function groundPoint(px, py) {
+  const ndc = new THREE.Vector2((px / pixel.cssW) * 2 - 1, -(py / pixel.cssH) * 2 + 1);
+  const ray = new THREE.Raycaster();
+  ray.setFromCamera(ndc, camera);
+  const o = ray.ray.origin, d = ray.ray.direction;
+  let prev = 0;
+  for (let t = 0.5; t < 120; t += 0.1) {
+    const x = o.x + d.x * t, y = o.y + d.y * t, z = o.z + d.z * t;
+    const floor = Math.max(groundAt(game.world, x, z), SEA);
+    if (y <= floor) {
+      // refine between the last two samples
+      let lo = prev, hi = t;
+      for (let k = 0; k < 8; k++) {
+        const m = (lo + hi) / 2;
+        const mx = o.x + d.x * m, my = o.y + d.y * m, mz = o.z + d.z * m;
+        if (my <= Math.max(groundAt(game.world, mx, mz), SEA)) hi = m; else lo = m;
+      }
+      return { x: o.x + d.x * hi, z: o.z + d.z * hi };
+    }
+    prev = t;
+  }
+  return null;
+}
+
+// Clicks don't move the character (movement is WASD/arrows only, at the user's request): with a
+// tool in hand, a click on a neighbouring tile uses it.
+function onTap(px, py, first) {
+  if (!game.world || !game.ctrl || editor.active || !first || inventory.isOpen) return;
+  hideCtx();
+  game.pendingAct = null;
+  const frog = frogAt(px, py);
+  if (frog) return catchFrog(frog); // clicking a frog catches it, whatever is in hand
+  const held = inventory.held;
+  if (held && ITEMS[held.id].throwable) return throwAt(px, py); // holding a frog: throw it there
+  if (TOOLS[game.tool] === 'axe') { // a workbench, then a tree, else wood blocks
+    const bench = benchAt(px, py);
+    if (bench) return takeBench(bench);
+    const pile = pileAt(px, py);
+    if (pile) return takeLog(pile);
+    const tree = treeAt(px, py);
+    if (tree) return chopTree(tree);
+  }
+  const bush = bushAt(px, py);
+  if (bush) return breakBush(bush); // a click breaks a bush, whatever is in hand
+  const pebble = pebbleAt(px, py);
+  if (pebble) return pickPebble(pebble);
+  const item = held && ITEMS[held.id];
+  if (item && (item.tool || item.block || item.place)) useToolAt(px, py); // a tool digs, a block or workbench is placed
+}
+
+// ---------- bushes and pebbles ----------
+// Left click a bush: break it for sticks (and its berries). Right click: a menu to search it for
+// berries. Left click a pebble: pick it up. Far ones are walked to first. All three are "picks"
+// (world.setPick), synced with the `pick` message and saved with the world.
+const GATHER_REACH = 1.9;
+const nearby = (name, range) => {
+  const w = game.world, list = (w.endless ? game.scene.live : w)[name] ?? [], p = game.ctrl.pos;
+  return list.filter((o) => Math.abs(o.x - p.x) < range && Math.abs(o.z - p.z) < range);
+};
+// the closest of `list` to the cursor on screen (aiming `up` above its base), within `limit` px
+function thingAt(list, px, py, up, limit) {
+  let best = null, bd = limit;
+  const v = new THREE.Vector3();
+  for (const o of list) {
+    v.set(o.x, o.y + up, o.z).project(camera);
+    if (v.z > 1) continue;
+    const d = Math.hypot((v.x + 1) / 2 * pixel.cssW - px, (1 - v.y) / 2 * pixel.cssH - py);
+    if (d < bd) { bd = d; best = o; }
+  }
+  return best;
+}
+const bushAt = (px, py) => thingAt(nearby('bushes', 14), px, py, 0.3, Math.max(18, 280 / game.cam.dist));
+const pebbleAt = (px, py) => thingAt(nearby('pebbles', 14), px, py, 0.05, Math.max(12, 150 / game.cam.dist));
+// what's on a cell right now (it may have been taken while we walked over)
+const onCell = (name, ix, iz) => nearby(name, 6).find((o) => toCell(o.x) === ix && toCell(o.z) === iz);
+// within reach of (x, z)? Otherwise walk next to it and then `run`
+function inReach(o, run) {
+  const c = game.ctrl;
+  if (!c.moving && Math.hypot(o.x - c.pos.x, o.z - c.pos.z) <= GATHER_REACH) return true;
+  const tx = toCell(o.x), tz = toCell(o.z), [ox, oz] = c.step ? [c.step.toIx, c.step.toIz] : [c.ix, c.iz];
+  const cells = game.paths.route(ox, oz, tx, tz);
+  if (!cells) { toast("Can't get there from here"); return false; }
+  if (cells.length && cells[cells.length - 1] === cellKey(tx, tz)) cells.pop();
+  c.setPath(cells);
+  game.pendingDig = game.pendingChop = null;
+  game.pendingAct = { x: o.x, z: o.z, reach: GATHER_REACH, run };
+  return false;
+}
+const give = (id, n) => { if (n > 0 && inventory.add(id, n) > 0) toast('Your inventory is full'); };
+function breakBush(b) {
+  const ix = toCell(b.x), iz = toCell(b.z), c = game.ctrl, now = clock.elapsedTime, w = game.world;
+  if (!inReach(b, () => { const q = onCell('bushes', ix, iz); if (q) breakBush(q); })) return;
+  if (now < game.nextDig) return;
+  game.nextDig = now + SWING_SECS + 0.05;
+  c.ry = Math.atan2(b.x - c.pos.x, b.z - c.pos.z);
+  if (game.local) swingTool(game.local.char);
+  setTimeout(() => {
+    const q = game.world === w && onCell('bushes', ix, iz);
+    if (!q) return;
+    game.scene.effects.impact(q.x, q.y + 0.35, q.z, 1.6, 'leaves');
+    applyPick(ix, iz, PICK.BUSH);
+    give('stick', 1 + Math.floor(Math.random() * 2)); // 1-2 sticks, and its berries if it had any
+    if (q.berries) give('berries', 1 + Math.floor(Math.random() * 2));
+    if (game.mode === 'multi') send({ type: 'pick', ix, iz, t: PICK.BUSH });
+    saveDigging();
+  }, SWING_SECS * 450);
+}
+function searchBush(b) {
+  const ix = toCell(b.x), iz = toCell(b.z);
+  if (!inReach(b, () => { const q = onCell('bushes', ix, iz); if (q) searchBush(q); })) return;
+  const q = onCell('bushes', ix, iz);
+  if (!q) return;
+  game.ctrl.ry = Math.atan2(q.x - game.ctrl.pos.x, q.z - game.ctrl.pos.z);
+  if (!q.berries) return toast('No berries on this bush');
+  const n = 1 + Math.floor(Math.random() * 3);
+  applyPick(ix, iz, PICK.BERRIES);
+  give('berries', n);
+  toast(n === 1 ? 'You found a berry' : `You found ${n} berries`);
+  if (game.mode === 'multi') send({ type: 'pick', ix, iz, t: PICK.BERRIES });
+  saveDigging();
+}
+function pickPebble(p) {
+  const ix = toCell(p.x), iz = toCell(p.z);
+  if (!inReach(p, () => { const q = onCell('pebbles', ix, iz); if (q) pickPebble(q); })) return;
+  if (!onCell('pebbles', ix, iz)) return;
+  applyPick(ix, iz, PICK.PEBBLE);
+  give('pebble', 1);
+  if (game.mode === 'multi') send({ type: 'pick', ix, iz, t: PICK.PEBBLE });
+  saveDigging();
+}
+// take a bush, its berries or a pebble out of the world and the scene
+function applyPick(ix, iz, t) {
+  const w = game.world, hit = w.setPick(ix, iz, t);
+  if (w.endless) game.scene.refreshCell(ix, iz); // rebuilds that chunk without it
+  else for (const o of hit) {
+    if (t !== PICK.PEBBLE) game.scene.hideBerries(o);
+    if (t !== PICK.BERRIES) game.scene.hideTree(o);
+  }
+}
+function onPick({ id, ix, iz, t }) {
+  if (id === game.me) return;
+  applyPick(ix, iz, t);
+  const r = game.remotes.get(id);
+  if (r && t === PICK.BUSH) swingTool(r.char);
+}
+// right click: a small menu for the bush under the cursor
+function hideCtx() { $('ctx-menu').hidden = true; }
+function onRight(px, py) {
+  hideCtx();
+  if (!game.world || !game.ctrl || editor.active || inventory.isOpen || (game.mode !== 'single' && game.mode !== 'multi')) return;
+  const b = bushAt(px, py);
+  if (!b) return;
+  const el = $('ctx-menu');
+  el.style.left = `${px}px`;
+  el.style.top = `${py}px`;
+  el.hidden = false;
+  el.querySelector('button').onclick = (e) => { e.currentTarget.blur(); hideCtx(); searchBush(b); };
+}
+input.onRight = onRight;
+
+// ---------- chopping trees with the axe ----------
+const CHOP_REACH = 1.95;
+const TREE_WOOD = { leafy: 3, pine: 4, redwood: 8 }, TREE_HITS = { leafy: 3, pine: 3, redwood: 6 };
+const treeType = (t) => (t.pine ? 'pine' : t.pine === false ? 'leafy' : 'redwood');
+// trees near the player: the island's lists, or what's loaded in an endless world
+function nearbyTrees(range) {
+  const w = game.world, src = w.endless ? game.scene.live : w, p = game.ctrl.pos;
+  return [...src.trees, ...src.redwoods].filter((t) => Math.abs(t.x - p.x) < range && Math.abs(t.z - p.z) < range);
+}
+// the tree under the cursor: closest trunk (base to about head height) on screen
+function treeAt(px, py) {
+  let best = null, bd = Math.max(18, 260 / game.cam.dist);
+  const a = new THREE.Vector3(), b = new THREE.Vector3();
+  for (const t of nearbyTrees(16)) {
+    const tall = treeType(t) === 'redwood' ? 4 * t.s : 1.4 * t.s;
+    a.set(t.x, t.y + 0.15, t.z).project(camera);
+    b.set(t.x, t.y + tall, t.z).project(camera);
+    if (a.z > 1 || b.z > 1) continue;
+    const ax = (a.x + 1) / 2 * pixel.cssW, ay = (1 - a.y) / 2 * pixel.cssH, bx = (b.x + 1) / 2 * pixel.cssW, by = (1 - b.y) / 2 * pixel.cssH;
+    const vx = bx - ax, vy = by - ay, k = Math.max(0, Math.min(1, ((px - ax) * vx + (py - ay) * vy) / Math.max(1, vx * vx + vy * vy)));
+    const d = Math.hypot(px - (ax + vx * k), py - (ay + vy * k));
+    if (d < bd) { bd = d; best = t; }
+  }
+  return best;
+}
+function chopTree(t) {
+  const c = game.ctrl, now = clock.elapsedTime;
+  if (Math.hypot(t.x - c.pos.x, t.z - c.pos.z) > CHOP_REACH) { // walk next to it first
+    const tx = toCell(t.x), tz = toCell(t.z), cells = game.paths.route(c.ix, c.iz, tx, tz);
+    if (!cells) return toast("Can't get there from here");
+    if (cells.length && cells[cells.length - 1] === cellKey(tx, tz)) cells.pop();
+    c.setPath(cells);
+    game.pendingDig = null;
+    game.pendingChop = t;
+    showMarker({ x: t.x, z: t.z }, false);
+    return;
+  }
+  if (now < game.nextDig) return;
+  game.nextDig = now + SWING_SECS + 0.05;
+  c.ry = Math.atan2(t.x - c.pos.x, t.z - c.pos.z);
+  if (game.local) swingTool(game.local.char);
+  const key = cellKey(t.ix, t.iz), type = treeType(t), w = game.world;
+  setTimeout(() => {
+    if (game.world !== w) return;
+    const hits = (game.chopHits.get(key) ?? 0) + 1;
+    game.scene.effects.impact(t.x, t.y + 0.45, t.z, 1.0, 'wood'); // chips fly
+    if (hits < TREE_HITS[type]) { game.chopHits.set(key, hits); return; }
+    game.chopHits.delete(key);
+    game.scene.effects.impact(t.x, t.y + (type === 'redwood' ? 5 : 1.4) * t.s, t.z, 2.4, 'leaves'); // the canopy bursts
+    applyChop(t.ix, t.iz);
+    if (inventory.add('log', TREE_WOOD[type]) > 0) toast('Your inventory is full');
+    if (game.mode === 'multi') send({ type: 'chop', ix: t.ix, iz: t.iz });
+    saveDigging();
+  }, SWING_SECS * 450);
+}
+// take the tree growing from cell (ix, iz) out of the world and refresh what depends on it
+function applyChop(ix, iz) {
+  const w = game.world;
+  if (w.endless) {
+    w.removeTree(ix, iz);
+    game.scene.refreshCell(ix, iz); // rebuilds that chunk without the tree
+  } else {
+    const t = w.removeTree(ix, iz);
+    if (!t) return;
+    game.scene.hideTree(t);
+  }
+  game.paths.refresh(ix, iz);
+  game.digVersion = (game.digVersion ?? 0) + 1;
+}
+function onChop({ id, ix, iz }) {
+  if (id === game.me) return;
+  applyChop(ix, iz);
+  const r = game.remotes.get(id);
+  if (r) swingTool(r.char);
+}
+
+// ---------- frogs: catch them, throw them ----------
+const CATCH_REACH = 2.2, THROW_RANGE = 7;
+// the frog under the cursor (screen distance from its projected position), or null
+function frogAt(px, py) {
+  let best = null, bd = Math.max(16, 240 / game.cam.dist);
+  const v = new THREE.Vector3();
+  for (const f of game.scene.ambient.catchableFrogs()) {
+    v.set(f.x, f.y + 0.12, f.z).project(camera);
+    if (v.z > 1) continue;
+    const d = Math.hypot((v.x + 1) / 2 * pixel.cssW - px, (1 - v.y) / 2 * pixel.cssH - py);
+    if (d < bd) { bd = d; best = f; }
+  }
+  return best;
+}
+function catchFrog(f) {
+  const c = game.ctrl;
+  if (Math.hypot(f.x - c.pos.x, f.z - c.pos.z) > CATCH_REACH) { // walk over first (it may hop off meanwhile)
+    const cells = game.paths.route(c.ix, c.iz, toCell(f.x), toCell(f.z));
+    if (!cells) return toast("Can't get there from here");
+    if (cells.length && cells[cells.length - 1] === cellKey(toCell(f.x), toCell(f.z))) cells.pop();
+    c.setPath(cells);
+    game.pendingDig = null;
+    game.pendingCatch = f.i;
+    return;
+  }
+  if (inventory.add('frog', 1) > 0) return toast('Your inventory is full');
+  c.ry = Math.atan2(f.x - c.pos.x, f.z - c.pos.z);
+  game.scene.ambient.takeFrog(f.i);
+  if (game.local) swingTool(game.local.char);
+  toast('You caught a frog!');
+}
+function throwAt(px, py) {
+  const p = groundPoint(px, py), c = game.ctrl, t = clock.elapsedTime;
+  if (!p || t < game.nextDig) return;
+  let dx = p.x - c.pos.x, dz = p.z - c.pos.z;
+  const d = Math.hypot(dx, dz);
+  if (d < 0.3) return;
+  if (d > THROW_RANGE) { dx *= THROW_RANGE / d; dz *= THROW_RANGE / d; } // as far as you can throw
+  c.ry = Math.atan2(dx, dz);
+  if (!inventory.takeHeld(1)) return;
+  game.nextDig = t + SWING_SECS + 0.05;
+  if (game.local) swingTool(game.local.char);
+  const w = game.world;
+  setTimeout(() => { // let go mid-swing
+    if (game.world !== w) return;
+    const from = { x: c.pos.x + Math.sin(c.ry) * 0.25, y: c.pos.y + 0.75, z: c.pos.z + Math.cos(c.ry) * 0.25 };
+    game.scene.ambient.throwFrog(from, { x: c.pos.x + dx, z: c.pos.z + dz }, c.pos);
+  }, SWING_SECS * 400);
+}
+
+// ---------- digging (shovel and pickaxe) ----------
+
+// ---------- inventory ----------
+// The selected hotbar slot is what you hold: a shovel or pickaxe there is the tool.
+const inventory = new Inventory({ onChange: () => { syncTool(); saveInventory(); }, toast: (s) => toast(s) });
+function syncTool() {
+  const held = inventory.held, before = game.tool;
+  game.tool = held ? Math.max(0, TOOLS.indexOf(ITEMS[held.id].tool ?? held.id)) : 0; // a tool or a block in hand
+  heldLabel();
+  if (game.tool !== before) game.pendingDig = null; // switched tools on the way: forget the dig
+  if (game.local) setTool(game.local.char, game.tool);
+}
+// The inventory is kept in this browser per saved world (singleplayer) or per room (multiplayer).
+const INV_KEY = 'settleon.inv.';
+function loadInventory(key) {
+  game.invKey = key;
+  inventory.reset();
+  try { if (key) inventory.fromJSON(JSON.parse(localStorage.getItem(INV_KEY + key))); } catch {}
+  syncTool();
+  if (inventory.slots.every((s) => !s)) toast('Break bushes for sticks and pick up pebbles, then craft tools (I)');
+}
+function saveInventory() {
+  if (!game.invKey || game.invTimer) return;
+  game.invTimer = setTimeout(() => {
+    game.invTimer = null;
+    try { localStorage.setItem(INV_KEY + game.invKey, JSON.stringify(inventory.toJSON())); } catch {}
+  }, 800);
+}
+// R turns what you're about to place (game.rot, quarter turns): Wood's planks, the Workbench's facing
+function heldLabel() {
+  const held = inventory.held, rot = game.rot ?? 0;
+  let text = held ? ITEMS[held.id].name : '';
+  if (held?.id === 'wood') text += ` · planks ${rot % 2 ? 'north-south' : 'east-west'} (R)`;
+  if (held?.id === 'log') text += ` · place to stack, lying ${rot % 2 ? 'north-south' : 'east-west'} (R)`;
+  if (held?.id === 'workbench') text += rot ? ` · turned ${rot * 90}° (R)` : ' · R turns it';
+  $('held-name').textContent = text;
+}
+// R: turn the workbench under the cursor, or else what's in hand
+function rotateKey() {
+  const b = input.hover && game.ctrl ? benchAt(input.hover[0], input.hover[1]) : null;
+  if (b) {
+    const r = (b[2] + 1) % 4;
+    applyBench(b[0], b[1], r, true);
+    if (game.mode === 'multi') send({ type: 'bench', ix: b[0], iz: b[1], r, on: true });
+    saveDigging();
+    return;
+  }
+  const pl = input.hover && game.ctrl ? pileAt(input.hover[0], input.hover[1]) : null;
+  if (pl) { // turn a log pile under the cursor
+    applyPile(pl[0], pl[1], 1 - pl[2], pl[3]);
+    sendPile(pl[0], pl[1]);
+    saveDigging();
+    return;
+  }
+  const id = inventory.held?.id;
+  if (id !== 'wood' && id !== 'workbench' && id !== 'log') return;
+  game.rot = ((game.rot ?? 0) + 1) % 4;
+  heldLabel();
+}
+
+// what a broken block drops
+const DROPS = { [K.SAND]: 'sand', [K.ROCK]: 'stone', [K.SNOW]: 'snow', [K.WOOD]: 'wood', [K.WOOD2]: 'wood' }; // everything else the shovel digs gives dirt
+
+const SHOVEL_KINDS = new Set([K.GRASS, K.FOREST, K.DEEP, K.DIRT, K.SOIL, K.SAND, K.TRAIL, K.SNOW, K.PATH]);
+const PICKAXE_KINDS = new Set([K.ROCK]);
+const AXE_KINDS = new Set([K.WOOD, K.WOOD2]); // the axe also chops trees (see chopTree)
+// a click with a tool or block: dig or place on the clicked tile, walking next to it first if it's
+// further away (this is the only time a click moves the character; plain movement is WASD)
+function useToolAt(px, py) {
+  const target = groundPoint(px, py);
+  if (!target) return;
+  const ix = toCell(target.x), iz = toCell(target.z), c = game.ctrl;
+  const [ox, oz] = c.step ? [c.step.toIx, c.step.toIz] : [c.ix, c.iz]; // where the current step ends
+  const dist = Math.max(Math.abs(ix - ox), Math.abs(iz - oz));
+  if (dist === 0) return toast('Step aside to dig here');
+  if (dist === 1 && !c.moving) return actAt(ix, iz);
+  // walk to the last tile before it, then dig (see frame)
+  const cells = game.paths.route(ox, oz, ix, iz);
+  if (!cells) { showMarker({ x: toWorld(ix), z: toWorld(iz) }, true); return toast("Can't get there from here"); }
+  if (cells.length && cells[cells.length - 1] === cellKey(ix, iz)) cells.pop();
+  c.setPath(cells);
+  game.pendingDig = { ix, iz };
+  showMarker({ x: toWorld(ix), z: toWorld(iz) }, false);
+}
+
+// Why the held tool can't dig this tile (a message), or null if it can. Shared by digging and the outline.
+function digProblem(ix, iz) {
+  const w = game.world, k = w.kind(ix, iz), h = w.H(ix, iz), tool = TOOLS[game.tool];
+  if (h < SEA) return "Can't dig underwater";
+  if (w.piles.has(cellKey(ix, iz))) return 'Take the logs off first';
+  if (tool === 'shovel' && !SHOVEL_KINDS.has(k)) return k === K.ROCK ? "That's stone: use the pickaxe" : "The shovel can't dig that";
+  if (tool === 'pickaxe' && !PICKAXE_KINDS.has(k)) return SHOVEL_KINDS.has(k) ? "That's soft ground: use the shovel" : isWood(k) ? "That's wood: use the axe" : "The pickaxe can't break that";
+  if (tool === 'axe' && !AXE_KINDS.has(k)) return 'The axe chops trees and wood blocks';
+  if (tool === 'shovel' && isWood(k)) return "That's wood: use the axe";
+  if (!game.paths.passable(ix, iz)) return "Something's in the way";
+  if (cornerTree(ix, iz)) return "A tree's roots are in the way";
+  if (h <= STEP + 0.01) return "Can't dig any deeper";
+  return null;
+}
+// Why the held block can't go on this tile, or null if it can.
+function placeProblem(ix, iz) {
+  if (game.ctrl?.touching().some(([x, z]) => x === ix && z === iz)) return "You're standing there";
+  if (game.world.piles.has(cellKey(ix, iz))) return 'Take the logs off first';
+  if (game.world.H(ix, iz) + STEP > MAX_BUILD_H + 0.01) return "Can't build any higher";
+  if (!game.paths.passable(ix, iz)) return "Something's in the way";
+  if (cornerTree(ix, iz)) return "A tree's in the way";
+  for (const r of game.remotes.values()) if (r.seen && toCell(r.pos.x) === ix && toCell(r.pos.z) === iz) return 'Someone is standing there';
+  return null;
+}
+const cornerTree = (ix, iz) => [[ix, iz], [ix + 1, iz], [ix, iz + 1], [ix + 1, iz + 1]].some(([vx, vz]) => game.paths.cornerBlocked(vx, vz));
+
+// ---------- hover outline: which block a tool would dig, or where a held block would go ----------
+const OUTLINE_OK = 0xffffff, OUTLINE_BAD = 0xff6a5a;
+function makeOutline() {
+  const g = new THREE.Group();
+  const box = new THREE.BoxGeometry(1, 1, 1);
+  const lines = new THREE.LineSegments(new THREE.EdgesGeometry(box), new THREE.LineBasicMaterial({ color: OUTLINE_OK }));
+  const fill = new THREE.Mesh(box, new THREE.MeshBasicMaterial({ color: OUTLINE_OK, transparent: true, opacity: 0.18, depthWrite: false }));
+  lines.renderOrder = fill.renderOrder = 15;
+  const log = new THREE.Mesh(logGeo(), ghostParts().benchMat);
+  log.renderOrder = 14;
+  g.add(log);
+  // see-through previews of what you're about to place, turned the way R set it (ghostParts)
+  const { blockGeo, benchMat } = ghostParts();
+  const block = new THREE.Mesh(blockGeo, null);
+  const bench = new THREE.Mesh(benchGeometry(), benchMat);
+  bench.position.y = -0.5; // the outline box is centred; the model stands on its base
+  block.renderOrder = bench.renderOrder = 14;
+  g.add(lines, fill, block, bench);
+  g.userData = { lines, fill, block, bench, log, cell: null };
+  g.visible = false;
+  return g;
+}
+// Ghost materials and the block geometry, made once and kept across worlds (marked shared so a
+// world's dispose leaves them alone). Wood gets the plank pattern, turned 90° for odd R turns,
+// matching how K.WOOD / K.WOOD2 draw: planks east-west on top and horizontal boards on the sides,
+// or north-south and vertical.
+let ghost = null;
+function ghostParts() {
+  if (ghost) return ghost;
+  const see = { transparent: true, opacity: 0.55, depthWrite: false };
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = 16;
+  const g = cv.getContext('2d');
+  for (let y = 0; y < 16; y++) {
+    for (let x = 0; x < 16; x++) {
+      const row = y >> 2, lp = y & 3, joint = (x + row * 5) % 12;
+      g.fillStyle = lp === 0 ? '#664226' : joint === 0 ? '#7c5232' : lp === 1 ? '#b8835a' : row % 2 ? '#a3714a' : '#ab774d';
+      g.fillRect(x, y, 1, 1);
+    }
+  }
+  const tex = (turned) => {
+    const t = new THREE.CanvasTexture(cv);
+    t.magFilter = t.minFilter = THREE.NearestFilter;
+    t.colorSpace = THREE.SRGBColorSpace;
+    t.wrapS = t.wrapT = THREE.RepeatWrapping;
+    t.center.set(0.5, 0.5);
+    t.rotation = turned ? Math.PI / 2 : 0;
+    return t;
+  };
+  // one STEP-high block: the sides only show the bottom half of the texture, so boards keep their size
+  const blockGeo = new THREE.BoxGeometry(1, 1, 1);
+  const uv = blockGeo.attributes.uv;
+  for (const face of [0, 1, 4, 5]) for (let i = face * 4; i < face * 4 + 4; i++) uv.setY(i, uv.getY(i) * STEP);
+  blockGeo.userData.shared = true;
+  const color = (hex) => new THREE.MeshLambertMaterial({ color: hex, ...see });
+  ghost = {
+    blockGeo,
+    benchMat: new THREE.MeshLambertMaterial({ vertexColors: true, ...see }),
+    mats: {
+      wood: new THREE.MeshLambertMaterial({ map: tex(false), ...see }),
+      wood2: new THREE.MeshLambertMaterial({ map: tex(true), ...see }),
+      dirt: color(0x8d5c3a), stone: color(0x8e8c88), sand: color(0xe2cf92), snow: color(0xeef3f8),
+    },
+  };
+  return ghost;
+}
+function updateOutline() {
+  const o = game.outline;
+  if (!o) return;
+  const held = inventory.held, item = held && ITEMS[held.id];
+  const hover = input.hover;
+  o.visible = false;
+  o.userData.block.visible = o.userData.bench.visible = o.userData.log.visible = false;
+  // a hand cursor over things a click gathers
+  $('view').style.cursor = hover && !inventory.isOpen && game.ctrl && (bushAt(hover[0], hover[1]) || pebbleAt(hover[0], hover[1])) ? 'pointer' : '';
+  if (!item || !(item.tool || item.block || item.place) || !hover || inventory.isOpen) return;
+  // the axe over a log pile: outline it
+  if (item.tool === 'axe') {
+    const pl = pileAt(hover[0], hover[1]);
+    if (pl) {
+      o.position.set(toWorld(pl[0]), game.world.H(pl[0], pl[1]) + 0.5, toWorld(pl[1]));
+      o.scale.set(1.04, 1.04, 1.04);
+      o.userData.lines.material.color.setHex(OUTLINE_OK);
+      o.userData.fill.visible = false;
+      o.visible = true;
+      return;
+    }
+  }
+  // the axe over a workbench: outline it
+  if (item.tool === 'axe') {
+    const b = benchAt(hover[0], hover[1]);
+    if (b) {
+      o.position.set(toWorld(b[0]), game.world.H(b[0], b[1]) + 0.5, toWorld(b[1]));
+      o.scale.set(1.04, 1.04, 1.04);
+      o.userData.lines.material.color.setHex(OUTLINE_OK);
+      o.userData.fill.visible = false;
+      o.visible = true;
+      return;
+    }
+  }
+  // the axe over a tree: outline its trunk
+  if (item.tool === 'axe') {
+    const t = treeAt(hover[0], hover[1]);
+    if (t) {
+      const red = treeType(t) === 'redwood', w = (red ? 0.9 : 0.42) * t.s, h = (red ? 3.5 : 1.0) * t.s;
+      o.position.set(t.x, t.y + h / 2, t.z);
+      o.scale.set(w, h, w);
+      o.userData.lines.material.color.setHex(OUTLINE_OK);
+      o.userData.fill.visible = false;
+      o.visible = true;
+      return;
+    }
+  }
+  // only re-march the ray when the mouse, the camera or the terrain changed
+  const cp = camera.position, key = `${hover[0]},${hover[1]},${game.digVersion},${cp.x.toFixed(2)},${cp.y.toFixed(2)},${cp.z.toFixed(2)}`;
+  if (o.userData.key !== key) {
+    o.userData.key = key;
+    const p = groundPoint(hover[0], hover[1]);
+    o.userData.cell = p ? [toCell(p.x), toCell(p.z)] : null;
+  }
+  if (!o.userData.cell) return;
+  const [ix, iz] = o.userData.cell, c = game.ctrl, w = game.world;
+  if (ix === c.ix && iz === c.iz) return; // your own tile: nothing to show
+  const h = w.H(ix, iz), placing = !!(item.block || item.place), tall = item.place ? 1 : STEP; // a workbench is a full unit high
+  const bad = held.id === 'log' ? logProblem(ix, iz) : item.place ? benchProblem(ix, iz) : placing ? placeProblem(ix, iz) : digProblem(ix, iz);
+  // digging: the top block of the tile; placing: the new block (or workbench) on top of it
+  const y0 = placing ? h : Math.max(0, h - STEP);
+  o.position.set(toWorld(ix), y0 + tall / 2, toWorld(iz));
+  o.scale.set(1.02, tall + 0.02, 1.02);
+  const col = bad ? OUTLINE_BAD : OUTLINE_OK;
+  o.userData.lines.material.color.setHex(col);
+  o.userData.fill.material.color.setHex(col);
+  // placing: a see-through preview of the block or workbench, turned the way it will go (R);
+  // where it can't go, a red box instead
+  o.userData.fill.visible = placing && !!bad;
+  if (placing && !bad) {
+    const rot = game.rot ?? 0;
+    if (held.id === 'log') { // the next log of the pile, where it will lie
+      const pl = w.piles.get(cellKey(ix, iz)), r = pl ? pl[2] : rot % 2;
+      logOffset(pl ? pl[3] : 0, r, o.userData.log.position).y -= 0.5;
+      o.userData.log.rotation.y = r * Math.PI / 2;
+      o.userData.log.visible = true;
+    } else if (item.place) {
+      o.userData.bench.visible = true;
+      o.userData.bench.rotation.y = (((Math.round(Math.atan2(c.ix - ix, c.iz - iz) / (Math.PI / 2)) % 4) + 4 + rot) % 4) * Math.PI / 2;
+    } else {
+      const mats = ghostParts().mats;
+      o.userData.block.material = held.id === 'wood' ? (rot % 2 ? mats.wood2 : mats.wood) : mats[held.id] ?? mats.dirt;
+      o.userData.block.visible = true;
+    }
+  }
+  o.visible = true;
+}
+
+// use what's in hand on a neighbouring tile: a tool digs, a block is placed
+function actAt(ix, iz) {
+  const held = inventory.held;
+  if (held?.id === 'log') placeLog(ix, iz);
+  else if (held && ITEMS[held.id].place) placeBench(ix, iz);
+  else if (held && ITEMS[held.id].block) placeAt(ix, iz);
+  else digAt(ix, iz);
+}
+
+// what a placed block becomes, and the highest you can build
+const PLACE_KINDS = { dirt: K.SOIL, stone: K.ROCK, sand: K.SAND, snow: K.SNOW, wood: K.WOOD };
+const MAX_BUILD_H = 24;
+
+// put the held block on a neighbouring tile: the tile rises one block
+function placeAt(ix, iz) {
+  const t = clock.elapsedTime, c = game.ctrl, w = game.world, held = inventory.held;
+  if (t < game.nextDig || !held || !ITEMS[held.id].block) return;
+  c.ry = Math.atan2(ix - c.ix, iz - c.iz); // face it
+  const h = w.H(ix, iz), why = placeProblem(ix, iz);
+  if (why) return toast(why);
+  const id = held.id;
+  inventory.takeHeld(1);
+  game.nextDig = t + SWING_SECS + 0.05;
+  if (game.local) swingTool(game.local.char);
+  setTimeout(() => {
+    if (game.world !== w) return;
+    const nh = h + STEP, nk = nh < SEA ? K.SEABED : id === 'wood' && (game.rot ?? 0) % 2 ? K.WOOD2 : PLACE_KINDS[id]; // underwater, it builds up the bottom
+    // remember the ground below the placed blocks, so the column's lower part keeps showing it
+    const k0 = w.kind(ix, iz), cur = w.under(ix, iz);
+    const u = nk === K.SEABED ? null : !cur ? [h, k0] : k0 !== nk ? [h, k0] : cur;
+    game.digHits.delete(cellKey(ix, iz));
+    applyDig(ix, iz, nh, nk, u);
+    game.scene.effects.impact(toWorld(ix), nh, toWorld(iz), 1.0, nk === K.SEABED ? K.SAND : nk);
+    sendDig(ix, iz, nh, nk, u);
+    saveDigging();
+  }, SWING_SECS * 450);
+}
+
+// ---------- log piles ----------
+// A Log is placed on a tile as a lying log; more logs on the same tile stack up 3, 2, 1 (PILE_MAX).
+// world.piles: Map(cellKey -> [ix, iz, r, n]); the pile blocks its tile. The axe takes logs back off.
+function logProblem(ix, iz) {
+  const pl = game.world.piles.get(cellKey(ix, iz));
+  if (pl) return pl[3] >= PILE_MAX ? 'That pile is full' : null;
+  if (game.world.H(ix, iz) < SEA) return "Logs can't be stacked in water";
+  return placeProblem(ix, iz);
+}
+function placeLog(ix, iz) {
+  const t = clock.elapsedTime, c = game.ctrl, w = game.world, why = logProblem(ix, iz);
+  if (t < game.nextDig) return;
+  c.ry = Math.atan2(ix - c.ix, iz - c.iz);
+  if (why) return toast(why);
+  inventory.takeHeld(1);
+  game.nextDig = t + SWING_SECS + 0.05;
+  if (game.local) swingTool(game.local.char);
+  const r0 = (game.rot ?? 0) % 2;
+  setTimeout(() => {
+    if (game.world !== w) return;
+    const pl = w.piles.get(cellKey(ix, iz));
+    if (pl && pl[3] >= PILE_MAX) return void give('log', 1); // someone filled it meanwhile
+    applyPile(ix, iz, pl ? pl[2] : r0, (pl ? pl[3] : 0) + 1);
+    game.scene.effects.impact(toWorld(ix), w.H(ix, iz) + 0.2, toWorld(iz), 0.8, 'wood');
+    sendPile(ix, iz);
+    saveDigging();
+  }, SWING_SECS * 450);
+}
+function applyPile(ix, iz, r, n) {
+  const w = game.world, key = cellKey(ix, iz), cur = w.piles.get(key);
+  if (n ? cur?.[2] === r && cur[3] === n : !cur) return;
+  if (n) w.piles.set(key, [ix, iz, r, n]); else w.piles.delete(key);
+  game.scene.setPiles(w.piles);
+  game.digVersion = (game.digVersion ?? 0) + 1;
+}
+// tell the room what the pile on a cell is now (n 0 = gone)
+function sendPile(ix, iz) {
+  if (game.mode !== 'multi') return;
+  const pl = game.world.piles.get(cellKey(ix, iz));
+  send({ type: 'pile', ix, iz, r: pl ? pl[2] : 0, n: pl ? pl[3] : 0 });
+}
+function onPile({ id, ix, iz, r, n }) {
+  if (id === game.me) return;
+  applyPile(ix, iz, r, n);
+  const p = game.remotes.get(id);
+  if (p) swingTool(p.char);
+}
+// the log pile under the cursor, or null
+function pileAt(px, py) {
+  const p = game.ctrl.pos, list = [];
+  for (const pl of game.world.piles.values()) {
+    const x = toWorld(pl[0]), z = toWorld(pl[1]);
+    if (Math.abs(x - p.x) < 16 && Math.abs(z - p.z) < 16) list.push({ x, y: game.world.H(pl[0], pl[1]), z, pl });
+  }
+  const lim = Math.max(20, 300 / game.cam.dist);
+  return (thingAt(list, px, py, 0.2, lim) ?? thingAt(list, px, py, 0.6, lim))?.pl ?? null;
+}
+// the axe takes the top log off a pile (one swing)
+function takeLog(pl) {
+  const c = game.ctrl, now = clock.elapsedTime, [ix, iz] = pl, x = toWorld(ix), z = toWorld(iz);
+  if (Math.hypot(x - c.pos.x, z - c.pos.z) > 1.6) return toast('Walk up to the logs first');
+  if (now < game.nextDig) return;
+  game.nextDig = now + SWING_SECS + 0.05;
+  c.ry = Math.atan2(x - c.pos.x, z - c.pos.z);
+  if (game.local) swingTool(game.local.char);
+  const w = game.world;
+  setTimeout(() => {
+    const cur = game.world === w && w.piles.get(cellKey(ix, iz));
+    if (!cur) return;
+    applyPile(ix, iz, cur[2], cur[3] - 1);
+    game.scene.effects.impact(x, w.H(ix, iz) + 0.4, z, 1.0, 'wood');
+    give('log', 1);
+    sendPile(ix, iz);
+    saveDigging();
+  }, SWING_SECS * 450);
+}
+
+// ---------- workbenches ----------
+// Why a workbench can't go on this tile, or null.
+function benchProblem(ix, iz) {
+  if (game.world.H(ix, iz) < SEA) return "A workbench can't stand in water";
+  return placeProblem(ix, iz);
+}
+// put the held workbench on a neighbouring tile, its front facing you
+function placeBench(ix, iz) {
+  const t = clock.elapsedTime, c = game.ctrl, w = game.world, why = benchProblem(ix, iz);
+  if (t < game.nextDig) return;
+  c.ry = Math.atan2(ix - c.ix, iz - c.iz);
+  if (why) return toast(why);
+  const r = ((Math.round(Math.atan2(c.ix - ix, c.iz - iz) / (Math.PI / 2)) % 4) + 4 + (game.rot ?? 0)) % 4; // facing you, plus R turns
+  inventory.takeHeld(1);
+  game.nextDig = t + SWING_SECS + 0.05;
+  if (game.local) swingTool(game.local.char);
+  setTimeout(() => {
+    if (game.world !== w) return;
+    applyBench(ix, iz, r, true);
+    game.scene.effects.impact(toWorld(ix), w.H(ix, iz) + 0.1, toWorld(iz), 1.0, 'wood');
+    if (game.mode === 'multi') send({ type: 'bench', ix, iz, r, on: true });
+    saveDigging();
+  }, SWING_SECS * 450);
+}
+function applyBench(ix, iz, r, on) {
+  const w = game.world, key = cellKey(ix, iz);
+  const cur = w.benches.get(key);
+  if (on ? cur?.[2] === r : !cur) return;
+  if (on) w.benches.set(key, [ix, iz, r]); else w.benches.delete(key);
+  game.scene.setBenches(w.benches);
+  game.digVersion = (game.digVersion ?? 0) + 1;
+}
+function onBench({ id, ix, iz, r, on }) {
+  if (id === game.me) return;
+  applyBench(ix, iz, r, on);
+  const p = game.remotes.get(id);
+  if (p) swingTool(p.char);
+}
+// the workbench under the cursor (closest projected middle), or null
+function benchAt(px, py) {
+  let best = null, bd = Math.max(20, 300 / game.cam.dist);
+  const p = game.ctrl.pos, a = new THREE.Vector3();
+  for (const b of game.world.benches.values()) {
+    const x = toWorld(b[0]), z = toWorld(b[1]);
+    if (Math.abs(x - p.x) > 16 || Math.abs(z - p.z) > 16) continue;
+    for (const up of [0.2, 0.6]) { // its desk and its back board
+      a.set(x, game.world.H(b[0], b[1]) + up, z).project(camera);
+      if (a.z > 1) continue;
+      const d = Math.hypot((a.x + 1) / 2 * pixel.cssW - px, (1 - a.y) / 2 * pixel.cssH - py);
+      if (d < bd) { bd = d; best = b; }
+    }
+  }
+  return best;
+}
+// the axe picks a workbench back up (one swing)
+function takeBench(b) {
+  const c = game.ctrl, now = clock.elapsedTime, [ix, iz] = b, x = toWorld(ix), z = toWorld(iz);
+  if (Math.hypot(x - c.pos.x, z - c.pos.z) > 1.6) return toast('Walk up to the workbench first');
+  if (now < game.nextDig) return;
+  game.nextDig = now + SWING_SECS + 0.05;
+  c.ry = Math.atan2(x - c.pos.x, z - c.pos.z);
+  if (game.local) swingTool(game.local.char);
+  const w = game.world;
+  setTimeout(() => {
+    if (game.world !== w || !w.benches.has(cellKey(ix, iz))) return;
+    applyBench(ix, iz, 0, false);
+    game.scene.effects.impact(x, w.H(ix, iz) + 0.4, z, 1.4, 'wood');
+    if (inventory.add('workbench', 1) > 0) toast('Your inventory is full');
+    if (game.mode === 'multi') send({ type: 'bench', ix, iz, r: 0, on: false });
+    saveDigging();
+  }, SWING_SECS * 450);
+}
+
+// one swing at a neighbouring tile; the block comes out as the tool lands
+function digAt(ix, iz) {
+  const t = clock.elapsedTime, c = game.ctrl, w = game.world;
+  if (t < game.nextDig || !ITEMS[inventory.held?.id]?.tool) return;
+  c.ry = Math.atan2(ix - c.ix, iz - c.iz); // face it
+  const k = w.kind(ix, iz), h = w.H(ix, iz), why = digProblem(ix, iz);
+  if (why) return toast(why);
+  game.nextDig = t + SWING_SECS + 0.05;
+  if (game.local) swingTool(game.local.char);
+  const key = cellKey(ix, iz), hits = (game.digHits.get(key) ?? 0) + 1, need = k === K.ROCK ? 2 : 1;
+  setTimeout(() => {
+    if (game.world !== w) return; // left the world meanwhile
+    const x = toWorld(ix), z = toWorld(iz);
+    if (hits < need) { // stone cracks first
+      game.digHits.set(key, hits);
+      game.scene.effects.impact(x, h, z, 1.0, k);
+      return;
+    }
+    game.digHits.delete(key);
+    const nh = h - STEP, cur = w.under(ix, iz);
+    let nk, u = null;
+    if (cur && nh <= cur[0] + 0.01) nk = nh < SEA ? K.SEABED : cur[1]; // the last placed block is off: the old ground shows again
+    else if (cur) { nk = k; u = cur; } // still on placed blocks
+    else nk = nh < SEA ? K.SEABED : k === K.SAND || k === K.SNOW || k === K.ROCK || isWood(k) ? k : K.SOIL;
+    applyDig(ix, iz, nh, nk, u);
+    game.scene.effects.impact(x, h, z, 1.8, k);
+    if (inventory.add(DROPS[k] ?? 'dirt', 1) > 0) toast('Your inventory is full');
+    sendDig(ix, iz, nh, nk, u);
+    saveDigging();
+  }, SWING_SECS * 450); // about when the tool lands
+}
+
+// tell the room (the under layer travels as a level and kind, -1 when there's none)
+function sendDig(ix, iz, h, k, u) {
+  if (game.mode !== 'multi') return;
+  send({ type: 'dig', ix, iz, lvl: Math.round(h / STEP), k, ulvl: u ? Math.round(u[0] / STEP) : -1, uk: u ? u[1] : 0 });
+}
+
+// change a tile's height and kind (u: the ground under placed blocks, [height, kind] or null),
+// and refresh everything that depends on it
+function applyDig(ix, iz, h, k, u = null) {
+  const w = game.world;
+  const cu = w?.under(ix, iz);
+  if (!w || (w.H(ix, iz) === h && w.kind(ix, iz) === k && (cu?.[0] ?? -1) === (u?.[0] ?? -1) && (cu?.[1] ?? -1) === (u?.[1] ?? -1))) return;
+  w.setEdit(ix, iz, h, k, u ? u[0] : -1, u ? u[1] : 0);
+  game.digVersion = (game.digVersion ?? 0) + 1;
+  game.scene.refreshCell(ix, iz);
+  game.paths.refresh(ix, iz);
+  game.miniDirty = true;
+}
+
+// someone else in the room dug
+function onDig({ id, ix, iz, lvl, k, ulvl = -1, uk = 0 }) {
+  if (id === game.me) return;
+  applyDig(ix, iz, lvl * STEP, k, ulvl >= 0 ? [ulvl * STEP, uk] : null);
+  const r = game.remotes.get(id);
+  if (r) swingTool(r.char);
+}
+
+// singleplayer on a saved world: keep the digging in the save (at most every 1.5 s)
+function saveDigging() {
+  if (game.mode !== 'single' || !game.saveName || game.saveTimer) return;
+  game.saveTimer = setTimeout(() => {
+    game.saveTimer = null;
+    const w = game.world, name = game.saveName;
+    if (!w || !getSave(name)) return;
+    const benches = [...w.benches.values()], picks = w.pickList(), piles = [...w.piles.values()];
+    putSave(name, w.endless ? endlessMap(name, w.seed, w.editsList(), w.choppedList(), benches, picks, piles) : { ...encodeMap(w.base, name), ...(benches.length ? { benches } : {}), ...(picks.length ? { picks } : {}), ...(piles.length ? { piles } : {}) });
+  }, 1500);
+}
+
+function makeMarker() {
+  const g = new THREE.Group();
+  const ring = new THREE.Mesh(new THREE.TorusGeometry(0.28, 0.045, 4, 16).rotateX(Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0xffe08a }));
+  const arrow = new THREE.Mesh(new THREE.ConeGeometry(0.12, 0.24, 4).rotateX(Math.PI), new THREE.MeshBasicMaterial({ color: 0xffe08a }));
+  arrow.position.y = 0.5;
+  g.add(ring, arrow);
+  g.userData = { ring, arrow };
+  g.visible = false;
+  return g;
+}
+
+function showMarker(p, bad) {
+  const m = game.marker;
+  m.visible = true;
+  m.position.set(p.x, Math.max(groundAt(game.world, p.x, p.z), SEA) + 0.03, p.z);
+  const col = bad ? 0xff7a7a : 0xffe08a;
+  m.userData.ring.material.color.setHex(col);
+  m.userData.arrow.material.color.setHex(col);
+  m.userData.born = clock.elapsedTime;
+  m.userData.bad = bad;
+}
+
+function updateMarker(t) {
+  const m = game.marker;
+  if (!m?.visible) return;
+  const age = t - (m.userData.born ?? t);
+  m.userData.arrow.position.y = 0.45 + Math.abs(Math.sin(t * 5)) * 0.15;
+  m.userData.arrow.rotation.y = t * 2;
+  m.userData.ring.scale.setScalar(1 + Math.sin(t * 6) * 0.08);
+  if (m.userData.bad && age > 0.8) m.visible = false;
+}
+
+// ---------- HUD ----------
+
+function updateLabels() {
+  const w = pixel.cssW, h = pixel.cssH;
+  for (const r of game.remotes.values()) {
+    if (!r.seen) { r.label.hidden = true; continue; }
+    tmp.copy(r.pos);
+    tmp.y += 1.25;
+    const dist = tmp.distanceTo(camera.position);
+    tmp.project(camera);
+    const visible = tmp.z < 1 && dist < 40 && Math.abs(tmp.x) < 1.1 && Math.abs(tmp.y) < 1.1;
+    r.label.hidden = !visible;
+    if (visible) r.label.style.transform = `translate(${((tmp.x + 1) / 2) * w}px, ${((1 - tmp.y) / 2) * h}px) translate(-50%, -100%)`;
+  }
+}
+
+const AREA_NAMES = {
+  [K.SEABED]: 'Open Water', [K.SAND]: 'Beach', [K.GRASS]: 'Meadow',
+  [K.FOREST]: 'Forest', [K.ROCK]: 'Mountains', [K.SNOW]: 'Snowy Peaks', [K.PATH]: 'Village', [K.DEEP]: 'Deep Forest', [K.TRAIL]: 'Mountain Trail', [K.DIRT]: 'Meadow', [K.SOIL]: 'Dug Soil', [K.WOOD]: 'Wooden Floor', [K.WOOD2]: 'Wooden Floor',
+};
+
+function updateArea() {
+  const { world, ctrl } = game;
+  const p = ctrl.pos;
+  let name = AREA_NAMES[world.kind(toCell(p.x), toCell(p.z))];
+  const dCamp = Math.hypot(p.x - world.camp.x, p.z - world.camp.z);
+  if (dCamp < 2.5) name = 'Campfire';
+  const ruins = world.endless ? world.ruinsNear(ctrl.ix, ctrl.iz, 6) : world.ruins;
+  for (const ru of ruins) {
+    if (Math.hypot(p.x - ru.x, p.z - ru.z) < 4) {
+      name = 'Ancient Ruins';
+      if (!game.ruinsFound.has(ru.id)) {
+        game.ruinsFound.set(ru.id, ru);
+        updateRuinsHud();
+        const n = game.ruinsFound.size;
+        toast(`You discovered Ancient Ruins! (${world.endless ? `${n} found` : `${n}/${world.ruins.length}`})`);
+      }
+    }
+  }
+  if ($('area').textContent !== name) $('area').textContent = name;
+}
+
+function updateRuinsHud() {
+  const n = game.ruinsFound.size;
+  // worlds don't generate ruins any more; the counter shows only on maps with ruins placed in the editor
+  $('ruins-found').hidden = !game.world.ruins.length;
+  $('ruins-found').textContent = `Ruins found: ${n}/${game.world.ruins.length}`;
+}
+
+const MINI_COLORS = {
+  [K.SEABED]: [63, 143, 214], [K.SAND]: [232, 217, 160], [K.GRASS]: [127, 191, 79],
+  [K.FOREST]: [70, 130, 60], [K.ROCK]: [143, 138, 128], [K.SNOW]: [242, 244, 246], [K.PATH]: [214, 205, 180], [K.DEEP]: [34, 74, 40], [K.TRAIL]: [204, 166, 112], [K.DIRT]: [150, 160, 88], [K.SOIL]: [140, 104, 70], [K.WOOD]: [168, 116, 68], [K.WOOD2]: [168, 116, 68],
+};
+let miniBase = null;
+let miniOrigin = null; // top-left cell of the minimap: the whole island, or a window around you in an endless world
+const MINI_RECENTER = 12; // endless: redraw the window once you're this many cells off its centre
+
+function drawMinimapBase() {
+  const { world } = game;
+  const c = game.ctrl;
+  miniOrigin = world.endless ? [c.ix - WORLD / 2, c.iz - WORLD / 2] : [0, 0];
+  const [ox, oz] = miniOrigin;
+  miniBase = document.createElement('canvas');
+  miniBase.width = miniBase.height = WORLD;
+  const ctx = miniBase.getContext('2d');
+  const img = ctx.createImageData(WORLD, WORLD);
+  for (let z = 0; z < WORLD; z++) {
+    for (let x = 0; x < WORLD; x++) {
+      const k = world.kind(ox + x, oz + z), h = world.H(ox + x, oz + z);
+      const shade = k === K.SEABED ? 0.75 + (h / SEA) * 0.25 : 0.85 + Math.min(h, 10) * 0.025;
+      const [r, g, b] = MINI_COLORS[k];
+      img.data.set([r * shade, g * shade, b * shade, 255], (z * WORLD + x) * 4);
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+function drawMinimap() {
+  const c = game.ctrl;
+  if (game.miniDirty) { game.miniDirty = false; drawMinimapBase(); } // terrain was dug
+  const off = Math.max(Math.abs(c.ix - miniOrigin[0] - WORLD / 2), Math.abs(c.iz - miniOrigin[1] - WORLD / 2));
+  if (game.world.endless && off > MINI_RECENTER) drawMinimapBase();
+  const ctx = $('minimap').getContext('2d');
+  ctx.drawImage(miniBase, 0, 0);
+  const [ox, oz] = miniOrigin;
+  const dot = (x, z, color, size = 3) => {
+    const px = Math.round(x + WORLD / 2 - ox), pz = Math.round(z + WORLD / 2 - oz);
+    ctx.fillStyle = '#0d1016';
+    ctx.fillRect(px - size / 2 - 1, pz - size / 2 - 1, size + 2, size + 2);
+    ctx.fillStyle = color;
+    ctx.fillRect(px - size / 2, pz - size / 2, size, size);
+  };
+  const { world } = game;
+  dot(world.camp.x, world.camp.z, '#ff8c2a', 2);
+  for (const ru of game.ruinsFound.values()) dot(ru.x, ru.z, '#7ef0ff', 2);
+  for (const r of game.remotes.values()) if (r.seen) dot(r.pos.x, r.pos.z, r.color);
+  // which way the camera looks: a short tick from the player
+  const px = Math.round(game.ctrl.pos.x + WORLD / 2 - ox), pz = Math.round(game.ctrl.pos.z + WORLD / 2 - oz);
+  ctx.strokeStyle = '#ffffff';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(px, pz);
+  ctx.lineTo(px - Math.sin(game.cam.yaw) * 7, pz - Math.cos(game.cam.yaw) * 7);
+  ctx.stroke();
+  dot(game.ctrl.pos.x, game.ctrl.pos.z, '#ffffff', 4);
+}
+
+// ---------- misc ----------
+
+let toastTimer;
+function toast(text) {
+  const el = $('toast');
+  el.textContent = text;
+  el.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (el.hidden = true), 3000);
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+}
+
+window.addEventListener('resize', () => {
+  pixel.resize();
+  camera.aspect = pixel.aspect;
+  camera.updateProjectionMatrix();
+});
+
+// ---------- map editor ----------
+
+const editor = new Editor({
+  pixel, camera, toast,
+  getTime: () => game.time ?? DEFAULT_TIME,
+  onPlay: (map) => {
+    if (game.mode === 'multi') {
+      if (!send({ type: 'map', map })) return toast('Not connected to the game server');
+      editor.playPending = true;
+      toast('Loading your map for everyone here…');
+    } else {
+      // singleplayer (or straight from the menu): just play it here
+      game.exitToGame = true;
+      editor.close();
+      startSingle(map);
+    }
+  },
+  onExit: () => {
+    input.takeZoom(); // drop wheel and rotate input from the editor
+    input.takeRotate();
+    game.lastSent.a = -1;
+    if (game.mode === 'menu' && !game.exitToGame) menu.show();
+    game.exitToGame = false;
+  },
+});
+
+// ---------- modes: main menu, singleplayer, multiplayer ----------
+
+const menu = new Menu({
+  pixel, camera, toast,
+  getTime: () => game.time ?? DEFAULT_TIME,
+  inDiscord: inDiscord(),
+  get defaultRoom() { return identity?.room ?? 'dev'; },
+  onSingle: (map) => startSingle(map),
+  onMulti: (room, map) => startMulti(room, map),
+  onEditor: (base, name) => { menu.hide(); editor.open(base, name); },
+});
+
+function myName() {
+  return identity?.hello?.dev?.name ?? 'You';
+}
+
+/** Offline play: a new endless world (map = null), a saved endless world or an island map. */
+function startSingle(map) {
+  menu.hide();
+  resetSession();
+  game.mode = 'single';
+  game.me = 'solo';
+  game.roster = new Map([[game.me, { id: game.me, name: myName(), color: PLAYER_COLORS[0] }]]);
+  buildWorld(Math.floor(Math.random() * 2 ** 31), map);
+  game.saveName = map?.name && getSave(map.name) ? map.name : null;
+  loadInventory(game.saveName ? `save:${game.saveName}` : null);
+  onRoster([...game.roster.values()]);
+  $('loading').hidden = true;
+  if (map) toast(`Welcome to ${map.name}`);
+}
+
+/** Join a room on the server, optionally bringing a world to play there. */
+function startMulti(room, map = null) {
+  menu.hide();
+  resetSession();
+  game.mode = 'multi';
+  identity.room = room;
+  loadInventory(`room:${room}`);
+  game.bringMap = map;
+  $('loading').hidden = false;
+  $('loading').textContent = 'Connecting…';
+  connect();
+}
+
+/** Back to the main menu (leaves the multiplayer room). */
+function toMenu() {
+  if (editor.active) { editor.playPending = false; game.exitToGame = true; editor.close(); }
+  resetSession();
+  game.mode = 'menu';
+  menu.show();
+}
+
+// forget the current world, players and connection
+function resetSession() {
+  if (socket) { game.leaving = true; socket.close(); socket = null; }
+  game.saveName = null;
+  if (inventory.isOpen) inventory.close();
+  game.scene?.dispose();
+  game.scene = null;
+  game.world = null;
+  game.ctrl = null;
+  game.local = null;
+  game.mapKey = null;
+  game.seed = null;
+  for (const r of game.remotes.values()) r.label.remove();
+  game.remotes.clear();
+  game.roster = new Map();
+  $('players').innerHTML = '';
+}
+
+$('open-menu').addEventListener('click', (e) => { e.currentTarget.blur(); toMenu(); });
+window.addEventListener('keydown', (e) => {
+  const playing = (game.mode === 'single' || game.mode === 'multi') && !editor.active;
+  if (e.code === 'Escape' && playing) { if (inventory.isOpen) inventory.close(); else toMenu(); return; }
+  if (e.target.closest?.('input, select, textarea') || !playing) return;
+  if (e.code === 'KeyI' || e.code === 'Tab') { e.preventDefault(); hideCtx(); inventory.toggle(); return; }
+  if (e.code === 'KeyR' && !inventory.isOpen) { rotateKey(); return; }
+  const n = e.code.startsWith('Digit') ? Number(e.code.slice(5)) - 1 : -1;
+  if (n >= 0 && n < 9) inventory.select(n);
+});
+$('open-editor').addEventListener('click', (e) => {
+  e.currentTarget.blur();
+  openEditor();
+});
+// the map editor edits islands; endless worlds come from their seed and can't be edited
+function openEditor() {
+  if (!game.world) return;
+  if (game.world.endless) return toast("Endless worlds can't be edited. Create an island world to use the map editor.");
+  editor.open(game.world.base, game.mapName);
+}
+
+
+// ---------- boot ----------
+
+(async () => {
+  try {
+    identity = await identify();
+  } catch (err) {
+    console.error(err);
+    $('loading').textContent = `Couldn't sign in with Discord: ${err.message ?? err}`;
+    return;
+  }
+  pixel.renderer.setAnimationLoop(frame);
+  if (import.meta.env.DEV) window.__dbg = { game, pixel, camera, inventory }; // dev only: lets headless tests inspect the renderer
+  // ?room=... jumps straight into multiplayer (handy for testing); otherwise the main menu
+  if (new URLSearchParams(location.search).has('room')) startMulti(identity.room);
+  else toMenu();
+})();

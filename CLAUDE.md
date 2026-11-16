@@ -1,0 +1,618 @@
+# SettleOn: project context
+
+SettleOn is a cozy multiplayer **3D exploration game with a pixel-art look** that runs as a **Discord Activity**: a web app inside a Discord voice channel.
+The user wants it to *feel like* Stardew Valley (cozy, fixed ¾ camera, cute characters; movement is WASD/arrows only), but with original art.
+They steer the look with reference images. Most recently that was a lush, saturated cozy pixel-art village: stone cottages, terracotta roofs, cobblestone paths, fences, a well, round leafy trees. Match that *feel* with original models and textures.
+Everyone in the channel spawns at a campfire in the same procedurally generated world: by default an **endless world** that keeps generating as you explore (Minecraft-style, from a seed), or an island (generated, blank, or hand-made in the map editor). Each player controls a cute chibi character and can see the others walking around.
+The game design is original. Don't turn it into a copy of an existing commercial game.
+
+> **Keep this file current.** Whenever game content or rules change (world generation, controls, physics numbers, visuals, protocol, files), update the matching section below in the same change, and add a line to the Changelog.
+> If this file and the code disagree, the code wins. Fix this file.
+
+## Commands
+
+| Command | What it does |
+|---|---|
+| `npm run dev` | Vite client on :5173 + game server on :3001 (with `--watch`). Vite proxies `/api` and `/ws` to :3001 |
+| `npm run build` | Builds the client into `dist/` |
+| `npm start` | Production server: serves `dist/`, `/api/token` and `/ws` on `$PORT` (default 3001) |
+
+Browser dev mode: open http://localhost:5173 for the main menu. `?room=x&name=y` skips the menu and joins room `x` in multiplayer (each tab is a player).
+Discord setup (portal, tunnel, URL mapping) is in [README.md](README.md).
+
+## Files
+
+| File | Role |
+|---|---|
+| `src/shared/mapfile.js` | Map files: `encodeMap(base, name)` / `decodeMap(obj)` (validates, throws on bad input), `cloneBase`, `blankBase`. Endless saves: `endlessMap(name, seed)`, `isEndlessMap`, `decodeEndless`. See **Map editor** |
+| `src/shared/endless.js` | **Endless worlds.** `createEndlessWorld(seed)`: terrain for any cell, in `CH` = 16-cell chunks (`terrain(cx, cz)` heights/kinds, `content(cx, cz)` trees/foliage/obstacles/path tables), `H`/`kind` for any cell, `ruinsNear`. See **Endless worlds** |
+| `src/shared/world.js` | **Island generation and constants.** `generateWorld(seed)` = `finishWorld(base)` of a generated base; `world.base` keeps the base. Seeded island heightmap, ground kinds, trees/rocks/flowers, campfire clearing, ruins, collision obstacles, `groundAt`, `spawnPoint`, player colors, `MAX_PLAYERS`. Also the shared noise (`hash2`, `fbm`, `smooth`), `cellKey`/`keyX`/`keyZ` and `WORLD_LIMIT` |
+| `src/client/main.js` | Client glue: WebSocket, building the world on `welcome`, local and remote characters, fixed follow camera, tool clicks (screen→ground raycast → dig a neighbouring tile), digging and its sync, name tags, area name, ruin discovery, minimap |
+| `src/client/menu.js` | `Menu`: the main menu (Play singleplayer, Multiplayer, Create world, Map editor) over a slowly circling diorama of a random island. Also `seedFrom(text)` |
+| `src/client/saves.js` | Saved worlds in `localStorage['settleon.maps']` (`allSaves`, `saveNames`, `getSave`, `putSave`, `deleteSave`, `saveOptions`), shared by the menu and the editor |
+| `src/client/inventory.js` | `Inventory`: Minecraft-style hotbar (9) + bag (27), the inventory screen, click rules, and `ITEMS` with their 2D pixel-art icons drawn in code (`iconURL`). See **Inventory** |
+| `src/client/editor.js` | `Editor`: the map editor mode (free camera, terrain/ground/object tools, undo, save/load/export/import, play in room) |
+| `src/client/pathfind.js` | `PathFinder`: `floorAt`/`waterAt`/`passable(ix, iz)` (island: flat arrays; endless: per-chunk tables), `stepOk(ix, iz, dx, dz)` (the single source of movement rules); `route()`, an 8-way A* in a 193×193 window returning `cellKey`s; `nearestOpen()` |
+| `src/client/pixelfx.js` | `PixelRenderer`: low-res render target, then a post shader (outlines + dithered palette), upscaled with CSS `pixelated`. Look settings live here |
+| `src/client/world3d.js` | `WorldScene`: builds an island once, or streams endless chunks around the player (`updateChunks`, `preload`). Terrain columns (instanced, textured by `TERRAIN_GLSL`), water plane that follows the player, trees/rocks/flowers, foliage (tufts, ferns, reeds and cattails, bushes and berries, mushrooms, swaying in a shared `wind` uniform), ruins with spinning gems, animated campfire with flickering light, drifting clouds, sun and shadows that follow the player. Also exports the shared `mat()` material cache |
+| `src/client/ambient.js` | `Ambient`: client-only ambient life (not synced). Butterflies around flowers, dragonflies over water near reeds, frogs, fly swarms, water striders, bird flocks, and drifting leaves around the player. Exports `WIND`, the shared wind direction |
+| `src/client/trees3d.js` | Leafy tree, redwood (`redwoodGeometry(variant)`: ~11.5 tall straight red trunk, buttress roots, 6-tier dense canopy 5.6–11.2 high, `REDWOOD_BANDS`/`REDWOOD_BARK`), conifer (`pineTreeGeometry(variant)`: straight trunk, 5 tiers of flattened clusters in cooler `PINE_BANDS`) and bush models (from the user's tree reference): `leafyTreeGeometry(variant)` (twisting tapered trunk with bark streaks, flared roots, branches to 3–4 side clusters plus a crown) and `leafCluster()` (banded core + rounded single-sided leaf cards). Merged, vertex-colored geometry |
+| `src/client/effects.js` | `Effects`: one-shot particles (client-only, not synced). `impact(x, y, z, drop, kind)` bursts a ring of dust puffs (colored by ground kind) and a few ground chips that fall with gravity. Pooled instanced boxes |
+| `src/client/character.js` | Cute chibi character (`makeCharacter`) and procedural animation (`animateCharacter`, `ANIM` states). Each mesh has a see-through silhouette twin. What the hand holds: `setTool(ch, i)` (`TOOLS` = none, shovel, pickaxe, dirt, stone, sand, snow, frog, axe, wood, log, workbench, stick, pebble, berries) and `swingTool(ch)`. Night lantern: `setLantern(ch, on)` |
+| `src/client/controller.js` | `GridController`: grid movement in **half-tile steps** (rests on tile centres or edges), with hops over ledges, swimming and a standing jump |
+| `src/client/input.js` | WASD/arrows (the only movement), Space jump, taps/clicks (for tools), wheel and pinch zoom, Q/E camera turns |
+| `src/client/discord.js` | `identify()`: Discord SDK auth if the URL has `frame_id`, otherwise dev identity (per-tab id in sessionStorage) |
+| `src/client/style.css` | Pixel-style HUD (Pixelify Sans font bundled via `@fontsource`, hard shadows, square borders) |
+| `server/server.js` | Express (`POST /api/token`, `GET /api/health`) + `ws` server at `/ws`. Rooms, roster, position relay |
+| `index.html` | Page shell: canvas, labels layer, HUD panels, time-of-day slider, map editor UI (`#editor`) |
+| `archive/village/` | Removed village models (`village3d.js`: cottages, fences, well, props, lanterns) and their pixel textures (`textures.js`). Not imported |
+| `archive/settlement-builder/` | The old building/RTS mode, removed "for now". Not imported. See its README |
+| `.env` (not committed) | `VITE_DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET`, optional `PORT`, `ALLOW_DEV_LOGIN` |
+
+## Endless worlds (mirror of `src/shared/endless.js`)
+
+- **The default world.** A room with no custom map, "New endless world" in singleplayer, and Create world → "Endless world" all play an endless world from a seed. Same seed, same world. Islands (generated, blank, edited) still exist.
+- **Pure per cell:** every cell's terrain and objects are a function of `(seed, ix, iz)`, so chunks line up at their borders and every player generates the same world locally. Cells use the island mapping (`x = ix - WORLD/2 + 0.5`), and `ix`/`iz` may be negative.
+- **Taller mountains:** inside mountain ranges (`range = smooth(0.63, 0.78, fbm /120)`; the craggy ridge share also only rises past 0.6–0.76) a broad ridged massif (`fbm /44`, cubed, × 0.62) is added. Levels above `PEAK_EASE` = 34 rise at 45%, so summits are rounded. `MAX_LEVEL` = 48. Typical peaks are about 20–23 units. About 10% of land is mountain (8+ high) and ~2% is 15+ high. **Mountain zones:** lush lower slopes, a thin rocky band, snowy tops. The snow line is `SNOW_H` 13.5 ± 1.5 (noise `fbm /11`), and rock covers the `ROCK_BAND` = 1.5 below it. In ranges (range > 0.3, height ≥ 5) forest grows where the forest noise is above `MOUNTAIN_FOREST_T` = 0.42 (vs 0.52 elsewhere). Mountain land (8+): about half grass/forest, a quarter snow; ~92% of summits (16+) are snowy. The island keeps rock 6.5 / snow 8.5. Trails get a snow dusting above 12.5 and rock sides above 11.5.
+- **Hiking trails (`K.TRAIL` = 8, endless only):** cells on contour bands of two slow noises (`fbm /38` and `/53`, about 2.6 cells wide, using a gradient-scaled threshold) where raw height ≥ `TRAIL_MIN` 4.5 and inside a mountain range (`range ≥ 0.2`), away from the camp.
+  - Trail height follows a smooth surface: bilinear interpolation of raw heights sampled every `TRAIL_GRID` = 8 cells, rounded to `STEP`. Fewer than about 1% of neighbouring trail steps exceed the 1.0 climb.
+  - About 3% of land is trail. A flood fill from the camp reaches the summits.
+  - Look: packed dirt with trodden patches and gravel, dusted with snow above 11.5. Column sides are rock above 7.5, dirt below.
+  - No trees or rocks grow on trails. Stone cairns stand beside them (3.5% of neighbouring land cells, decoration only).
+  - Area name "Mountain Trail", minimap colour `[204, 166, 112]`.
+- **Terrain:** the island's height formula without the island falloff. A slow continent noise (`fbm /260`) makes oceans: `e -= (1 - smooth(0.35, 0.49, c)) × 0.95`. A slow mountain noise (`/120`) raises the ridge share from 0.2 to 0.58 in ranges. Levels are capped at 24 (12 units). Typical mix: ~38% sea, 5% sand, 28% grass, 16% forest, ~7% rock, ~4% snow.
+- **Campfire:** the flat grass/forest spot nearest the origin (spiral search up to 700 cells). The clearing is applied inside the per-cell function, like the island.
+- **Deep forest:** lowland grass/forest with `fbm(/13) ≥ DEEP_T` (0.647, ~16% like the island), then the island's two smoothing passes, computed on a 2-cell margin so chunk borders match.
+- **Redwoods:** 2.1-cell spacing decided locally in two rounds (lowest `hash2(seed+913)` among close candidates wins; then again among the rest). About 0.15 redwoods per deep cell, like the island.
+- **Walk-under corners:** the earliest tree in row-major order around a vertex wins it (same result as the island's scan).
+- **Ruins:** at most one per 48×48-cell region (80% chance, up to 12 tries, 8-cell region margin, ≥ 16 from the camp). Discoveries count up without a total (`Ruins found: N`).
+- **Chunks:** `CH` = 16. `terrain()` is cached (LRU 2500) and `content()` is cached (LRU 220), at about 1 ms per chunk. `content()` also holds the path tables (`floor`, `water`, `blocked`) and claimed `corners`.
+- **World border:** `WORLD_LIMIT` = 30000 cells from the origin are blocked (keeps GPU float precision fine). The server clamps positions to it.
+- **Streaming (`WorldScene`):** chunks within `LOAD_R` = 50 units of the player load (nearest first, up to `LOAD_BUDGET_MS` = 5 ms per frame), and unload past `UNLOAD_R` = 74. `preload()` builds the spawn area before the first frame. About 45–60 chunks are loaded, comparable to one island. Each chunk is a `Group` with its terrain mesh and per-chunk instanced meshes. Fireflies use one global mesh (`MOTE_CAP` = 4096, `setMotes`). `WorldScene.live` lists the loaded flowers/reeds/trees for ambient life.
+- **Terrain height ring buffer** (`HT` = 256, cells indexed mod 256), read by terrain AO and the water shader (depth, shore foam). Each chunk writes itself plus a 1-cell margin. It must be wider than everything loaded at once: up to ~164 cells across (UNLOAD_R on both sides). At 128, chunks on opposite sides overwrote each other, so after walking away and back about 35% of nearby cells read another place's height, drawing shore foam on every tile edge (a white grid over the water) and wrong AO.
+- **Minimap:** a 96×96 window around the player, redrawn when you're 12 cells off its centre.
+- **Not editable:** the map editor works on islands only. It says so for endless worlds, and "Create & edit" is disabled for them.
+
+## Islands (mirror of `src/shared/world.js`)
+
+- **Two stages:** `generateWorld(seed)` builds a **base**, then calls `finishWorld(base)`.
+  - The base holds only what's hand-editable: `seed`, `heights`, `kinds`, the `camp` cell, `ruins` cells, `trees` (`{ix, iz, type: 'leafy'|'pine'|'redwood', s}`) and `rocks` (`{ix, iz, s}`).
+  - `finishWorld` derives everything else deterministically from `base.seed`: jittered positions, ruin pillars (seeded per spot), flowers (GRASS cells with hash in [0.07, 0.42) that are free of objects), walk-under trees, all foliage, and obstacles.
+  - It keeps `base.heights` and `base.kinds` by reference (no copy), which the editor relies on.
+  - Custom maps go through the same `finishWorld`, so they get the same lush detail.
+
+| Constant | Value | Meaning |
+|---|---|---|
+| `WORLD` | 96 | Island columns per side. One column = 1×1 world units. Column (ix,iz) is centered at `ix - 48 + 0.5` (endless worlds use the same mapping) |
+| `STEP` | 0.5 | Terrain heights are multiples of this (terraced look) |
+| `SEA` | 1.8 | Water surface height. Columns at 1.5 or below are underwater |
+| `TREE_SCALE` | 1.5 | Every tree's scale `s` is multiplied by this at generation, so models, trunk collision and leaf drops all grow together |
+| `MAX_PLAYERS` | 16 | Per room. 12 player colors, reused if needed |
+
+- **Height:** fbm value noise plus ridge noise, minus a radial island falloff (0.62–1.0 of the radius), then `pow(e, 1.6)` and rounded to `level × STEP` (max about 10). About 40% of the map is land.
+- **Ground kinds (`K`):** SEABED (height < SEA), SAND (≤ SEA + 0.3), GRASS, FOREST (pine woods: `isForest` = `fbm(/FOREST_SCALE 20, 3 octaves) > FOREST_T 0.52`, about 45% of lowland in big patches, avg ~1200 cells), ROCK (≥ 6.5), SNOW (≥ 8.5), and **PATH (6)** for cobblestones (still rendered by the terrain shader, but nothing generates it now), and **DEEP (7)** for deep redwood forest. The rock and snow thresholds were raised to make the island grassier.
+- **Campfire / spawn:** the grassy spot nearest the island center whose 5×5 area varies by no more than one step. Players spawn on a 1.6-unit circle around it, at an angle from a hash of their id.
+- **Campfire clearing:** the terrain within `VILLAGE_RADIUS` = 7 of the campfire is flattened to the camp height and set to GRASS. The next 2 cells blend back to the natural height in `STEP`s. Flower beds go on 22% of its grass cells. Trees, rocks and normal flowers are kept outside radius 8. There are no structures (the village was removed).
+- **Deep forest (`K.DEEP`):** after the camp clearing, lowland GRASS/FOREST cells (height ≤ 6, at least `VILLAGE_RADIUS + 6` from the camp) are ranked by `fbm(ix/13, iz/13)`.
+  - The top `DEEP_SHARE` = 16% become DEEP, so every island gets some. Two smoothing passes follow: cells with fewer than 3 deep neighbours revert to FOREST, and cells with 6 or more join.
+  - A typical island gets about 350–450 DEEP cells and about 55–65 redwoods.
+  - **Redwoods** (`world.redwoods`, separate from `trees`): 42% of DEEP cells try one, kept at least 2.1 cells apart, with ±0.1 jitter and scale `s` 0.82–1.06. A thick trunk obstacle (r 0.42·s) blocks its tile. 4% of DEEP cells get a mossy rock.
+  - No normal trees, flowers or tall grass grow there. Instead: 1–2 tufts per cell, ferns (70%, plus 30% extra), mushrooms (18%), bushes (4%) and fireflies (9%).
+  - Ruins may also sit in deep forest.
+- **Ruins:** no longer generated (removed at the user's request) on islands or in endless worlds. Ruins placed in the map editor still render and can be discovered (a ring of 8 pillars with an altar and spinning gem), and the "Ruins found" counter shows only on such maps.
+- **Exposed dirt (`K.DIRT` = 9):** meadow tiles where `fbm(/6, seed+404) > DIRT_T` (0.68) and a hash < 0.7 become dirt tiles, about 8–12% of meadow tiles in small clusters. The shader (`dirtPatch`) draws an irregular, texel-stepped blob of earth with a darker rim, pebbles and sprouts in the middle of the tile, with grass around it. No trees, rocks or flowers grow there, only a stray tuft at the edge (50%). Area name "Meadow". Map files accept kinds up to `MAX_KIND` = 12 (10 = `K.SOIL`, dug earth; 11 = `K.WOOD`, placed planks; 12 = `K.WOOD2`, planks turned 90°; `isWood(k)`).
+- **Decor:**
+  - Forest cells: 70% of cells are pine candidates, which grow a pine when the tree roll is below `PINE_CHANCE` = 0.28; the other 30% grow a leafy tree when the roll is below 0.5 (spacing rule below).
+  - **Pines are `PINE_SCALE` = 1.4× bigger** than other trees, and **keep `PINE_SPACING` = 2.2 cells apart**: a pine candidate (pine woods, and the small pines on rock) is kept only if no closer pine candidate has a lower `hash2(seed+915)`. Same in endless worlds.
+  - **Leafy (round) trees keep `LEAFY_SPACING` = 3.2 cells apart:** a leafy candidate is kept only if no closer leafy candidate has a lower `hash2(seed+914)`; a losing cell stays empty. Pine woods stay dense. Same rule in endless worlds.
+  - Grass: 5% tree, 7% rock.
+  - Rock cells: 3% small pine (below height 8, 0.8× the pine size, spaced like other pines), 14% rock.
+  - Sand: 7% rock.
+  - Grass and forest: 42% chance of 1–3 flowers.
+  - No decor within 4 cells of the camp or ruins.
+- **Foliage** (decorative, walk-through, none within 1.5 cells of the camp). A typical island has about 10–13k tufts and 3–4k tall-grass clumps.
+  - Grass tufts: 1–3 per grass cell (thinned at the user's request), 2–4 per forest cell, 30% of rock cells, and 35% of dry sand cells.
+  - Tall grass: 2–3 clumps per grass cell where `fbm(ix/7, iz/7)` > `TALL_GRASS_T` (0.63), which makes smaller meadow patches. Banks (`bankLife`) add tall grass on 35% of grassy waterside cells.
+  - Bushes: 3.5% of grass cells and 8% of forest cells. 35% of bushes have red berries.
+  - Ferns: 35% of forest cells.
+  - Mushrooms: 7% of forest cells, in clusters of 1–3.
+  - Reeds: 55% of sand or grass cells next to water. Half of them have a cattail.
+  - Fireflies (`motes`): 2.5% of grass cells and 5% of forest cells, floating 0.4–1.2 above ground.
+  - Each item is `{x, y, z, r}`, where `r` is a random number from 0 to 1 used for scale, rotation and tint.
+- **Walk-under trees:** after placement, each tree tries to move its trunk onto a random corner of its tile (±0.06 jitter). This works when the 4 tiles around that corner are inside the world, at or above `SEA`, rock-free, outside the camp clearing, within 2 × `STEP` of each other, and the corner isn't taken. The tree then gets `corner: true`, `y` = the lowest of the 4 heights, and its corner goes into `world.cornerBlocks` (vertex key `cellKey(vx, vz)`).
+  - Those 4 tiles stay walkable, so the player walks under the canopy. `PathFinder.stepOk` blocks only the diagonal step through that corner.
+  - Roughly 75% of trees end up walk-under. The rest stay centred on their tile and block it as before.
+- **Collision obstacles:** circles bucketed by cell, covering tile-centred trees only (r 0.18·scale), rocks (0.9·size), pillars (0.32), altars (0.55) and the campfire (0.45).
+
+## Tools and digging (mirror of `main.js` digging section, `character.js`)
+
+- **What's in hand is the selected hotbar slot** (see **Inventory**). `syncTool()` sets `game.tool`, an index into `TOOLS` (0 nothing, 1 shovel, 2 pickaxe, 3 dirt, 4 stone, 5 sand, 6 snow, 7 frog, 8 axe, 9 wood, 10 log, 11 workbench, 12 stick, 13 pebble, 14 berries), from `ITEMS[held].tool` or the block's id. It shows in the character's right hand (`toolGrip` on `armR`): tool models, or a small block in the block's colours. With an empty slot, clicks do nothing. `actAt` picks digging (tool) or placing (block).
+- **Using a tool:** with a tool selected, a click on a tile next to you (one of the 8 neighbours) digs it.
+  - A tile further away: the character walks (A* route, `setPath`) to the last tile before it, then digs (`pendingDig`, checked in `frame`). This is the only time a click moves the character.
+  - A movement key or switching tools cancels the walk's dig. An unreachable tile flashes the red marker with "Can't get there from here".
+  - Your own tile says "Step aside to dig here". With the empty hand or a block in hand, clicks do nothing.
+- **Hover outline** (`makeOutline` / `updateOutline`, mouse only): with a tool or block in hand, the tile under the cursor gets a box outline (`EdgesGeometry`, 2% inflated).
+  - Tool: the top block that would be dug.
+  - Block or workbench: a **see-through preview** (opacity 0.55, `ghostParts` in `main.js`) of what will be placed, turned the way R set it: Wood shows its planks (texture turned 90° for odd turns, like `K.WOOD2`), other blocks their colour, and the Workbench its model (`benchGeometry` from `world3d.js`) facing the way it will face. Where it can't go, a red box (fill opacity 0.18) instead.
+  - White when it works, red (`0xff6a5a`) when `digProblem` / `placeProblem` (the same checks the actions use) give a reason. Hidden over your own tile, with an empty hand, or while the inventory is open.
+  - The ray re-marches only when the mouse, camera or terrain (`digVersion`) changed. `Input.hover` tracks the mouse position (cleared on `pointerleave`).
+- **The swing** (`SWING_SECS` = 0.38): the arm winds up over the head and chops down, with a forward lean and a small squash on impact. The block comes out about 45% into the swing, with an `effects.impact` burst in the ground's colours.
+- **Rules (`digAt`):**
+  - **Shovel:** grass, forest, deep forest, dirt, soil, sand, trail, snow and path.
+  - **Axe:** wood blocks (and trees, see below).
+  - **Pickaxe:** rock, 2 hits per block (the first only cracks it; `digHits`).
+  - A wrong tool gets a hint ("That's stone: use the pickaxe (3)").
+  - You can't dig underwater, under a tile with an obstacle (tree trunk, rock, campfire), next to a walk-under tree's trunk corner, or below height 0.5. So trees never float or move.
+- **A dig** lowers the tile by one `STEP` (0.5).
+  - The new kind is `K.SOIL` (10, bare earth in the shader; area "Dug Soil"). Sand, snow and rock stay what they were.
+  - Below `SEA` the tile becomes SEABED and fills with water.
+- **Edit layer:** `world.setEdit(ix, iz, h, k, uh = -1, uk = 0)`, `world.under(ix, iz)` and `world.editsList()` → `[[ix, iz, level, kind]...]`, or 6 long with the under layer.
+  - **Under layer (two-layer columns):** placing blocks remembers the ground below them (`uh`, `uk`: its top height and kind). The terrain mesh carries it as the `aUnder` instance attribute, and the shader draws a column's sides below `uh` as that kind (with its own lip), so placing Wood on grass no longer turns the whole column to wood.
+    - **Placing:** keeps the existing under layer when stacking the same material. A different material on top makes the old top the new under layer, so deeper layers then show as it (only two layers are stored).
+    - **Digging:** taking the last placed block off restores the old ground kind (grass stays grass) and clears the under layer.
+    - Island saves (`encodeMap`) don't store it, so a reloaded island shows placed columns in one material.
+  - **Endless:** edits live per chunk (`editsByChunk`, attached to terrain chunks as `t.edits`). `H`/`kind` include them, while `content()` keeps placing objects and plants from the generated terrain (`HG`/`kindG`), so digging never makes trees or bushes pop up nearby. Dug cells simply have no plants, and the path tables use the dug heights. Only the dug cell's chunk content is invalidated.
+  - **Island:** edits write straight into `base.heights`/`kinds`.
+- **Refresh (`applyDig`):**
+  - `WorldScene.refreshCell`: endless rebuilds that chunk; the island updates one terrain column and hides plant instances standing on the cell.
+  - `PathFinder.refresh`.
+  - A minimap redraw (`miniDirty`).
+- **Placing blocks (`placeAt`):** with a block in hand, a click on a neighbouring tile (or a far one, walked to like digging) raises it one `STEP` and uses one item (`inventory.takeHeld`).
+  - Dirt places as `K.SOIL`, Stone as ROCK, Sand as SAND, Snow as SNOW. Below `SEA` it stays SEABED, so placing into water builds up the bottom (fill ponds, make bridges).
+  - Not on a tile with an obstacle, next to a walk-under trunk corner, where another player stands, or above `MAX_BUILD_H` = 24.
+  - Same swing, and the same edit layer, `dig` message and saving as digging.
+- **Chopping trees (axe):** with the axe in hand, a click near a tree's trunk on screen (`treeAt`: distance to the projected trunk segment, threshold `max(18, 260 / camDist)` px) chops it. Hover shows a white box around the trunk.
+  - Within `CHOP_REACH` = 1.95 of the trunk; otherwise the character walks over first (`pendingChop`).
+  - Hits: round trees and pines 3, redwoods 6 (`TREE_HITS`). Each swing bursts wood chips; the last one bursts leaves at the canopy, removes the tree, and gives **Logs** (`TREE_WOOD`: 3 round / 4 pine / 8 redwood). Logs are a crafting material (see **Inventory**) and stack into log piles (below).
+  - **Removal (`world.removeTree(ix, iz)`, keyed by the tree's own cell):**
+    - **Endless:** `choppedByChunk`. `content()` still decides everything from the generated world and only leaves the chopped tree out when emitting it (its obstacle and walk-under corner go with it), so neighbours never move or pop in. Its chunk is rebuilt.
+    - **Island:** the tree leaves `base.trees` (so saves keep it gone), `world.trees`/`redwoods`, its obstacle and corner. `WorldScene.hideTree` zeroes its instances, and `PathFinder.refresh` also recomputes the cell's blocked flag.
+  - `applyChop` refreshes the scene, paths and outline. Synced with the `chop` message and `welcome.chops`; endless saves store `chops`.
+- **Rotating with R (`rotateKey`, `game.rot` = quarter turns):**
+  - Holding **Wood**: R switches the plank direction. Odd turns place `K.WOOD2` (12), the same plank block with its texture turned 90° (`p.yx` in the shader; vertical boards on the sides). The held label shows "planks east-west / north-south (R)".
+  - Holding a **Workbench**: R adds quarter turns to its facing (it still starts facing you).
+  - Hovering a **placed workbench** (anything in hand): R turns it in place, synced with a `bench` message (`applyBench` updates an existing bench when the rotation differs).
+- **Gathering: bushes and pebbles** (`main.js` "bushes and pebbles" section):
+  - **Bush, left click (`breakBush`):** with anything (or nothing) in hand, a swing breaks the bush with a leaf burst and gives 1–2 Sticks, plus 1–2 Berries if it still had berries.
+  - **Bush, right click (`onRight` → `#ctx-menu`):** a small menu with "Search for berries" (`searchBush`). A berry bush gives 1–3 Berries and loses its berries; others say "No berries on this bush". `Input.onRight` gets right clicks (they no longer count as taps).
+  - **Pebbles (`pickPebble`):** loose pebbles lie on 3% of grass, forest, deep forest and dirt cells and 6% of sand, rock and trail cells (`pebbleChance`, `world.pebbles` / chunk `pebbles`; a flat stone with a smaller one beside it, LOD "small"). A click picks one up as a Pebble.
+  - **Reach:** `GATHER_REACH` = 1.9; further away the character walks next to it first (`inReach`, `game.pendingAct`, cancelled by movement keys or another click). The cursor turns into a hand over bushes and pebbles.
+  - **Picks:** all three are "picks" `[ix, iz, t]` (`PICK`: 0 bush broken, 1 berries picked, 2 pebble taken; `pickKey = cellKey × 4 + t`). `world.setPick` / `pickList`; `applyPicks` leaves picked things out of the generated lists (endless: per chunk in `content()`, then the chunk is rebuilt; island: lists are edited and `WorldScene.hideTree` / `hideBerries` hide the instances). Synced with the `pick` message and `welcome.picks`; saved as `picks` (endless saves, or an extra field on island saves).
+- **Log piles** (`placeLog` / `takeLog` / `applyPile` in `main.js`, from the user's log-stack reference): a Log (`place: true`) is placed on a neighbouring tile as a lying log; more Logs on the same tile stack up 3 on the ground, 2 in the dips above, 1 on top (`PILE_MAX` = 6, then "That pile is full").
+  - **Data:** `world.piles`: Map(`cellKey` → `[ix, iz, r, n]`), r 0 = logs lying along x (east-west), 1 = along z. **Walkable:** you stand on top of a pile (`PathFinder.floorAt` adds `pileTop(n)` from `world.js`: 0.33 for 1–3 logs, 0.62 for 4–5, 0.90 for 6), so you step or hop onto it like a block. Blocks and digging are refused on a pile's tile ("Take the logs off first"). A new pile can't start in water or where a block couldn't go (`logProblem`).
+  - **Look (`WorldScene.setPiles`, `logGeometry`, `LOG_SLOTS`, `logOffset` in `world3d.js`):** one instanced mesh of logs rebuilt on every change. A log is an 8-sided trunk (radius 0.165, 0.96 long) with streaky bark facets and pale cut ends with a darker growth ring. A full pile is about 0.9 high. Casts shadows.
+  - **R:** sets the direction of a new pile (`game.rot` % 2); with the mouse over a placed pile, R turns that pile.
+  - **Preview:** the hover box is 1 unit high with a see-through log where the next one will lie.
+  - **Taking back:** an axe click on a pile (`pileAt`, within 1.6 units) takes the top log off in one swing. Axe clicks check benches, then piles, then trees.
+  - **Sync and saves:** the `pile {ix, iz, r, n}` message (n 0 = gone) and `welcome.piles`. Endless saves store `piles`; island saves get an extra `piles` field (`cleanPiles`).
+- **Workbenches** (`placeBench` / `takeBench` / `applyBench` in `main.js`): a crafted Workbench item (`place: true`) is put on a neighbouring tile (far tiles are walked to, like digging), its front facing you.
+  - **Data:** `world.benches`: Map(`cellKey` → `[ix, iz, rot 0..3]`), on islands and endless worlds. `PathFinder.passable` treats a bench tile as blocked, so you can't walk, dig or build there.
+  - **Rules (`benchProblem`):** not in water, plus the block-placing checks (`placeProblem`). The hover outline is a 1-unit-high box.
+  - **Look (`WorldScene.setBenches`, `workbenchGeometry` in `world3d.js`):** one instanced mesh rebuilt on every change. An original model after the user's reference: a desk with a plank back board and pinned blue and white notes, a two-drawer cabinet on the right, an open shelf on the left, and a cutting grid, offcuts, a stone, a green roll and blue tins on top. Vertex-coloured boxes merged into one geometry; fits one tile; casts shadows.
+  - **Picking up:** an axe click on it (`benchAt`, within 1.6 units) takes it back as an item in one swing. Axe clicks check benches before trees.
+  - **Sync and saves:** the `bench` message and `welcome.benches`. Endless saves store `benches`; island saves get an extra `benches` field next to the encoded map (`cleanBenches`).
+  - Decoration only for now: crafting happens in the inventory screen, not at the bench.
+- **Wood blocks:** Wood places as `K.WOOD` (11, plank texture in `TERRAIN_GLSL`: 4-texel planks with seams, staggered end joints, lit edges and the odd nail; area "Wooden Floor"). Only the axe breaks it (one hit, gives Wood back); the shovel and pickaxe say "That's wood: use the axe".
+- **Saving:** singleplayer on a saved world (`game.saveName`) writes the digging back to the save at most every 1.5 s. Endless saves get `edits` (`endlessMap(name, seed, edits)`, `cleanEdits`, max `MAX_EDITS` = 20000); island saves are re-encoded from the dug base.
+- **Multiplayer:** see the `dig` message. Other players see the swing (from the `dig` broadcast) and the held tool (the tens digit of the `a` code).
+
+## Inventory (mirror of `src/client/inventory.js`)
+
+- **Layout:** like the classic block-game inventory. 36 slots: 0–8 are the hotbar (`#hotbar`, bottom centre, keys **1–9** or click) and 9–35 the bag. The held item's name shows above the hotbar (`#held-name`).
+- **Inventory screen:** **I** or **Tab** opens it (`#inventory` overlay: the 3×9 bag above the hotbar row). **I** or **Esc** closes it (Esc closes the inventory before it would open the menu). Movement keys are ignored while it's open.
+  - Left click: pick up a stack, put it down, merge into the same item (up to the stack size), or swap.
+  - Right click: pick up half a stack, or put down one item.
+  - Shift-click: move a stack between the hotbar and the bag (topping up matching stacks first).
+  - The stack held by the mouse follows the pointer (`#inv-cursor`). Closing puts it back.
+- **Items (`ITEMS`):** `shovel`, `pickaxe` and `axe` (stack 1, have `tool`), `log` (stack 64, from trees, crafting material, placeable as log piles), `stick` (from bushes), `pebble` (picked up) and `berries` (from bushes), all stack 64, `workbench` (stack 16, `place`), `wood` (stack 64, `block`, plank icon via `blockArt({ planks })`, crafted from logs), `frog` (stack 8, `throwable`; see frogs in **Sky and ambient life**), and blocks `dirt`, `stone`, `sand`, `snow` (stack 64). Icons are original 16×16 pixel art: the tools are drawn from string grids (`TOOL_PALETTE`), the blocks are generated by `blockArt` (outline, lit and shaded edges, speckles; dirt has a grass band). Each is drawn once to a data URL and shown at 32 px with `image-rendering: pixelated`.
+- **Crafting (`RECIPES`):** a "Crafting" row in the inventory screen (`#inv-craft`) has one button per recipe, showing ingredients → result, dimmed when you lack the ingredients. A click crafts once (`Inventory.craft`: takes ingredients from the bag first, undone with "Your inventory is full" if the result doesn't fit). Recipes: 2 Sticks + 1 Pebble → Shovel; 2 Sticks + 2 Pebbles → Axe; 2 Sticks + 3 Pebbles → Pickaxe; 1 Log → 2 Wood; 4 Logs → 1 Workbench.
+- **Starting kit:** nothing. Tools are crafted (see Crafting); an empty inventory shows the hint "Break bushes for sticks and pick up pebbles, then craft tools (I)". Older saved inventories keep their tools.
+- **Bag button (`#inv-open`):** a pixel-art bag at the end of the hotbar toggles the inventory screen, same as I.
+- **Drops:** each broken block goes into the inventory (`DROPS`: sand → Sand, rock → Stone, snow → Snow, wood → Wood, everything else the shovel digs → Dirt; trees give Logs), hotbar first. When it's full: "Your inventory is full" (the block still breaks).
+- **Saving:** `localStorage['settleon.inv.<key>']`, where the key is `save:<name>` for a saved singleplayer world or `room:<room>` in multiplayer (a new unsaved world starts fresh). Saved at most every 0.8 s as `{sel, slots: [[id, count] | 0, ...]}` and validated on load (`fromJSON`).
+- Blocks have `block: true` and can be placed (see **Tools and digging**).
+
+## Player movement: half-tile steps (mirror of `src/client/controller.js`)
+
+The character rests on **a tile's centre or its edge** (or corner) and moves **half a tile** at a time (at the user's request, so you can walk right up to the edge of a block).
+
+- **Positions** are kept in half tiles (`qx`, `qz`): odd = a tile's centre, even = the edge between two tiles. A centre touches one tile, an edge two, a corner four (`PathFinder.halfTiles`).
+- **On an edge you stand on the highest tile it touches** (`halfFloor`), so you can stand at a block's rim and look over. Edges are only reachable from the high side, or from below when the climb is within the step-up limit. Swimming only when every touched tile is water (`halfWater`). Every touched tile must be open, and corners with a walk-under trunk are refused (`halfOpen`). `halfStepOk` applies the same climb and drop limits as whole tiles, with no corner cutting.
+- `ctrl.ix, iz` is the tile the character stands on (the highest one it touches); digging, placing, routes and tool reach still use it. `ctrl.touching()` lists the touched tiles, and you can't place a block on any of them ("You're standing there").
+- **Routes** (`setPath`, walking to dig, chop or gather) go to the current tile's centre first when on an edge, then centre to centre in half steps, and still end exactly on a tile centre.
+
+| Setting | Value |
+|---|---|
+| Walk / run / swim speed | 3.2 / 5.6 / 1.8 tiles/s (a half step takes half as long). Diagonals take √2 longer |
+| Allowed step | 8 directions, using `PathFinder.stepOk`: up ≤ 1.25 (`MAX_UP`, raised a quarter from 1.0 at the user's request), down ≤ 3.0, target not blocked. Diagonals need both side tiles passable and steppable (no corner cutting) |
+| Height change | Steps within `STEP` ease smoothly. Bigger ones take 60% longer (per half step) with a hop arc of 0.3 + 0.6 × rise |
+| Landing impact | Finishing a step that dropped ≥ `IMPACT_DROP` (2 × `STEP` = 1.0) onto dry ground calls `ctrl.onLand(drop, cell)`, which spawns `effects.impact`. More drop gives more and faster puffs. Other players' impacts are detected from snapshots: an AIR state that ends 1.0+ below where it started |
+| Swimming | Water tiles (ground below `SEA - 0.55`) put the character at that floor height, swimming at swim speed |
+| Standing jump | Space while idle: a 0.45s hop, 0.55 high. Not available while swimming |
+| Run | While Shift is held |
+
+- **Keyboard:** WASD/arrows step in **screen** directions and keep stepping while held. `screenToGrid()` turns them by the camera yaw and snaps them to the nearest of the 8 grid directions (at yaw 0, W = north, −z).
+  - Two keys give a diagonal. If the diagonal is blocked, it tries each straight direction.
+  - A blocked step just turns the character to face that way.
+- **No tap-to-go for the player** any more. `setPath(cells)` (`cellKey`s, decoded with `keyX`/`keyZ`) is still there for tests.
+- **Spawn:** the nearest open tile to `spawnPoint()`.
+- **Network:** position is sent as continuous `x, y, z` (mid-step positions included), so remote players interpolate smoothly. Animation states (`ANIM`): IDLE 0, WALK 1, RUN 2, AIR 3 (hops), SWIM 4.
+
+## Camera and controls
+
+- **Camera:** ¾ view like a cozy farming game, at **fixed angles** around the player (8 directions, 45° apart).
+  - Perspective, FOV 35. `CAM_PITCH` = 0.66 rad (~38°) above the horizon. `cam.yaw` 0 looks north (−z); `placeCamera()` puts the camera at `(sin yaw, cos yaw) × cos(pitch) × dist` from the focus.
+  - **Turning:** Q/E (`Input.takeRotate()`) turn 45°, easing `yaw` toward `yawTarget` at rate 10/s. There's no free rotation: the user wants fixed angles only, so there's no drag or twist.
+  - The minimap draws a short tick from the player in the view direction.
+  - Default distance 9.5, zoomable 6–34. Zooming out also pushes the fog back, widens shadow coverage (±22 to ±46) and fades in the cloud layer.
+  - The camera follows the player smoothly. It never moves around obstacles: when the player is hidden, the silhouette shows instead.
+- **No click-to-move** (removed at the user's request: movement is WASD/arrows only). Clicks only use the held tool (`onTap` → `useToolAt`). The ground point comes from marching a ray from the camera to the ground or water surface. The one exception: clicking a far block with a tool walks there to dig it (see **Tools and digging**), using `PathFinder.route` and `GridController.setPath`.
+- **Keyboard:** WASD/arrows step tile by tile in screen directions (relative to the camera rotation). Shift runs, Space hops, Q/E turn the camera to the next fixed angle, 1–9 pick a hotbar slot, I/Tab (or the bag button at the end of the hotbar) open the inventory, R rotates Wood planks and workbenches, right-click a bush for its menu.
+- **Zoom:** wheel or two-finger pinch. There is no on-screen joystick or jump button any more.
+
+## Character (mirror of `src/client/character.js`)
+
+- **Proportions:** chibi, about 0.95 tall. The head is 0.46×0.4×0.4 on a 0.26-wide torso, with stubby arms and legs.
+- **Face:** tall dark eyes with a white sparkle, set low on the face, plus pink blush and a tiny mouth.
+- **Blinking:** every 2–5 seconds.
+- **Look, picked from an FNV hash of the player id:**
+  - skin: 5 tones
+  - hair color: 8 options
+  - style: `bangs`, `tuft`, `bow` (player color), `strawhat`, `beanie` (player color)
+  - The shirt is the player color.
+- **Animation** (cartoon style, deliberately **exaggerated**; the user asked for it):
+  - **Springs:**
+    - A squash spring (`sq`, k 260, c 13) is kicked by every footfall (−3.8 walking, −5 running), a jump start (+5.5, stretch), a landing (−9, a big squash) and idle hops. Squash is clamped to 0.62–1.35.
+    - The body keeps its volume: y = sq × stretch, x and z = 1/√y. The eyes squeeze shut when sq < 0.8.
+    - A lean spring (k 90, c 6) tilts forward 0.15 walking and 0.34 running, and overshoots backwards when you stop.
+    - The head lags behind lean changes (`headX` spring).
+  - **Walk/run cycle:**
+    - A snappy hop each step (`|sin|^0.6`, 0.12 walking, 0.17 running).
+    - A waddle (roll 0.14 / 0.09) and hip twist (yaw 0.16 / 0.22). The head counter-tilts and counter-turns.
+    - Legs swing ±1.05 / ±1.35 and arms ±1.3 / ±1.7, with arms flaring out on each swing.
+    - Phase speed is 7 + 2.4 × speed.
+  - **Idle:** big slow breaths (±3.5%), looking around (layered sines on the head's yaw, ±0.28+), a slight sway, and a happy little hop with arms up every 5–10s.
+  - **Air:** legs tucked, arms thrown up and flailing (sin 22 Hz), a light lean and a wobbly head.
+  - **Swim:** a big doggy paddle (arms −1.4 ± 1.0), kicking legs, body roll ±0.16, forward lean 0.25.
+  - dt is capped at 1/30 so the springs stay stable. Remote players animate the same way from their network `a` state.
+- **See-through canopies:** tree canopies open up around the local player.
+  - Trees use `seeThroughMaterial` (`world3d.js`). Its fragments in front of the character (view depth < player depth − 0.25) and within a screen circle of about 0.95 world units around it are discarded. The circle is fully open in the middle, with a 4×4 Bayer-dithered edge (smoothstep 0.55–1.0 of the radius).
+  - `setSeeThrough(camera, pos, rtW, rtH)` updates the uniforms every frame from `main.js`.
+  - Shadows use the depth material, so tree shadows stay whole.
+  - Only the local player opens canopies.
+- **Silhouette** (for hills, ruins and anything else that isn't a tree): visible meshes write stencil = 1. A twin `MeshBasicMaterial` (opacity 0.75, color 15% toward white, `depthFunc: GreaterDepth`, stencil ≠ 1, renderOrder 20) draws only where the character is hidden behind scenery.
+  - This needs the depth-stencil render target in `pixelfx.js` (`DepthStencilFormat`, `UnsignedInt248Type`).
+
+## Visual style (`pixelfx.js` + `world3d.js`)
+
+**Render pipeline (`PixelRenderer.render`):**
+
+1. The scene renders into a low-res HDR target (HalfFloat, depth-stencil). 1 art pixel = 3 CSS px, or 2 below 700px wide, when close up.
+   - **Zoom-dependent pixel size:** `PixelRenderer.setZoom(dist)` (called every frame) shrinks the art pixel by 1 past camera distance 15 (`ZOOM_PIXEL_STEPS` = [15], minimum 1, ±1 hysteresis), so zooming out eases the pixel filter from 3 to 2. The second step down to full resolution (size 1, past 25) was removed for performance. The targets are rebuilt only when the level changes. Bloom spread is scaled so the glow stays the same size on screen.
+   - Pixel size 1 (full canvas resolution) now only happens on narrow screens zoomed out.
+2. **Bloom:** a bright-pass with a 4-tap downsample to half resolution (threshold 1.15, soft knee 0.3), then two separable 9-tap gaussian blur iterations (radius 1.4, then 2.8), with linear filtering.
+3. **Final pass:**
+   - **Tilt-shift** (`TILT`): a sharp band of ±0.16 screen height around the centre (where the player is), then a blur that ramps in over the next 0.32. It's a 12-tap golden-angle disc of up to `radius` 1.8 low-res texels × strength, scaled so it looks the same at any pixel size. Outlines fade out where it's blurred.
+     - Strength is `TILT.strength` (0.6) × 0.7 up close, rising to × 1.3 when zoomed out (`pixel.setTiltShift` from `main.js`). The user wants it **subtle**.
+   - Outlines: the second derivative of 1/viewZ, darkening by ×0.55 when the relative jump is above 0.03. The sky is skipped.
+   - Bloom is added at strength 0.5.
+   - ACES filmic tone map.
+   - Grading: exposure 0.95, saturation 1.02, warmth 0.012, a soft lavender shadow tint (0.025), vignette 0.28.
+     - This is lusher than the brief "toned down" pass (0.88/0.88), to match the vibrant village reference.
+   - Convert to sRGB, then quantize to 18 levels per channel with 4×4 Bayer dithering. 18 levels keeps the dither grain subtle. The sky is not dithered.
+4. CSS upscales the canvas with `image-rendering: pixelated`.
+
+- **Tuning knobs:** `BLOOM`, `TILT`, `GRADE`, `PIXEL_SIZE`, `ZOOM_PIXEL_STEPS`, `COLOR_LEVELS`, `OUTLINE_*` in `pixelfx.js`. `SKY`, fog (38–75) and the light settings in `world3d.js`.
+  - If the image looks washed-out or too yellow, lower `exposure`, `saturation` or `warmth` first.
+- **Lighting:**
+  - The sunlight is split across two lights:
+    - The main sun (`0xffe4bd`, 1.5) casts all shadows except clouds.
+    - A **cloud sun** (1.6, same direction) casts only cloud shadows. The total stays 3.1, so sunny ground is unchanged, and a cloud shadow removes about half the direct light: clearly visible but not black. Raise the cloud sun's share for darker cloud shadows.
+    - **Layers** (Three.js uses a shadow camera's own layers whenever a non-zero layer is set):
+      - 0: normal scenery. Seen, and casts through the main sun.
+      - 2: clouds. The main camera enables layer 2 to see them; they cast only through the cloud sun (shadow camera layers 1 + 2).
+      - 31: shadow-only casters for the main sun (shadow camera layers 0 + 31): the low-detail tree twins.
+      - 1: shadow-only casters for the cloud sun: the low-detail redwood twins, so the deep forest stays dark.
+  - The sun offset (16, 21, 11) is a bit low, for longer shadows.
+  - A cool hemisphere fill (`0xbcd7ff` sky, `0x6b5a48` ground, 1.35), so shadows read slightly blue.
+  - Hard `BasicShadowMap` shadows, `SHADOW_MAP` = 1024² (cloud sun 512²), covering ±22 units around the player (up to ±46 zoomed out), snapped to texels. 2048² filled about 40× more pixels than the scene itself, and 1024² still gives more shadow texels per unit than art pixels at normal zoom.
+- **Things that bloom:**
+  - HDR colors: campfire flames (MeshBasic ×2.2 to ×1.4), fireflies (`Color(2.6, 2.4, 0.9)`), ruin gems (emissive ×3.5).
+  - Brightly lit snow and sand, and water sparkles.
+  - The campfire point light runs at about 4.5 with flicker.
+- **Terrain texture (`TERRAIN_GLSL`):** detail is generated procedurally from world position at 16 texels per unit. Each column carries `aKind` and `aTop` as instanced attributes.
+  - Grass and forest (`grassTop`): matches the user's reference grass tile.
+    - A softer mid-green base (sRGB 0.43, 0.61, 0.27; toned down at the user's request from 0.42, 0.67, 0.21) with soft, **blocky blotches**. Two octaves of value noise, sampled at texel-snapped positions (16 per unit), are banded into 4 tones: brightest (n > 0.68, ×1.18), light (> 0.57, ×1.08), base, and darker (< 0.29, ×0.88).
+    - The blotches flow across tile borders, with no per-tile checker.
+    - Keep it low-contrast and clean. The user found earlier per-texel noise "rough".
+    - Forest tiles use a slightly deeper green.
+    - Sides (`grassSide`): grass hangs over the edge as uneven strands 1–2 texels wide.
+      - Strands are 2–4 texels long; 22% get +2–4 texel drips.
+      - The top row is sunlit (×1.14), the body is mid green, the tips are darker (×0.7), with a few highlight pixels.
+      - Each tip has a dark shadow texel under it, and a few green sprouts dot the dirt below.
+      - The dirt is flat with sparse 2-texel pebbles on a 6×6 grid.
+  - Every column gets a ±1.5% tint.
+  - Rock: strata bands, with mossy patches on top.
+  - Snow: a snow lip over rock.
+  - Sand: speckled.
+  - Colors are written in sRGB and converted with `pow(2.2)`.
+- **Terrain AO (`terrainAO`):** reads a WORLD×WORLD float `DataTexture` of column heights.
+  - Tops darken (up to −38%) near the edges and corners of taller neighbours.
+  - Walls darken (−22%, within 0.3 of the bottom) where they meet lower ground. Stronger values turned short 0.5 walls into dark slivers.
+  - Both are stepped at 1/16 texel for a pixel-art look.
+- **Water:** `MeshPhongMaterial` (shininess 70, warm specular), a 400×400 plane that follows the player. Its normals are perturbed by sine ripples snapped to an 8-per-unit grid, which gives pixel sparkles that catch the sun and bloom.
+  - **Colour and transparency from depth:** the shader reads the terrain height ring buffer (`uHeights`) under each pixel. Shallow water is light turquoise and see-through (alpha 0.52); deep water is blue and more solid (0.74).
+  - **Depth** is blended between cell centres (texel-snapped), so shallows fade into deep water without tile edges.
+  - **Open water:** where depth > 0.45 (full at 0.9) the water turns deep blue (alpha 0.88) and the same caustic ripples are toned down to 32% strength. The user found separate ocean wave bands weird, so don't bring them back.
+  - **Pixel caustics** everywhere (full strength in shallows), from the user's water reference: drifting cellular (Voronoi) noise snapped to 10 texels per unit, with slightly wobbly borders. Cell borders are bright light-blue lines (F2−F1 < 0.085) with a softer band inside (< 0.19), and each cell's interior is one of three blue shades.
+  - **Shore foam:** a stepped white line along edges that touch land, ebbing in and out.
+  - The seabed (`k == 0` in `TERRAIN_GLSL`) is tinted teal, darker deeper down, so everything underwater reads as underwater.
+- **Underwater and ponds (`waterLife` in `world.js`, shared by islands and endless worlds), per SEABED cell:**
+  - Seaweed (30% of cells, 1–3 clumps): three ribbons scaled to 55–95% of the depth, swaying gently.
+  - Mossy seabed rocks (7%): decoration only, no collision.
+  - Reeds and cattails standing in the shallows (50% of shore cells with depth ≤ 0.45, 1–2 clumps), with their own scale `s` so they poke out of the water.
+  - Lily pads (32% of cells with depth < 1.1 and land within 2 cells, 1–3 pads): notched discs that bob with the water (`bobMaterial`). 25% have a pink or cream flower.
+  - **Lush banks (`bankLife`):** dry land within 2 cells of water gets a second reed clump at the very edge (45%), and on grass/forest 2–3 tall grass clumps (60%), ferns (25%) and the odd bush (6%).
+  - Lists: `world.lilies`, `seaweed`, `seaRocks` (also in endless `content()`). All are LOD "small" stuff.
+- **Leafy trees and bushes (`trees3d.js`)**, modeled on the user's pixel-art tree reference:
+  - Trunk: an S-curved tapered tube (radius 0.16 → 0.075, 0.95 × `LEAFY_TALL` (1.6) ≈ 1.5 tall in base units; the canopy is lifted by `LEAFY_LIFT`, and falling leaves start that much higher), purplish-brown bark (`BARK`) with spiral dark streaks and sunlit highlights, plus 3–4 flared roots.
+  - Foliage in separate clusters: a crown (radius ~0.5) on top and 3–4 side clusters (~0.3) on branches at 0.7–1.0 height.
+  - Each cluster is an icosahedron core (detail 1 for performance, one band per facet) covered with **rounded** leaf cards (~480 × rx² per cluster). Each card is a 6-point oval (width 0.8 × length), slightly cupped, drooping a little like shingles. Cards have a single outward face (a 4-triangle fan) and normals tilted up. The user found pointed diamond leaves too sharp.
+  - Hard color bands (`LEAF_BANDS`): deep teal underneath → greens → pale yellow-green only on sunlit tops. Keep the top band rare, or the canopies wash out and bloom.
+  - 4 seeded shape variants (`TREE_VARIANTS` in `world3d.js`), each an instanced mesh with random yaw and a ±8% tint. Bushes use the same cluster style. Pines (`PINE_VARIANTS` = 3) are conifers: a straight trunk with roots and 5 tiers of flattened rounded-leaf clusters (radius 0.5 → 0.12, from height 0.54 up to 1.45), in slightly cooler bands.
+- **Cobblestones (`cobble` in `TERRAIN_GLSL`):** staggered pale stones with grass gaps, for PATH cells. Unused since the village was removed.
+- **Grass clumps (`leafClumpGeometry`):** fluffy mounds of pointed triangle leaves leaning outward, with a few upright inner leaves.
+  - Vertex colors go from deep green at the base (`LEAF_DARK` 0x24501c) to a soft yellow-green at the tips (`LEAF_TIP` 0xa9c862, toned down from lime). Inner leaves stay darker, which gives each clump depth.
+  - All normals point up, so the lighting is flat and the painted gradient reads like pixel art.
+  - Each leaf is emitted with both windings and `FrontSide`. Using `DoubleSide` would flip the up-normal on back faces and render them almost black.
+  - Tufts: 10 leaves, 0.2 tall. Tall grass: 16 leaves, 0.34 tall.
+- **Wind:** tufts, tall grass, ferns, reeds and flowers use `swayMaterial`, which offsets vertices by their height times a sine of time and instance position.
+  - `swayMaterial` also writes stencil = 1, so foliage covering the character does **not** trigger the see-through silhouette. Grass just hides the legs naturally.
+
+## Deep forest darkness
+
+- **Real shade:** redwood instances are also on **layer 1**, so their canopy blocks the cloud sun as well as the main sun. Under the canopy only the sky fill reaches the ground, so it's dark even at noon.
+  - The sun sits 70 units from its target and both shadow cameras reach `far` 200, so 20+ high canopies still cast shadows.
+- **Mood while inside:** `WorldScene.deep` is the share of DEEP cells in the 7×7 around the player (full at 30), smoothed over ~0.7s. `applyDarkness()` then:
+  - dims the hemisphere fill by up to `DEEP_DIM` = 45%;
+  - treats firefly glow and firefly lights as night (`max(timeNight, deep × 0.85)`).
+- **Cutaway** (`redwoodMaterial`, `CUTAWAY`): redwood fragments higher than 2.4 above the player inside a 3-unit-wide corridor from the player to the camera are discarded. Outside the corridor the allowed height rises 1.6 per unit, with a 1-unit Bayer-dithered edge.
+  - So only trees between the camera and the player open up, and the forest beyond stays tall. Shadows use the depth material, so they keep the full canopy.
+  - `setSeeThrough()` also sets the corridor uniforms each frame.
+- **Ground:** the `deepTop` shader gives dark moss blotches with patches of red needle litter. Sides use a darkened `grassSide`.
+- Area name "Deep Forest". Minimap colour `[34, 74, 40]`.
+- **Clouds were raised** to y 16.5–18 (above the redwood tops) and fade in for zoom 23–30.
+
+## Performance
+
+- **Chunked instancing:** `WorldScene.chunkInstances()` runs after the world is built. It splits every static `InstancedMesh` with 64+ instances (trees, grass, flowers, rocks, bushes...) into `CHUNK` = 16×16-cell pieces with their own bounding spheres. The camera and the shadow pass then skip chunks outside their view. The terrain, fireflies, and ambient and effect meshes (which update every frame) are not chunked.
+  - Anything added later that animates its instance matrices must be built after `chunkInstances()` or added to its skip list.
+- **Shadow casters:** trees, rocks, ruins, bushes, terrain and characters cast shadows. Grass tufts, tall grass, ferns, reeds and flowers don't.
+  - **Trees cast from their low-detail twins only** (islands and endless worlds): the detailed mesh has `castShadow = false`, and the twin sits on shadow-only layer 31 (+1 for redwoods). In far endless chunks `updateLod` also adds layer 0 to show the twin and hides the detailed mesh. Shadow-pass triangles went from about 1.06M to 0.48M per frame at normal zoom.
+  - **Measured (headless SwiftShader, so relative only):** normal zoom 726 → 578 ms/frame and 1.63M → 1.05M triangles. The zoomed-out view went from not finishing a measurement to about 1.1 s/frame.
+- **Level of detail (endless worlds):** each chunk's tree meshes have hidden low-detail twins (`leafyTreeGeometry(v, true)` etc. in `trees3d.js`: 18% of the leaf cards, icosahedron detail 0 cores, coarser trunk tubes, about 80% fewer triangles, same shapes because leaves use their own seeded stream). `WorldScene.updateLod` shows them in chunks more than `TREE_LOD_R` = 20 units from the player, and hides grass, flowers, ferns, reeds, berries and mushrooms past `SMALL_R` = 30. Zoomed out this draws about 57% fewer triangles (e.g. 3.8M → 1.65M, shadow casters 2.9M → 1.3M). Islands don't use it yet.
+- **Budget:** a tree is about 1.7–1.85k triangles, and an island has about 500–700 trees. Leaf cards are now most of that, so lower `leafCluster` density first if trees get too heavy.
+- **Zoomed all the way out** (pixel size 1) is the most expensive view.
+
+## Time of day
+
+- **Slider:** a bottom-right HUD panel (`#time-panel` in `index.html`) shows the clock and a slider from 0 to 24 h in 15-minute steps, over a night → dawn → day → sunset → night gradient track.
+  - The setting is **local only** (not synced between players). It's remembered per browser in `localStorage` (`settleon.time`).
+  - `?time=N` in the URL sets the starting hour, for screenshots. The default is 10:00 (`DEFAULT_TIME`), which matches the original daytime look.
+  - The slider gives up focus after use and ignores keys, so WASD and arrows keep moving the character.
+- **`WorldScene.setTimeOfDay(h)`** blends the `DAY_KEYS` keyframes (0, 4.5, 6, 8, 10, 15.5, 17.5, 19, 20.5, 24): sky and fog colour, sun colour and total intensity (split 1.5 : 1.6 between the main sun and the cloud sun), hemisphere sky, ground and intensity, and a cloud tint (`uTint`).
+- **Shadow depth (`SHADOW_DEPTH` = 0.25):** this share of the hemisphere fill is moved into the main sun (× 1.2), so sunlit areas keep their brightness and shaded areas get darker. Raise it for darker shadows.
+- **Sun path:** the sun rises in the east (+x) at 6:00, crosses the south (toward the camera) and sets in the west at 18:00. Direction is `(cos a, max(0.18, sin a), 0.45)`.
+  - At night (before 5:45 or after 18:15) the same lights become a cool moon (`0x8ea6ff`) on its own arc, with a minimum height of 0.35.
+  - **Nights are dark on purpose** (the user wants players to rely on lights): the moon is 0.22, the hemisphere fill 0.26 (`0x36426e` sky, `0x0e0e16` ground), and the sky is `0x05070f`–`0x0a0d1e`. Shapes stay faintly visible; lanterns, the campfire and fireflies do the rest.
+- **Lanterns:** at night every character carries a lantern in the left hand (`setLantern` in `character.js`: dark cap and base around an HDR glow `Color(2.6, 1.7, 0.6)` that blooms, held out a little when idle).
+  - Real light comes from a fixed pool of `LANTERN_LIGHTS` = 4 warm point lights (`0xffc477`, `LANTERN_I` 2.2 × night, `LANTERN_RANGE` 8, decay 1.1, gentle flicker): yours, plus the 3 nearest other players (`WorldScene.setLanterns`).
+  - Each light sits 1.6 above the player and 0.2 ahead of them. Lower placements glared on the face or head.
+  - They switch on and off with the firefly lights (by the clock, `timeNight > 0.02`, one recompile).
+- **Campfire beacon:** its light grows at night to intensity 4.5 + 3 × night and reaches 8 + 7 × night units.
+- **Firefly glow:** `night = clamp((2.4 − total sun) / 1.6)`.
+  - At night each firefly gets a soft halo (`moteGlow`): an additive `Points` disc 0.55 world units wide, with a squared falloff stepped into 5 bands, strength `night × 0.45`, twinkling with the firefly. It's hidden when `night` = 0.
+  - The firefly cubes get up to 1.5× brighter at night.
+- **Firefly light:** a fixed pool of `FIREFLY_LIGHTS` = 4 soft warm point lights (8 before; each light costs every lit pixel) (`0xfff0c0`, distance 2.0, decay 2) lights the ground and plants around the fireflies nearest the player (within 22 units).
+  - The nearest fireflies are re-picked every 0.4s. A light that moves to a new firefly fades in over 0.4s, so nothing pops.
+  - Intensity is `FIREFLY_LIGHT_I` (0.4) × night × twinkle. All lights are 0 by day. The user wants this **subtle**: 2.2 read as neon green pools on the grass.
+  - **The lights exist only at night by the clock** (`timeNight > 0.02`): by day they're `visible = false`, because even at intensity 0 they cost every lit pixel. The switch recompiles materials once, so it follows the time of day only, not the deep forest (which keeps its glow halos without extra light). Otherwise, set intensity to 0 instead of toggling `visible`.
+
+## Sky and ambient life
+
+- **Clouds** (`buildClouds`): 34 **boxy** cumulus clumps, using the user's pixel-sky reference palette but blocky at the user's request.
+  - Each clump merges box puffs: a big central block, 4–7 lower blocks around it and 1–2 top blocks. Each block is sized like a sphere of radius R (1.8R × 1.5R × 1.6R), and the clump is flattened to 0.8 in y.
+  - Custom banded `ShaderMaterial` (unlit), driven by the sun direction and normal.y, in 5 bands: warm cream tops → peach → pink-lilac → lilac → lavender undersides.
+  - They sit at y 16.5–18 (above the redwoods) and are scattered ±60 with the seeded `rng`. Never use `jitter` for 2D scatter: it is too correlated.
+  - They drift along `WIND` and wrap around within ±60 of the player.
+  - Opacity fades in for zoom 23–30 (max 0.9). They fade out near the screen center and within 3–7 units of the camera.
+  - They cast gentle shadows through the cloud sun (layer 1).
+- **God rays were removed** at the user's request. Don't re-add them unless asked.
+- **Butterflies:** 30 (`BUTTERFLIES`, was 80), each looping around a random flower 0.45 above the ground, with flapping wings (instanced left and right wings). In endless worlds butterflies and dragonflies whose home is over 36 units away move to a loaded flower/reed within 30 of the player (a few per frame), or hide if there's none.
+- **Dragonflies:** 16 near reeds. They hover, then dart between points over the water.
+- **Frogs:** 20 boxy original frogs (`frogGeometry` in `ambient.js`, 1.5× scale) sit on lily pads, breathe, and every 2–7 s hop (0.45 s arc, stretch, landing squash) to a pad within 2.8 units, or hop in place. In endless worlds they move to pads near the player (within 14, else 30) when theirs falls behind.
+- **Catching and throwing frogs** (`main.js` `onTap` → `frogAt` / `catchFrog` / `throwAt`; frog modes in `ambient.js`):
+  - **Catch:** a click within `max(16, 240 / camDist)` px of a frog's projected position catches it, with any item in hand. It needs to be within `CATCH_REACH` = 2.2 units; otherwise the character walks over first (`pendingCatch`, cancelled by movement keys) and catches it if it's still close, or says "The frog hopped away!".
+    - A caught frog becomes a **Frog** item (stack 8, `throwable`, its own pixel-art icon), held as hand index 7 (a little frog model in the hand). The world frog goes `'gone'`, and after `FROG_RESPAWN` = 15 s a new frog appears on a pad near the player.
+  - **Throw:** with a Frog in hand, a click throws it at the clicked point, clamped to `THROW_RANGE` = 7 units. It's let go 40% into the swing (`ambient.throwFrog`) and flies a somersaulting arc (0.35 + 0.06 × distance s, arc 0.8 + 0.18 × distance). It reuses a caught frog slot if there is one, otherwise the frog farthest away.
+  - **Landing (`settleFrog`):** onto a pad → `'pad'`; open water → `'swim'` (paddles toward the nearest pad within 18 in short hops); land → `'ground'` (hops of up to 1.3 toward the nearest pad, never up more than 1.0, wandering if there's none). The last hop lands on the pad.
+  - Frogs are client-only: others see the frog in your hand (hand index in the `a` code), not the throw.
+- **Insects:** 14 fly swarms (7 tiny dark flies each, buzzing on quick jittery loops 0.4–0.7 above reeds and lily pads) and 16 water striders (thin bodies with splayed legs, resting then dashing 0.55 around a lily pad on the surface). In endless worlds they move near the player, like the frogs.
+- **Birds:** `FLOCKS` = 4 flocks of 3–7 small boxy birds (body + head + tail, hinged wings; gulls, swifts and sparrows by colour), `BIRD_SIZE` 1.8, casting small shadows.
+  - A flock enters at the edge of `BIRD_RANGE` = 46 units, crosses near the player on a gently wandering heading at 3.6–5.6 units/s, leaves, rests 6–20 s, then another comes by.
+  - Loose V formation, with flapping (13–15 Hz) and glides now and then.
+  - **Height above the ground:** `BIRD_ALT` 3.8 over open land (the camera looks down, so higher birds would only show as shadows up close), 6 over woods, 14 over redwood forest. They look ahead 4 and 8 units to climb before rises and sink slowly.
+- **Fish:** `SCHOOLS` = 6 schools of 3 (`FISH_COLORS`: koi orange, silver, gold, olive), `FISH_SIZE` 2, in water at least 0.3 deep within `FISH_RANGE` = 24 of the player. One school per half-second is re-homed to random water near the player when it falls behind; with no water nearby it hides.
+  - They weave, stay near their school, dart now and then (3× speed, faster tail), and turn back before the shore (checked 0.9 ahead).
+  - **Drawn as soft surface silhouettes:** swimming fish are flattened (0.3 in y), tinted 35% toward water blue (`FISH_TINT`), `MeshBasicMaterial` at opacity 0.62 without depth write, drawn after the water (renderOrder 6) just on the surface. Real underwater fish were invisible under deep (nearly opaque) water.
+  - **Leaps:** about once every 25 s per fish, if there's water 1.4 ahead: a 0.75 s arc 0.55–0.8 high, nose up then down, drawn with separate solid Lambert meshes (`jumpBody` / `jumpTail`, casting shadows), with an `effects.impact(…, 'water')` splash (pale blue puffs and droplets) going in and out.
+- **Leaves:** 60. They drop from canopies of trees within 16 units of the player (or occasionally blow in), tumble and drift with the wind, rest on the ground for about 2.5s, then shrink away.
+- All of these are instanced meshes with per-frame matrix updates, and `frustumCulled = false`.
+
+## Main menu and modes (mirror of `src/client/menu.js`, `main.js`)
+
+- **Startup:** after sign-in, `main.js` shows the menu (`game.mode = 'menu'`). With `?room=` in the URL it skips the menu and calls `startMulti(room)`, which keeps the test setups working.
+- **Modes** (`game.mode`):
+  - `'menu'`: the menu's own scene renders and there's no game world.
+  - `'single'`: offline, with no server and no socket. `game.me = 'solo'` and a one-player roster.
+  - `'multi'`: connected to a room. The socket only reconnects in this mode, and `game.leaving` stops it.
+- **Play singleplayer:** pick "New endless world" (`startSingle(null)`), "Random island" (encoded on the fly) or a saved world.
+- **Multiplayer:** a room code (prefilled from `identity.room`; fixed to the voice channel's instance in Discord, with a "New" button for a random private code) and an optional **Bring a world**. Then `startMulti(room, map)`. A brought world is sent as a `map` message right after `welcome`.
+- **Create world:**
+  - Fields: name, seed (text; digits are used as-is, other text is hashed; a dice button rolls one), and the world type: endless (default), generated island, or blank island.
+  - The world is saved to the browser's world list, then **Create & play** (singleplayer) or **Create & edit** (map editor).
+- **Map editor:** from the menu it opens on a fresh random island, and exiting returns to the menu.
+  - The editor's **Play this map** sends the map to the room in multiplayer. Otherwise it starts singleplayer on that map.
+- **In game:** the **Menu** button (top-left, next to Map editor) or **Esc** calls `toMenu()`, which leaves the room and disposes the world (`resetSession()`).
+- **Background:** the menu diorama uses pixel size 3 and full tilt-shift, and orbits at distance 46, turning at 0.05 rad/s.
+
+## Map editor (mirror of `src/client/editor.js`, `src/shared/mapfile.js`)
+
+- **Opening it:** the **Map editor** button in the top-left panel, or `?editor` in the URL, opens a separate mode on a copy of the current island's base.
+  - The game HUD is hidden (`body.editing`) and the game loop hands each frame to `editor.frame()`. The game's scene and connection stay alive.
+- **Camera:** same ¾ pitch. WASD/arrows and right-drag pan in screen directions, Q/E turn (fixed 45° angles), and zoom is 8–80 (camera `far` 320 while editing). No clouds, no tilt-shift, no see-through or redwood cutaway (`setEditorView`).
+- **Tools** (left panel; brush 1–8 = a square of `2b−1` cells; `[`/`]` change it):
+  - Raise / Lower: one `STEP` per new cell, repeating every 0.16s while held. Flatten: to the height of the first cell.
+  - Heights are clamped to 0–`MAX_LEVEL` × STEP (20). `fixKind` keeps the water line consistent: below `SEA` becomes SEABED, and land raised out of the sea becomes SAND or GRASS.
+  - Ground paint: grass, forest, deep forest, sand, rock, snow, path. Underwater cells are skipped.
+  - Objects: Tree, Pine, Redwood and Rock. Brush 1 places on one cell. Bigger brushes scatter (30%, or 22% for redwoods, which keep 2.1 cells apart).
+  - Ruin (up to `MAX_RUINS` = 8, at least 7 apart, clears objects within 3.5), Campfire (moves the spawn and clears within 2), and Erase (objects in the brush; ruins within brush + 1).
+- **Live updates:** terrain edits update the terrain mesh immediately (`WorldScene.updateTerrain()`). The full scene (foliage, objects) is rebuilt when a stroke ends, or right away for single object clicks.
+  - Rebuilds dispose the old scene (`WorldScene.dispose()`). Tree and bush geometries are cached and shared (`userData.shared`).
+- **Undo/redo:** Ctrl+Z / Ctrl+Y (or Ctrl+Shift+Z) and toolbar buttons. Up to 40 whole-base snapshots, one per stroke.
+- **Files:**
+  - **Save/Load/Delete** use `localStorage['settleon.maps']` (per browser).
+  - **Export** downloads `<name>.settleon.json`. **Import** reads one.
+  - **New blank**: a round grass plateau (radius 30, height 2.5) with a beach ring. **New random**: a fresh procedural island.
+- **Endless save:** `{v: 1, type: 'endless', name, seed, edits?, chops?, benches?, picks?, piles?}` (`piles` = `[[ix, iz, r, n]...]`, `cleanPiles`) (`picks` = `[[ix, iz, t]...]`, `cleanPicks`) (`benches` = workbenches `[[ix, iz, rot]...]`) (`edits` = digging, `[[ix, iz, level, kind]...]`; `chops` = chopped trees, `[[ix, iz]...]`; each max 20000, validated by `cleanEdits` / `cleanChops`). `decodeMap` refuses it (island only); use `decodeEndless`.
+- **Map format v1** (~20–35 KB): `{v, name, seed, h, k, camp, ruins, trees, rocks}`.
+  - `h` is one char per column, `'0'` + height level. `k` is one digit per column, the ground kind.
+  - Trees are `[ix, iz, type 0 leafy / 1 pine / 2 redwood, s×100]`; rocks are `[ix, iz, s×100]`.
+  - `decodeMap` validates sizes and ranges, and caps trees and rocks at 6000.
+- **Play this map:** sends `map` to the server, and the whole room switches to it.
+  - The editor closes only when that broadcast comes back (`editor.playPending`). If someone else loads a map while you're editing, the game world changes in the background and your edits stay.
+
+## Network protocol (`/ws`)
+
+- **Client → server:**
+  - `hello {room, accessToken | dev:{id,name}}`
+  - `move {x,y,z,ry,a}`, sent about every 80ms, only when something changed. `a` = animation + 10 × held tool (the server allows 0–199)
+    - `bench {ix, iz, r, on}`: a player put down (`on`) or picked up a workbench. Kept in `room.benches` (max 50k, cleared with the world) and relayed as `bench {id, ix, iz, r, on}`
+  - `pile {ix, iz, r, n}`: the log pile on a cell is now n logs (0 = gone) lying along x (r 0) or z (r 1). Kept in `room.piles` (max 50k, cleared with the world) and relayed as `pile {id, ix, iz, r, n}`
+  - `pick {ix, iz, t}`: a player broke a bush (t 0), picked its berries (1) or picked up a pebble (2). Kept in `room.picks` (max 50k, cleared with the world) and relayed as `pick {id, ix, iz, t}`
+  - `chop {ix, iz}`: a player chopped down the tree growing from cell (ix, iz). Kept in `room.chops` (max 50k, cleared with the world) and relayed as `chop {id, ix, iz}`
+  - `dig {ix, iz, lvl, k, ulvl, uk}`: a player dug or placed a block (new height level and kind; `ulvl`/`uk` = the ground under placed blocks, `ulvl` −1 when none). The server validates it, keeps it in `room.edits` (max 50k, cleared when the room's world changes), and relays `dig {id, ix, iz, lvl, k}` to everyone else
+  - `map {map}`: play an island map or a saved endless world in the room, or `map: null` for a new random endless world. Limited to one every 3s per socket, and validated with `decodeMap`.
+- **Server → client:**
+  - `welcome {you, seed, map, edits, chops, benches, picks, piles}`: with `map: null` the client generates the endless world from `seed`; otherwise it plays the room's `map`. `edits` is the room's digging so far (`[[ix, iz, lvl, k]...]`), applied after any edits saved in the map.
+  - `map {map, seed, by}`: the room's map changed. Everyone rebuilds the world and respawns at its campfire.
+  - `roster {players:[{id,name,color}]}`: sent on join and leave.
+  - `snap {p:[[id,x,y,z,ry,a],…]}`: every 80ms when anything moved.
+  - `error {message}`
+- `maxPayload` is 600 KB + 4 KB (endless saves with many digs can be large). Messages over 4 KB are dropped unless they're `map` messages.
+- The server only relays positions (and stores each room's current custom map in memory). It clamps x/z to ±(`WORLD_LIMIT` + `WORLD`) and y to −10…50, and allows 60 messages per second per socket. Movement is client-authoritative, so there is no anti-cheat.
+- **Rooms:** `discordSdk.instanceId`, or `?room=` (default `dev`). Each room picks a random seed. Rooms are deleted after 30 minutes with no connections. Everything is in memory.
+- **Players:** a player is removed when their last connection closes. Ids are `d:<discordId>` (verified via `GET /users/@me`) or `dev:<id>`. Dev logins are off when `NODE_ENV=production`, unless `ALLOW_DEV_LOGIN` is set.
+
+## Testing tips
+
+- **`?zoom=N`** in the URL sets the starting camera distance, for close-up screenshots. N=6 is close.
+- **`?editor`** (together with `?room=`) opens the map editor once the room's world has loaded.
+- **Driving the UI headlessly:** launch Edge with `--remote-debugging-port`, connect over the DevTools protocol with the `ws` package, and use `Input.dispatchMouseEvent` and `Page.captureScreenshot`. This was used to test the editor end to end.
+- **`?spawn=trail`** spawns on the mountain trail nearest the camp (endless worlds).
+- **`?spawn=deep`** spawns in the middle of the biggest deep forest near the camp. **`?spawn=shore`** spawns on the shore nearest the camp with shallow water beside it. **`?time=N`** sets the hour.
+- **Headless screenshots:** use Edge with `--use-angle=swiftshader --enable-unsafe-swiftshader --virtual-time-budget=10000`. Windows enforces about 500px minimum width, so test narrow layouts at about 540px.
+- **Bot player:** a Node `ws` client that sends `hello` with a `dev` identity, generates the world from the `welcome` seed, and sends `move` messages.
+- **Movement:** `GridController` and `PathFinder` import cleanly in Node.
+  - A headless test can route to random tiles, `setPath`, and step with `update(1/60, keys)` until `!moving`, then check that the position is exactly on the tile center.
+  - The last run: island 40/40 targets, all exactly centered (0.7 ms average route); endless 60/60 (5 ms, including chunk generation), plus a 2000-tile trek east with no blocked legs.
+- **`window.__dbg`** (dev builds only) exposes `{ game, pixel, camera }`. A DevTools-protocol script can set `pixel.renderer.info.autoReset = false` and time frames while toggling shadows, lights, trees and foliage to find render costs.
+- **Streaming in Node:** `WorldScene` builds without a renderer, so a script can create an endless scene, `preload`, then call `update()` while moving the focus. The last run streamed 3000 units: 43–61 chunks loaded, 0.35 ms average update, worst 20 ms (CPU only).
+
+## Status
+
+- Working: endless worlds (generation, chunk streaming, saves, multiplayer), island generation, tile-locked movement (WASD stepping, hops, swimming), digging with tools, fixed ¾ camera, chibi characters, silhouettes, multiplayer presence with name tags, minimap, ruin discovery. Verified with a bot player, headless path and physics runs, and screenshots.
+- Not yet verified: touch input on a real device. (The silhouette and see-through canopies were checked on a headless test render.)
+- Map editor: verified end to end (headless clicks: blank island, raise, paint, redwoods, trees, ruin, campfire, save, play). The map round trip is exact, and the room broadcast and late-join tested with bots.
+- Digging with the shovel and pickaxe: verified end to end in a headless browser (shovel digs grass to soil, pickaxe refuses soil with a hint), world-level tests (dig survives cache churn, plants removed, trees unchanged, digging below sea makes water), and multiplayer bots (relay, no echo, late-join edits, cleared on a new world).
+- Not done yet: tested inside real Discord (the user hasn't created the Discord app yet), saved player position, placing blocks back, Discord avatars, rich presence (`setActivity`), sound. Building is archived.
+
+## Changelog
+- 2026-11-16: **Half-tile movement:** the character moves half a tile per step and can stop on a tile's edge, standing on the higher side, so you can walk to the very edge of a block.
+- 2026-11-16: **Climb a quarter higher and stand on log piles:** the step-up limit went from 1.0 to 1.25, and log piles are walkable on top (at their stack height) instead of blocking their tile.
+- 2026-11-16: **Log piles:** Logs can be placed on a tile and stack 3, 2, 1 into a pile with ringed cut ends (from the user's reference). R turns the pile, the axe takes logs back off, and piles block the tile, sync and save.
+- 2026-11-16: **See-through placement preview:** holding a block or workbench shows a translucent copy of it on the hovered tile, turned the way R set it.
+- 2026-11-16: **Start with nothing, gather and craft:** the starting tools are gone; Shovel, Axe and Pickaxe are crafted from Sticks and Pebbles. Bushes break into sticks (and berries) on a left click and have a right-click "Search for berries" menu. Pebbles lie on the ground to pick up. R rotates Wood planks and workbenches. A bag button on the hotbar opens the inventory.
+- 2026-11-16: **Logs, crafting and workbenches:** trees now drop Logs instead of Wood. The inventory screen has a Crafting row (1 Log → 2 Wood, 4 Logs → 1 Workbench). A Workbench is placed on a tile as furniture (modelled on the user's reference), blocks the tile, is picked up with the axe, and syncs and saves.
+- 2026-11-16: **Removed wooden walls** at the user's request: no more R rotation, wall placing, previews, `wall` message or saved walls. Wood places only as blocks.
+- 2026-11-16: **Wooden walls:** with Wood in hand, R rotates between a block and an upright plank panel on the north, east, south or west side of a tile. Walls block movement across their edge (and diagonals around their ends), preview when hovered, come down with the axe, and sync and save.
+- 2026-11-16: **Placed blocks no longer recolour the ground below:** columns remember the ground under placed blocks (the under layer, `aUnder`), so their lower sides keep showing grass, dirt and so on. Digging the placed blocks off restores the original ground.
+- 2026-11-16: **Axe and wood:** a new axe (starting slot 3) chops trees (3 swings, 6 for redwoods) with wood chips and a leaf burst, giving Wood (3/4/8). Wood places as plank blocks that only the axe breaks. Felled trees stay gone (neighbours never shift), sync in multiplayer (`chop`) and are saved.
+- 2026-11-16: **Fish:** small schools of koi, silver, gold and olive fish swim in ponds, lakes and the sea near you as soft silhouettes under the surface, darting and turning at the shore, and now and then leaping out with a splash.
+- 2026-11-16: **Fixed white grid lines over water** after walking away and back: the terrain height ring buffer grew from 128² to 256², so loaded chunks no longer overwrite each other's heights (which made the water draw shore foam on every tile edge).
+- 2026-11-16: **Catch and throw frogs:** click a frog to catch it (walking over if needed) as a Frog item with its own icon. Hold it and click to throw it up to 7 tiles in a spinning arc. On land it hops back to a pond; in water it paddles to a lily pad. Caught frogs are replaced after 15 s.
+- 2026-11-15: **Bigger, spaced-out pines:** pines are 1.4× bigger and keep at least 2.2 tiles apart (pine woods and rocky slopes).
+- 2026-11-15: **Dark nights and lanterns:** much darker nights (moon 0.8 → 0.22, sky fill 0.95 → 0.26, near-black sky). Every character carries a glowing lantern at night, with real light for you and the 3 nearest players, and the campfire becomes a brighter, wider beacon.
+- 2026-11-15: **Hover outlines:** holding a tool outlines the block it would dig, and holding a block shows a ghost outline where it would go (red when it can't). Dig and place checks are shared (`digProblem` / `placeProblem`), and the toasts no longer name slot numbers.
+- 2026-11-15: **Birds:** small flocks of gulls, swifts and sparrows fly across in loose V formations, flapping and gliding, casting little shadows, and rising over woods and redwood canopies.
+- 2026-11-15: **Placing blocks:** hold Dirt, Stone, Sand or Snow and click a tile (next to you, or walk there) to raise it one block. The character holds the block in hand. Placing into water builds up the bottom. Synced and saved like digging.
+- 2026-11-15: **Walk to dig:** clicking a far block with a shovel or pickaxe walks the character next to it and digs, instead of saying "Too far".
+- 2026-11-15: **Minecraft-style inventory with 2D items:** a 9-slot hotbar (1–9) and a 27-slot bag (I/Tab) with pick-up, place, merge, split, swap and shift-move, and original pixel-art icons. The held slot is your tool. Digging now collects Dirt, Stone, Sand and Snow blocks (stacks of 64). The inventory is saved per saved world or room.
+- 2026-11-15: **WASD-only movement:** click/tap-to-go removed. Clicks only use the held tool on a neighbouring tile. The help bar was updated.
+- 2026-11-15: **Shovel and pickaxe:** a 3-slot hotbar (Hand, Shovel, Pickaxe; keys 1–3). Tap a tile next to you to dig it down one block (stone takes 2 pickaxe hits), with a swing animation and debris. Dug tiles are bare soil (`K.SOIL`) or flood below sea level. Digs sync in multiplayer (`dig` message, `welcome.edits`) and are saved in singleplayer saves.
+- 2026-11-15: **Fewer butterflies:** 80 → 30.
+- 2026-11-15: **Rendering performance:** trees cast shadows from their low-detail models via shadow-only layers (clouds moved to layer 2), shadow maps 2048² → 1024² (cloud sun 512²), 4 firefly lights that exist only at night, and no full-resolution step when zoomed out (pixel size stops at 2).
+- 2026-11-15: **Calmer meadows:** softer grass colours, about half the grass tufts and tall grass on plains, exposed dirt patches (`K.DIRT`), and no more generated ruins.
+- 2026-11-15: **Rarer mountains:** range thresholds raised; mountain land ~20% → ~10%, same heights.
+- 2026-11-15: **Lush slopes, snowy tops:** mountain lower slopes are now grass and forest (more woods in ranges), with a thin wobbly rock band under a snow line at ~13.5.
+- 2026-11-15: **Taller mountains and hiking trails (endless worlds):** mountain ranges rise to about 22 units with rounded snowy summits. Winding dirt trails with gentle steps and stone cairns climb through them.
+- 2026-11-15: **Fewer pines:** pine chance in pine woods 0.5 → 0.28 (`PINE_CHANCE`), rocky-slope pines 5% → 3%.
+- 2026-11-15: **Ocean uses the shallow-water ripples, toned down** (32%), instead of wave bands.
+- 2026-11-15: **Shallow vs open water:** caustic cells only in the shallows; open water looks like the ocean (deep blue, rolling pixel wave bands with white crest dashes). Depth blends smoothly between tiles.
+- 2026-11-15: **Caustic water, lush watersides, insects:** water ripples became pixel caustic cells (from the user's reference), reeds stand in the shallows, there are more lily pads and plants along banks, and fly swarms and water striders were added.
+- 2026-11-15: **Water and pond life:** depth-tinted, see-through water with pixel ripple lines and shore foam, a teal seabed, swaying seaweed, seabed rocks, lily pads (some flowering), and frogs hopping between pads. Each `swayMaterial` strength now gets its own shader program (they used to share one).
+- 2026-11-15: **Larger pine woods:** forest ground comes from a broader noise (scale 9 → 20, threshold 0.56 → 0.52): woods cover ~45% of lowland instead of ~37%, in patches about 4.7× bigger. Islands and endless worlds.
+- 2026-11-15: **Taller, more spread-out leafy trees:** 1.6× taller trunks with the canopy raised (pines and redwoods unchanged), and round trees keep at least 3.2 tiles apart.
+- 2026-11-15: **Less lag zoomed out (endless worlds):** far trees switch to low-detail models and far small foliage is hidden, about 57% fewer triangles.
+- 2026-11-15: **Endless worlds (Minecraft-style):** terrain keeps generating in 16-cell chunks as you explore, with oceans, coasts, mountain ranges, forests, redwood groves and ruins, all from a seed. It's the default for rooms, singleplayer and Create world. Saves store only the seed. Islands and the map editor are unchanged. The pathfinder and movement now use global cell keys.
+- 2026-11-15: **Cartoonish animation:** spring-driven squash and stretch (footfalls, jumps, big landing squash), forward lean with overshoot, head lag, bouncy hop-steps with waddle and hip twist, big limb swings, idle look-around and happy hops, flailing jumps and a doggy paddle.
+- 2026-11-15: **Main menu:** Play singleplayer (offline: random island or a saved world), Multiplayer (room code, optionally bringing a world), Create world (name, seed, generated or blank; saved in the browser) and Map editor. Menu button and Esc return to it. `?room=` skips it.
+- 2026-11-15: **Fixed camera angles:** only Q/E (45° steps) turn the camera. Drag and twist rotation were removed.
+- 2026-11-15: **Rotatable camera:** Q/E (45° steps, eased), right/middle-drag or a two-finger twist. WASD follows the screen, and the minimap shows the view direction. The editor rotates too.
+- 2026-11-15: **Map editor mode:** sculpt and paint terrain, place trees, redwoods, rocks, ruins and the campfire, undo/redo, save in the browser, export/import files, and play a map for the whole room (`map` message). World generation is split into base + `finishWorld`.
+- 2026-11-15: **Deep forest biome:** big patches of DEEP ground with towering redwoods whose canopy blocks both suns, so it's dark even by day. The sky fill dims and fireflies glow while you're inside. A corridor cutaway keeps the player visible. Clouds were raised above the redwoods.
+- 2026-11-15: **Darker shadows:** 25% of the sky fill moved into the main sun (`SHADOW_DEPTH`), so lit areas stay the same and shadows deepen.
+- 2026-11-15: **Subtle tilt-shift:** the top and bottom of the screen softly blur around a sharp centre band, a bit more when zoomed out.
+- 2026-11-15: **Subtler firefly light:** intensity 2.2 → 0.4, range 2.6 → 2.0, paler colour.
+- 2026-11-15: **Fireflies light their surroundings at night:** 8 pooled point lights follow the fireflies nearest the player.
+- 2026-11-15: **Firefly glow at night:** soft stepped halos around fireflies fade in from dusk to dawn, and the fireflies get brighter.
+- 2026-11-15: **Time-of-day slider:** a bottom-right HUD slider (local, remembered per browser, `?time=`) moves the sun and moon and blends sky, fog, light and cloud colours through dawn, day, golden hour, sunset and night.
+- 2026-11-15: **See-through leaves:** tree canopies open up in a dithered circle around your character when they block the view. Silhouette made stronger (opacity 0.55 → 0.75, less washed-out).
+- 2026-11-15: **Performance pass:** chunked static instancing for frustum and shadow culling, tree cluster cores at detail 1 (about −22% tree triangles), and tall grass and ferns no longer cast shadows.
+- 2026-11-15: **Pixel filter eases off when zoomed out:** art pixel 3 → 2 past distance 15, → 1 past 25 (2 → 1 on narrow screens).
+- 2026-11-15: **Walk-under trees and leafy conifers.** Most trunks now sit on tile corners, so the tiles under the canopy are walkable (only the diagonal through the trunk is blocked). Pines were rebuilt as tiered conifers with the same rounded leaves.
+- 2026-11-15: **Rounder leaves:** oval leaf cards instead of pointed diamonds, less droop, smoother cluster cores.
+- 2026-11-15: **Reference-style leafy trees** (`trees3d.js`): twisted purple-brown trunks with roots and branches, separate jagged leaf clusters in banded greens, 4 variants. Bushes match. Pines unchanged.
+- 2026-11-15: **Bigger, fuller trees:** `TREE_SCALE` 1.5 for all trees, a 14-puff two-layer leafy canopy, and a third cone on pines.
+- 2026-11-15: **Landing impact particles:** falling 2+ blocks (≥ 1.0) onto dry ground kicks up a dust ring and ground chips (`effects.js`), for you and for other players.
+- 2026-11-15: **Removed the wind streaks** at the user's request. Drifting leaves stay.
+- 2026-11-15: **Stronger cloud shadows:** sunlight split changed from 2.1 + 1.0 to 1.5 (main) + 1.6 (cloud sun), same total brightness.
+- 2026-11-15: **Removed the village structures** at the user's request: cottages, cobblestone paths, fences, well, props and lanterns. The flat flowery clearing around the campfire stays. Models moved to `archive/village/`. The ruins are unchanged.
+- 2026-11-15: **Cozy village and boxy clouds** (from the user's village reference).
+  - Flattened village plaza at the spawn: 2 textured stone cottages, cobblestone PATH tiles, fences, a well, props and lanterns (`village3d.js`, `textures.js`).
+  - Round vertex-colored leafy trees and bushes.
+  - Clouds rebuilt from box puffs (same banded palette). God rays removed.
+  - Grading back to lush (saturation 1.02, exposure 0.95).
+- 2026-11-15: **God rays, softer colors, billowy clouds.** Additive crossed-plane light shafts along the sun direction. Grading toned down (saturation 0.88, exposure 0.88) with lavender shadows. Clouds rebuilt as banded peach-to-lavender cumulus clumps of icosphere puffs, replacing the voxel blocks.
+- 2026-11-15: **Clouds, cloud shadows and ambient life.** Voxel clouds appear when zoomed out (max zoom 34) and never cover the player. Cloud shadows come from a separate weaker sun on layer 1. Added butterflies, dragonflies, wind streaks and falling leaves (`ambient.js`). Fog and shadow coverage scale with zoom.
+- 2026-11-15: **Grassier block sides:** jagged hanging grass strands with drips, shaded tips, per-strand shadows and sprouts replace the flat grass band.
+- 2026-11-15: **Blotchy grass tops** to match a new reference tile from the user: banded value-noise blotches replace the leaf marks and checker.
+- 2026-11-15: **Cleaner grass blocks.** Sparse tidy leaf marks, no specks, a softer checker, a smooth grass lip, pebble-only dirt, ±1.5% column tint, and `COLOR_LEVELS` 12→18 to cut dither grain.
+- 2026-11-15: **Hand-drawn-style grass** (from the user's reference image): lime tile checker with leaf marks, and fluffy vertex-colored leaf clumps instead of thin blades. Fixed dark back faces, stopped foliage from triggering the silhouette, and softened wall AO.
+- 2026-11-15: **Grassier world and better lighting.** About 3× more grass tufts, tall meadow grass patches, more flowers, and grass on rock and sand. Rock and snow start higher. Bloom pass, ACES tone mapping, color grading and vignette. Warm sun with cool fill, pixel-stepped terrain AO, sparkly Phong water, HDR campfire and gems, fireflies. Grass blades switched to single quads for performance.
+- 2026-11-15: **Tile-locked movement.** The character always stands on tile centers and moves tile to tile (8-way, no corner cutting). `PlayerController` was replaced by `GridController`. `PathFinder` now returns cell routes (no smoothing), with shared `stepOk` rules. Auto-jump became hop arcs between tiles. Space is a standing hop.
+- 2026-11-15: **Textured terrain and foliage.** Grass blocks have dirt sides with a jagged grass lip; rock has strata and moss; snow has a lip; all via a procedural shader. Added grass tufts, bushes with berries, ferns, mushrooms, and reeds with cattails, with wind sway. Added the `?zoom=` URL option.
+- 2026-11-15: **Cozy update.** Fixed ¾ follow camera instead of orbit. Cute chibi character (blink, blush, hairstyles and hats) with a see-through silhouette when hidden. Tap/click-to-go with A* pathfinding and auto-jump; the joystick and drag-look were removed.
+- 2026-11-15: **Pivot to exploration.** Replaced the RTS/building game with a third-person explorable island, a controllable blocky character, multiplayer presence and a minimap. Building mode was moved to `archive/settlement-builder/`. The pixel filter was moved to `pixelfx.js` and its outline test changed to 1/viewZ for the perspective camera.
+- 2026-11-15: Switched from a 2D canvas to a 3D Three.js board with a pixel-art post filter (low-res render, outlines, dithered palette). Pixel font and chunky UI. 3D-rendered palette icons.
+- 2026-11-15: Initial build (settlement builder). Economy retuned after the first sim showed 2-minute games (tick 4s→5s, win 40→50, steeper cost scaling, pricier houses and monuments).

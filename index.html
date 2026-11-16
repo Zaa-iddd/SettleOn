@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <title>SettleOn</title>
+    <link rel="stylesheet" href="/src/client/style.css" />
+  </head>
+  <body>
+    <div id="game">
+      <canvas id="view"></canvas>
+      <div id="labels"></div>
+
+      <div id="top-left" class="panel">
+        <div class="brand">SettleOn</div>
+        <ul id="players"></ul>
+        <div class="hud-buttons">
+          <button id="open-menu" class="btn" tabindex="-1">Menu</button>
+          <button id="open-editor" class="btn" tabindex="-1">Map editor</button>
+        </div>
+      </div>
+      <div id="area"></div>
+      <div id="top-right">
+        <canvas id="minimap" width="96" height="96"></canvas>
+        <div id="ruins-found" class="panel"></div>
+      </div>
+      <div id="time-panel" class="panel">
+        <label for="time-slider"><span id="time-icon"></span> <span id="time-label">10:00</span></label>
+        <input id="time-slider" type="range" min="0" max="24" step="0.25" value="10" tabindex="-1" aria-label="Time of day" />
+      </div>
+      <div id="help" class="panel">
+        <b>WASD</b> move · <b>Shift</b> run · <b>Space</b> jump · <b>click</b> use, break, pick up · <b>right-click</b> bush · <b>R</b> rotate · <b>I</b> inventory · <b>Q/E</b> camera · <b>Esc</b> menu
+      </div>
+      <!-- inventory (see src/client/inventory.js): hotbar, held item name, and the inventory screen -->
+      <div id="held-name"></div>
+      <div id="hotbar" class="panel"></div>
+      <div id="ctx-menu" class="panel" hidden><button class="btn" tabindex="-1">Search for berries</button></div>
+      <div id="inventory" hidden>
+        <div class="panel inv-panel">
+          <h2>Inventory</h2>
+          <div id="inv-bag" class="inv-grid"></div>
+          <div id="inv-bar" class="inv-grid"></div>
+          <h3>Crafting</h3>
+          <div id="inv-craft"></div>
+          <div id="inv-name"></div>
+          <p class="inv-help">Click: pick up / put down · Right-click: half / one · Shift-click: move · click a recipe to craft · <b>I</b> or <b>Esc</b> to close</p>
+        </div>
+        <div id="inv-cursor" hidden><img alt="" draggable="false" /><span class="count"></span></div>
+      </div>
+
+
+      <!-- main menu (see src/client/menu.js) -->
+      <div id="menu" hidden>
+        <div class="menu-title">
+          <h1>SettleOn</h1>
+          <p>a cozy island to explore together</p>
+        </div>
+        <div id="menu-main" class="panel menu-panel">
+          <button id="menu-play-single" class="btn big">Play singleplayer</button>
+          <button id="menu-play-multi" class="btn big">Multiplayer</button>
+          <button id="menu-create-world" class="btn big">Create world</button>
+          <button id="menu-editor" class="btn big">Map editor</button>
+        </div>
+        <div id="menu-single" class="panel menu-panel" hidden>
+          <h2>Singleplayer</h2>
+          <label>World <select id="single-world"></select></label>
+          <p class="menu-note">Same seed, same world. Worlds you create or save in the map editor show up here.</p>
+          <div class="menu-row">
+            <button class="btn" data-go="menu-main">Back</button>
+            <button id="single-play" class="btn accent">Play</button>
+          </div>
+        </div>
+        <div id="menu-multi" class="panel menu-panel" hidden>
+          <h2>Multiplayer</h2>
+          <label>Room code
+            <span class="menu-row tight"><input id="multi-room" maxlength="64" /><button id="multi-random-room" class="btn" title="New private room">New</button></span>
+          </label>
+          <p id="multi-room-note" class="menu-note" hidden>In Discord you play with everyone in this voice channel.</p>
+          <label>Bring a world <select id="multi-map"></select></label>
+          <p class="menu-note">Share the room code with friends so they can join you.</p>
+          <div class="menu-row">
+            <button class="btn" data-go="menu-main">Back</button>
+            <button id="multi-join" class="btn accent">Join</button>
+          </div>
+        </div>
+        <div id="menu-create" class="panel menu-panel" hidden>
+          <h2>Create world</h2>
+          <label>Name <input id="create-name" maxlength="40" placeholder="My world" /></label>
+          <label>Seed
+            <span class="menu-row tight"><input id="create-seed" maxlength="20" /><button id="create-dice" class="btn" title="Random seed">Dice</button></span>
+          </label>
+          <label>World type
+            <select id="create-type">
+              <option value="endless">Endless world (keeps generating as you explore)</option>
+              <option value="random">Generated island (from the seed)</option>
+              <option value="blank">Blank island (build it yourself)</option>
+            </select>
+          </label>
+          <div class="menu-row">
+            <button class="btn" data-go="menu-main">Back</button>
+            <button id="create-edit" class="btn">Create &amp; edit</button>
+            <button id="create-play" class="btn accent">Create &amp; play</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- map editor (a separate mode; see src/client/editor.js) -->
+      <div id="editor" hidden>
+        <div id="ed-top" class="panel">
+          <span class="brand">Map editor</span>
+          <input id="ed-name" maxlength="40" placeholder="Map name" aria-label="Map name" />
+          <button id="ed-new-blank" class="btn">New blank</button>
+          <button id="ed-new-random" class="btn">New random</button>
+          <span class="ed-sep"></span>
+          <button id="ed-save" class="btn">Save</button>
+          <select id="ed-saves" aria-label="Saved maps"></select>
+          <button id="ed-load" class="btn">Load</button>
+          <button id="ed-delete" class="btn">Delete</button>
+          <span class="ed-sep"></span>
+          <button id="ed-export" class="btn">Export</button>
+          <button id="ed-import" class="btn">Import</button>
+          <input id="ed-file" type="file" accept=".json,application/json" hidden />
+          <span class="ed-sep"></span>
+          <button id="ed-undo" class="btn" title="Ctrl+Z">Undo</button>
+          <button id="ed-redo" class="btn" title="Ctrl+Y">Redo</button>
+          <span class="ed-sep"></span>
+          <button id="ed-play" class="btn accent">Play this map</button>
+          <button id="ed-exit" class="btn">Back to game</button>
+        </div>
+        <div id="ed-tools" class="panel"></div>
+        <div id="ed-help" class="panel">
+          <b>Left-click</b> / drag to use the tool · <b>right-drag</b> or <b>WASD</b> to pan · <b>Q/E</b> turn camera · <b>scroll</b> zoom · <b>[ ]</b> brush size · <b>Ctrl+Z</b> undo
+        </div>
+        <div id="ed-hint" class="panel"></div>
+      </div>
+    </div>
+    <div id="toast" hidden></div>
+    <div id="loading">Connecting…</div>
+    <script type="module" src="/src/client/main.js"></script>
+  </body>
+</html>
