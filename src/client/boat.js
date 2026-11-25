@@ -96,6 +96,59 @@ export function hullClear(world, x, z, yaw) {
   return true;
 }
 
+// ---------- boat against boat ----------
+// Two hulls overlap when a point on one's outline is inside the other's (tested both ways). The outline is sampled
+// every 0.5 or less (a hull is 2.4 wide), so a boat can't slip through another between frames. Checked against
+// a dense outline over 300k random poses: no overlap missed (at 0.75 spacing, two bows could graze by < 0.05).
+const BUMP_PAD = 0.12; // a little room between hulls, so rails and fenders don't visibly cross
+const RING = (() => {
+  const pts = [[0, BOAT.TIP]];
+  for (let lz = BOAT.STERN; lz < BOAT.TIP - 0.1; lz += 0.5) pts.push([halfW(lz), lz], [-halfW(lz), lz]);
+  for (const lz of [2.75, 3.15]) pts.push([halfW(lz), lz], [-halfW(lz), lz]);
+  pts.push([0, BOAT.STERN], [0.6, BOAT.STERN], [-0.6, BOAT.STERN]);
+  return pts;
+})();
+/** How far deck point (lx, lz) is inside a hull grown by BUMP_PAD (0 = outside): the shorter way out. */
+function inside(lx, lz) {
+  if (lz < BOAT.STERN - BUMP_PAD || lz > BOAT.TIP + BUMP_PAD) return 0;
+  const side = halfW(Math.min(BOAT.TIP, Math.max(BOAT.STERN, lz))) + BUMP_PAD - Math.abs(lx);
+  return side > 0 ? Math.min(side, lz - (BOAT.STERN - BUMP_PAD), BOAT.TIP + BUMP_PAD - lz) : 0;
+}
+// how deep hull A's outline points are inside hull B, summed; the deepest point goes in `hit`
+function depthInto(ax, az, ayaw, bx, bz, byaw, hit) {
+  const ac = Math.cos(ayaw), as = Math.sin(ayaw), bc = Math.cos(byaw), bs = Math.sin(byaw);
+  let sum = 0;
+  for (const [lx, lz] of RING) {
+    const dx = ax + lx * ac + lz * as - bx, dz = az - lx * as + lz * ac - bz;
+    const d = inside(dx * bc - dz * bs, dx * bs + dz * bc);
+    if (d > 0) {
+      sum += d;
+      if (hit && d > hit.d) Object.assign(hit, { d, x: dx + bx, z: dz + bz });
+    }
+  }
+  return sum;
+}
+/**
+ * How much two boat poses overlap: 0 when clear, growing the deeper they're pushed into each other. `hit`
+ * (optional, `{ d: 0 }`) gets the world point that's deepest in, for a splash.
+ */
+export function hullOverlap(ax, az, ayaw, bx, bz, byaw, hit = null) {
+  if ((ax - bx) ** 2 + (az - bz) ** 2 > (2 * BOAT.TIP + 2 * BUMP_PAD) ** 2) return 0;
+  return depthInto(ax, az, ayaw, bx, bz, byaw, hit) + depthInto(bx, bz, byaw, ax, az, ayaw, hit);
+}
+/**
+ * May a boat move from pose `from` to `to` ([x, z, yaw]) past another boat at pose `o`? Yes when it ends clear of
+ * it. Already pushed into it (network lag, two boats closing at once, launched on the same spot), only by easing
+ * apart: less overlap, or its centre further away (deep overlaps don't always shrink at first). So boats can
+ * always get apart, but can't push on into each other.
+ */
+export function boatMoveOk(from, to, o, hit = null) {
+  const c = hullOverlap(to[0], to[1], to[2], o[0], o[1], o[2], hit);
+  if (!c) return true;
+  if (c < hullOverlap(from[0], from[1], from[2], o[0], o[1], o[2]) - 1e-4) return true;
+  return (to[0] - o[0]) ** 2 + (to[1] - o[1]) ** 2 > (from[0] - o[0]) ** 2 + (from[1] - o[1]) ** 2 + 1e-6;
+}
+
 // ---------- the model ----------
 // Built once and shared by every boat. Fixed-colour parts merge into `base`; the paintable parts (hull band,
 // cabin walls, roofs) are pale grey vertex colours tinted by a per-boat material colour (the boat's look);
@@ -913,6 +966,39 @@ export class Boats {
       b.flag.rotation.y = Math.PI / 2 + Math.sin(t * 0.7 + b.id) * 0.25;
     }
     this.wake.update(dt, t);
+  }
+  // Another boat is solid both where it's drawn (`sx, sz, syaw`) and at its latest pose (`x, z, yaw`: for a boat
+  // another player sails, the last network update, which the drawn one eases toward). The latest pose is about
+  // 150 ms fresher, so two boats sailed at each other by different players stop much closer to touching
+  // (measured head-on at full speed: bows crossing up to 1.1 tiles instead of 2.8). `selfId` is left out.
+  posesOf(o) {
+    const drawn = [o.sx, o.sz, o.syaw], dy = o.yaw - o.syaw; // (the drawn yaw may end up a whole turn off)
+    return Math.abs(o.x - o.sx) + Math.abs(o.z - o.sz) + Math.abs(Math.atan2(Math.sin(dy), Math.cos(dy))) < 0.01 ? [drawn] : [drawn, [o.x, o.z, o.yaw]];
+  }
+  /** Is a boat at pose (x, z, yaw) clear of every other boat? */
+  clearOfBoats(selfId, x, z, yaw) {
+    for (const o of this.list.values()) {
+      if (o.id === selfId) continue;
+      for (const p of this.posesOf(o)) if (hullOverlap(x, z, yaw, ...p) > 0) return false;
+    }
+    return true;
+  }
+  /**
+   * May boat `selfId` move from pose `from` to `to` ([x, z, yaw]) without running into another boat (see
+   * boatMoveOk)? On a bump, `hit` (optional, `{ d: 0 }`) gets the deepest contact point and the boat (`hit.boat`).
+   */
+  roomFor(selfId, from, to, hit = null) {
+    let ok = true;
+    for (const o of this.list.values()) {
+      if (o.id === selfId) continue;
+      for (const p of this.posesOf(o)) {
+        const h = hit && { d: 0 };
+        if (boatMoveOk(from, to, p, h)) continue;
+        ok = false;
+        if (hit && h.d > hit.d) Object.assign(hit, h, { boat: o });
+      }
+    }
+    return ok;
   }
   /** The boat whose deck covers world (x, z), or null. */
   at(x, z) {

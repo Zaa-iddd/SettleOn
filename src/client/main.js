@@ -891,7 +891,7 @@ function launchAt(ix, iz) {
   const yaw = Math.round(Math.atan2(x0 - c.pos.x, z0 - c.pos.z) / (Math.PI / 4)) * (Math.PI / 4);
   for (const k of [2.5, 3, 2, 3.5, 4, 1.5, 5, 6, 7, 8, 10]) { // move it out (past sandbanks) until the whole hull floats
     const x = x0 + Math.sin(yaw) * k, z = z0 + Math.cos(yaw) * k;
-    if (!hullClear(w, x, z, yaw)) continue;
+    if (!hullClear(w, x, z, yaw) || !game.boats.clearOfBoats(0, x, z, yaw)) continue; // floats, clear of other boats
     if (!inventory.takeHeld(1)) return;
     // it keeps the look (paint, name, upgrades) of the last boat you took out of the water
     let look;
@@ -1056,17 +1056,28 @@ function driveBoat(dt, keys, steps = 0) {
   // way going astern (not reversed like a real rudder), so the keys always mean the same thing
   const bite = Math.min(1, Math.abs(fwd) / BOAT.FULL_TURN_SPEED);
   b.turn = b.rudder * BOAT.TURN * rudderFactor(b) * Math.max(bite, BOAT.IDLE_TURN); // the rudder upgrade adds 20% a level
+  // other boats are solid (another player's boat where you see it and at its latest network pose, so both drivers
+  // stop short of each other). If the hulls already overlap (network lag, two boats closing at once), a move that
+  // eases them apart is still allowed, so they can always get free
+  const crowded = (x, z, yaw, hit) => !game.boats.roomFor(b.id, [b.x, b.z, b.yaw], [x, z, yaw], hit);
   const ny = b.yaw + b.turn * dt;
-  if (hullClear(w, b.x, b.z, ny)) b.yaw = ny; else b.turn = 0;
-  // move; against land it bumps back a little and loses its way
+  if (hullClear(w, b.x, b.z, ny) && !crowded(b.x, b.z, ny)) b.yaw = ny; else b.turn = 0;
+  // move; against land or another boat it bumps back a little and loses its way
   const speed = Math.hypot(b.vx, b.vz);
   if (speed > 0.005) {
-    const nx = b.x + b.vx * dt, nz = b.z + b.vz * dt;
-    if (hullClear(w, nx, nz, b.yaw)) { b.x = nx; b.z = nz; }
+    const nx = b.x + b.vx * dt, nz = b.z + b.vz * dt, hit = { d: 0 };
+    const land = !hullClear(w, nx, nz, b.yaw);
+    if (!land && !crowded(nx, nz, b.yaw, hit)) { b.x = nx; b.z = nz; }
     else {
       if (speed > 1.2) {
-        toast('Bump! Land ahead');
-        game.scene.effects.impact(b.x + fx * 3.2 * Math.sign(fwd || 1), SEA, b.z + fz * 3.2 * Math.sign(fwd || 1), 1.5, 'water');
+        if (land) {
+          toast('Bump! Land ahead');
+          game.scene.effects.impact(b.x + fx * 3.2 * Math.sign(fwd || 1), SEA, b.z + fz * 3.2 * Math.sign(fwd || 1), 1.5, 'water');
+        } else {
+          const name = hit.boat?.look?.n;
+          toast(name ? `Bump! You ran into the ${name}` : 'Bump! Another boat');
+          game.scene.effects.impact(hit.x, SEA, hit.z, 1.5, 'water');
+        }
       }
       b.vx *= -0.25; b.vz *= -0.25;
       b.sail *= 0.3;
