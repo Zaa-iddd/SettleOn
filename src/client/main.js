@@ -5,7 +5,7 @@ import PartySocket from 'partysocket';
 import { finishWorld, spawnPoint, groundAt, toCell, toWorld, WORLD, SEA, STEP, K, cellKey, keyX, keyZ, PICK, isWood, PILE_MAX, FURNITURE, clockHour } from '../shared/world.js';
 import { createEndlessWorld } from '../shared/endless.js';
 import { decodeMap, isEndlessMap, decodeEndless, endlessMap, encodeMap, cleanEdits, cleanChops, cleanBenches, cleanPicks, cleanPiles, cleanBoats } from '../shared/mapfile.js';
-import { Boats, BOAT, THROTTLE, UPGRADES, CABINS, ROOFS, TOPS, MASTS, PROPS, DECK_SLOTS, layoutOf, propAt, engineFactor, rudderFactor, walkable, nearestWalkable, onDeck, toLocal, toWorldXZ, deckY, hullClear, boatHit, HULLS, DECO_SCALE, deckReach, decoFits, decoFoot, hullOf, resizeLook, SIZE_LEN, SIZE_H, SPLIT } from './boat.js';
+import { Boats, BOAT, THROTTLE, UPGRADES, CABINS, ROOFS, TOPS, MASTS, PROPS, DECK_SLOTS, layoutOf, propAt, engineFactor, rudderFactor, walkable, nearestWalkable, onDeck, toLocal, toWorldXZ, deckY, hullClear, boatHit, HULLS, DECO_SCALE, deckReach, decoFits, decoFoot, hullOf, blueprintGeometry, blueprintLines, resizeLook, SIZE_LEN, SIZE_H, SPLIT } from './boat.js';
 import { getSave, putSave } from './saves.js';
 import { Inventory, ITEMS, HOTBAR, iconURL } from './inventory.js';
 import { BOAT_PALETTE, PAINT_SLOTS, UPGRADE_MAX, NAME_MAX, PART_KEYS, cleanLook, HULL_ITEMS, MAX_DECO, SIZE_COUNTS } from '../shared/boatlook.js';
@@ -457,6 +457,7 @@ function frame() {
   updateMarker(t);
   updateOutline();
   if (game.ride || game.blueprint?.visible) updateDeckBlueprint(); // placing on a boat's deck
+  updateLaunchBlueprint(t); // a boat in hand: where it would go in the water
   // walked next to a block we clicked with a tool: dig it (a movement key cancels the walk, and the dig)
   if (game.pendingDig && (keys.x || keys.z)) game.pendingDig = null;
   if (game.pendingCatch != null && (keys.x || keys.z)) game.pendingCatch = null;
@@ -919,29 +920,85 @@ function launchBoat(px, py) {
   if (!p) return;
   if (launchAt(toCell(p.x), toCell(p.z)) && game.local) swingTool(game.local.char);
 }
-function launchAt(ix, iz, t = ITEMS[inventory.held?.id]?.hull ?? 0) {
-  // it keeps the look (paint, name, upgrades, size) of the last boat you took out of the water;
-  // the kind of boat is the one you launched
-  let saved;
-  try { saved = JSON.parse(localStorage.getItem(BOAT_LOCKER) ?? 'null') ?? null; } catch {}
-  const look = cleanLook({ ...cleanLook(saved), t });
-  const hl = hullOf(look);
+// the look a launched boat gets: the last boat you took out of the water (paint, name, upgrades, size; kept in the
+// locker), as the kind of boat you're launching
+function lockerLook(t) {
+  let raw = null;
+  try { raw = localStorage.getItem(BOAT_LOCKER); } catch {}
+  if (lockerLook.raw !== raw || lockerLook.t !== t) {
+    let saved = null;
+    try { saved = JSON.parse(raw ?? 'null'); } catch {}
+    Object.assign(lockerLook, { raw, t, look: cleanLook({ ...cleanLook(saved), t }) });
+  }
+  return lockerLook.look;
+}
+/**
+ * Where a boat of kind t would go in for a click on cell (ix, iz): its stern toward you, pointing away (snapped to
+ * 45°), moved out until the whole hull floats clear of land and other boats. { x, z, yaw, look, hl, why } with `why`
+ * the reason it can't (x, z is then just where the click was). Shared by the click and the launch blueprint.
+ */
+function launchPlan(ix, iz, t) {
+  const look = lockerLook(t), hl = hullOf(look);
   const c = game.ctrl, w = game.world, x0 = toWorld(ix), z0 = toWorld(iz);
-  if (Math.hypot(x0 - c.pos.x, z0 - c.pos.z) > 5) return void toast('Too far: click the water near you');
-  if (w.H(ix, iz) >= SEA) return void toast('Boats go in the water');
   const yaw = Math.round(Math.atan2(x0 - c.pos.x, z0 - c.pos.z) / (Math.PI / 4)) * (Math.PI / 4);
+  const plan = { x: x0 - Math.sin(yaw) * hl.STERN, z: z0 - Math.cos(yaw) * hl.STERN, y: Math.max(SEA, w.H(ix, iz)), yaw, look, hl, why: null }; // (stern on the click, on the ground there)
+  if (Math.hypot(x0 - c.pos.x, z0 - c.pos.z) > 5) return { ...plan, why: 'Too far: click the water near you' };
+  if (w.H(ix, iz) >= SEA) return { ...plan, why: 'Boats go in the water' };
   for (const k of [2.5, 3, 2, 3.5, 4, 1.5, 5, 6, 7, 8, 10].map((k) => k * Math.max(1, hl.reach / 4.5))) { // further out for a big boat // move it out (past sandbanks) until the whole hull floats
     const x = x0 + Math.sin(yaw) * k, z = z0 + Math.cos(yaw) * k;
-    if (!hullClear(w, x, z, yaw, hl) || boatHit(game.boats, 0, x, z, yaw, hl)) continue; // floating, and clear of other boats
-    if (!inventory.takeHeld(1)) return;
-    const b = game.boats.set(1 + Math.floor(Math.random() * (2 ** 31 - 2)), x, z, yaw, true, look);
-    game.scene.effects.splash(x, SEA, z, 0.9); // in it goes
-    sendBoat(b, true, true);
-    saveDigging();
-    toast('Walk aboard, then press F at the wheel to sail');
-    return true;
+    if (hullClear(w, x, z, yaw, hl) && !boatHit(game.boats, 0, x, z, yaw, hl)) return { ...plan, x, z, y: SEA }; // floating, and clear of other boats
   }
-  toast('Not enough open water here');
+  return { ...plan, why: 'Not enough open water here' };
+}
+function launchAt(ix, iz, t = ITEMS[inventory.held?.id]?.hull ?? 0) {
+  const plan = launchPlan(ix, iz, t);
+  if (plan.why) return void toast(plan.why);
+  if (!inventory.takeHeld(1)) return;
+  const b = game.boats.set(1 + Math.floor(Math.random() * (2 ** 31 - 2)), plan.x, plan.z, plan.yaw, true, plan.look);
+  game.scene.effects.splash(plan.x, SEA, plan.z, 0.9); // in it goes
+  sendBoat(b, true, true);
+  saveDigging();
+  toast('Walk aboard, then press F at the wheel to sail');
+  return true;
+}
+// The launch blueprint: with a boat in hand, a see-through blue copy of it (pale lines frame the hull and cabin) bobbing on the
+// water where a click would put it in; red, with its stern on the clicked spot, where it can't go.
+const BOAT_BP = { ok: [0x3a9cff, 0xd8eeff], bad: [0xff4a3a, 0xffd8d0], fill: new THREE.MeshBasicMaterial({ transparent: true, opacity: 0.42, depthWrite: false }), edge: new THREE.LineBasicMaterial({ transparent: true, opacity: 0.95, depthWrite: false }) };
+function updateLaunchBlueprint(t) {
+  const item = ITEMS[inventory.held?.id], hover = input.hover;
+  let bp = game.launchBp;
+  const show = item?.boat && hover && !inventory.isOpen && !game.ride && !game.boatEdit && game.ctrl;
+  let plan = null;
+  if (show) {
+    // only re-march the ray and re-plan when the mouse, the camera, you or the terrain changed
+    const cp = camera.position, c = game.ctrl;
+    const key = `${hover[0]},${hover[1]},${game.digVersion},${cp.x.toFixed(2)},${cp.z.toFixed(2)},${c.ix},${c.iz},${item.hull},${game.boats.list.size}`;
+    const memo = (game.launchMemo ??= {});
+    if (memo.key !== key) {
+      const p = groundPoint(hover[0], hover[1]);
+      Object.assign(memo, { key, plan: p ? launchPlan(toCell(p.x), toCell(p.z), item.hull ?? 0) : null });
+    }
+    plan = memo.plan;
+  }
+  if (!plan) { if (bp) bp.visible = false; return; }
+  if (!bp) {
+    bp = game.launchBp = new THREE.Group();
+    bp.add(new THREE.Mesh(undefined, BOAT_BP.fill), new THREE.LineSegments(undefined, BOAT_BP.edge));
+    bp.children.forEach((o) => { o.renderOrder = 8; });
+    game.scene.scene.add(bp);
+  }
+  if (bp.parent !== game.scene.scene) game.scene.scene.add(bp);
+  bp.children[0].geometry = blueprintGeometry(plan.look);
+  bp.children[1].geometry = blueprintLines(plan.look);
+  bp.position.set(plan.x, plan.y + Math.sin(t * 1.25) * 0.045, plan.z);
+  bp.rotation.y = plan.yaw;
+  const [fill, edge] = plan.why ? BOAT_BP.bad : BOAT_BP.ok;
+  BOAT_BP.fill.color.setHex(fill);
+  BOAT_BP.edge.color.setHex(edge); // pale edges, so the boat's lines read over the water
+  // where it can't go (often on land, half buried in the slope), it's drawn over everything, a little fainter
+  if (BOAT_BP.fill.depthTest !== !plan.why) { BOAT_BP.fill.depthTest = BOAT_BP.edge.depthTest = !plan.why; BOAT_BP.fill.needsUpdate = BOAT_BP.edge.needsUpdate = true; }
+  BOAT_BP.fill.opacity = plan.why ? 0.28 : 0.42;
+  bp.visible = true;
 }
 // the boat under the cursor (where the cursor meets the water), or null
 function boatAt(px, py) {
@@ -2115,6 +2172,8 @@ function toMenu() {
 function resetSession() {
   game.blueprint?.removeFromParent();
   game.blueprint = null;
+  game.launchBp?.removeFromParent();
+  game.launchBp = game.launchMemo = null;
   if (game.fishing && game.local) game.fishing.cancel(fishCtx());
   game.fishing = null;
   if (socket) { game.leaving = true; socket.close(); socket = null; }
@@ -2404,7 +2463,7 @@ function openEditor() {
     return;
   }
   pixel.renderer.setAnimationLoop(frame);
-  if (import.meta.env.DEV) window.__dbg = { game, pixel, camera, inventory, actAt, useWorkbench, launchAt, boatKey, editPick }; // dev only: lets headless tests inspect the renderer and act
+  if (import.meta.env.DEV) window.__dbg = { game, pixel, camera, inventory, actAt, useWorkbench, launchAt, launchPlan, boatKey, editPick }; // dev only: lets headless tests inspect the renderer and act
   // ?room=... jumps straight into multiplayer (handy for testing); otherwise the main menu
   if (new URLSearchParams(location.search).has('room')) startMulti(identity.room);
   else toMenu();

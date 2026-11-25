@@ -858,6 +858,62 @@ export function boatGeometry(b = null) {
     return g;
   });
 }
+/**
+ * The whole boat as one geometry (shared per look's kind, size and parts): the hull, cabin, roofs, what's on top and
+ * the mast, for the launch blueprint (main.js) to draw see-through before the boat goes in the water.
+ */
+export function blueprintGeometry(look) {
+  const L = cleanLook(look);
+  useDims(L);
+  if (L.t) return shared('bp' + L.t, () => { const tg = typeGeometry(L.t), g = mergeGeometries([tg.base, tg.paint, tg.cabin, tg.roof].filter(Boolean)); g.userData.shared = true; return g; });
+  const lay = layoutOf(L), { cab, wh, mast } = lay, ci = L.p[0];
+  return shared(`bp0|${lay.key}|${lay.roof}|${lay.top}`, () => {
+    const list = [shared('base', baseGeometry), shared('hullPaint', hullPaintGeometry)];
+    if (cab) list.push(shared(`cabTrim${ci}`, () => cabinTrimGeometry(cab)), shared(`cabWalls${ci}`, () => cabinWallsGeometry(cab)), shared(`roof${ci}.${lay.roof}`, () => roofGeometry(cab, lay.roof)));
+    if (lay.top === 0) list.push(shared(`topWalls${ci}`, () => topWallsGeometry(wh)), shared(`topRoof${ci}`, () => topRoofGeometry(wh)));
+    if (lay.top < 2) list.push(shared(`topTrim${ci}.${lay.top}`, () => topTrimGeometry(wh, lay.top)));
+    if (mast) { const mk = `${mast.x},${mast.y0},${mast.y1},${mast.z}`; list.push(shared(`mast${mk}.${lay.mastV}`, () => mastGeometry(mast, lay.mastV === 1))); }
+    const g = mergeGeometries(list);
+    g.userData.shared = true;
+    return g;
+  });
+}
+/**
+ * The blueprint's lines (shared per look): the hull at the waterline and along the rail, ribs down its sides, and
+ * boxes for the cabin and the wheelhouse, a line for the mast. A few clean lines read better than every plank's edges.
+ */
+export function blueprintLines(look) {
+  const L = cleanLook(look), hl = hullOf(L), { H } = sizeOf(L);
+  useDims(L);
+  return shared(`bpl${L.t}|${L.p.join()}`, () => {
+    const v = [], seg = (a, b) => v.push(...a, ...b);
+    const N = 24, zs = Array.from({ length: N + 1 }, (_, i) => hl.STERN + (hl.TIP - hl.STERN) * (i / N));
+    const rail = (z) => hl.DECK + 0.2 + sheerAt(z, hl);
+    for (const sx of [-1, 1]) for (let i = 0; i < N; i++) {
+      const [z0, z1] = [zs[i], zs[i + 1]], w0 = Math.max(0, halfW(z0, hl)), w1 = Math.max(0, halfW(z1 - 1e-4, hl));
+      seg([sx * w0, 0.05, z0], [sx * w1, 0.05, z1]); // the waterline
+      seg([sx * w0, rail(z0), z0], [sx * w1, rail(z1), z1]); // the rail
+    }
+    for (const y of [0.05, rail(hl.STERN)]) seg([-hl.W, y, hl.STERN], [hl.W, y, hl.STERN]); // the transom
+    const ribs = Math.max(2, Math.round((hl.BOW0 - hl.STERN) / 1.1));
+    for (let i = 0; i <= ribs; i++) { const z = hl.STERN + (hl.BOW0 - hl.STERN) * (i / ribs); for (const sx of [-1, 1]) seg([sx * hl.W, 0.05, z], [sx * hl.W, rail(z), z]); }
+    seg([0, 0.05, hl.TIP], [0, rail(hl.TIP), hl.TIP]); // the stem
+    const box = (x0, x1, y0, y1, z0, z1) => {
+      for (const y of [y0, y1]) { seg([x0, y, z0], [x1, y, z0]); seg([x1, y, z0], [x1, y, z1]); seg([x1, y, z1], [x0, y, z1]); seg([x0, y, z1], [x0, y, z0]); }
+      for (const [x, z] of [[x0, z0], [x1, z0], [x1, z1], [x0, z1]]) seg([x, y0, z], [x, y1, z]);
+    };
+    if (!L.t) {
+      const lay = layoutOf(L), { cab, wh, mast } = lay;
+      if (cab) box(cab.x - cab.w / 2, cab.x + cab.w / 2, D + H, D + H + cab.h, cab.z - cab.d / 2, cab.z + cab.d / 2);
+      if (wh && lay.top === 0) box(wh.x - 0.4, wh.x + 0.4, wh.y + H, wh.y + H + 0.55, wh.z - 0.4, wh.z + 0.4);
+      if (mast) seg([mast.x, mast.y0 + H, mast.z], [mast.x, mast.y1 + H, mast.z]);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.Float32BufferAttribute(v, 3));
+    g.userData.shared = true;
+    return g;
+  });
+}
 function glowGeometry() {
   return shared('glow', () => {
     const g = mergeGeometries(LANTERNS.map(([x, z]) => { const b = new THREE.BoxGeometry(0.11, 0.14, 0.11).translate(x, mapY(D + 0.71), mapZ(z)); b.deleteAttribute('uv'); return b; }));
