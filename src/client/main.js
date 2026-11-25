@@ -1,17 +1,20 @@
 import '@fontsource/pixelify-sans/400.css';
 import '@fontsource/pixelify-sans/700.css';
 import * as THREE from 'three';
-import { finishWorld, spawnPoint, groundAt, toCell, toWorld, WORLD, SEA, STEP, K, cellKey, keyX, keyZ, PICK, isWood, PILE_MAX } from '../shared/world.js';
+import { finishWorld, spawnPoint, groundAt, toCell, toWorld, WORLD, SEA, STEP, K, cellKey, keyX, keyZ, PICK, isWood, PILE_MAX, FURNITURE, clockHour } from '../shared/world.js';
 import { createEndlessWorld } from '../shared/endless.js';
-import { decodeMap, isEndlessMap, decodeEndless, endlessMap, encodeMap, cleanEdits, cleanChops, cleanBenches, cleanPicks, cleanPiles } from '../shared/mapfile.js';
+import { decodeMap, isEndlessMap, decodeEndless, endlessMap, encodeMap, cleanEdits, cleanChops, cleanBenches, cleanPicks, cleanPiles, cleanBoats } from '../shared/mapfile.js';
+import { Boats, BOAT, THROTTLE, UPGRADES, CABINS, ROOFS, TOPS, MASTS, PROPS, DECK_SLOTS, layoutOf, propAt, engineFactor, rudderFactor, walkable, nearestWalkable, onDeck, toLocal, toWorldXZ, deckY, hullClear } from './boat.js';
 import { getSave, putSave } from './saves.js';
-import { Inventory, ITEMS } from './inventory.js';
+import { Inventory, ITEMS, HOTBAR, iconURL } from './inventory.js';
+import { BOAT_PALETTE, PAINT_SLOTS, UPGRADE_MAX, NAME_MAX, PART_KEYS, cleanLook } from '../shared/boatlook.js';
 import { Editor } from './editor.js';
 import { identify, inDiscord } from './discord.js';
 import { Menu } from './menu.js';
 import { PLAYER_COLORS } from '../shared/world.js';
 import { PixelRenderer, TILT } from './pixelfx.js';
-import { WorldScene, DEFAULT_TIME, benchGeometry, logGeo, logOffset } from './world3d.js';
+import { partIcon } from './boaticons.js';
+import { WorldScene, DEFAULT_TIME, furnitureGeometry, logGeo, logOffset } from './world3d.js';
 import { makeCharacter, animateCharacter, ANIM, TOOLS, setTool, swingTool, SWING_SECS, setLantern } from './character.js';
 import { GridController, IMPACT_DROP } from './controller.js';
 import { Input } from './input.js';
@@ -24,6 +27,8 @@ const pixel = new PixelRenderer($('view'));
 // Fixed ¾ top-down camera that follows the player (no rotation).
 const CAM_PITCH = 0.66; // radians above the horizon (~38°, a ¾ view that shows faces)
 const CAM_FOV = 35;
+const MAX_ZOOM = 34;  // camera distance limit on land
+const BOAT_ZOOM = 48; // and aboard a boat (further out to see the sea around you)
 const camera = new THREE.PerspectiveCamera(CAM_FOV, pixel.aspect, 0.5, 110);
 camera.layers.enable(2); // clouds (see WorldScene: layer 2, cast through the cloud sun; layers 1 and 31 are shadow-only)
 const input = new Input($('view'), (x, y, first) => onTap(x, y, first));
@@ -73,6 +78,9 @@ function connect() {
     else if (msg.type === 'bench') onBench(msg);
     else if (msg.type === 'pick') onPick(msg);
     else if (msg.type === 'pile') onPile(msg);
+    else if (msg.type === 'time') onTime(msg);
+    else if (msg.type === 'boat') onBoat(msg);
+    else if (msg.type === 'boatlook') { game.boats?.setLook(msg.id, msg.look); const lb = game.boats?.list.get(msg.id); if (lb) unstickRider(lb); if (boatPanelBoat()?.id === msg.id) renderBoatPanel(); if (game.boatEdit === msg.id) renderPartMenu(); }
     else if (msg.type === 'error') { toast(msg.message); editor.playPending = false; }
   };
   socket.onclose = () => {
@@ -89,15 +97,17 @@ const send = (obj) => {
   return true;
 };
 
-function onWelcome({ you, seed, map, edits, chops, benches, picks, piles }) {
+function onWelcome({ you, seed, map, edits, chops, benches, picks, piles, boats, time }) {
   game.me = you;
-  if (mapKey(seed, map) !== game.mapKey) buildWorld(seed, map, cleanEdits(edits), cleanChops(chops), cleanBenches(benches), cleanPicks(picks), cleanPiles(piles));
+  if (FROZEN === null && Number.isFinite(time)) setClock(time); // the room's time of day
+  if (mapKey(seed, map) !== game.mapKey) buildWorld(seed, map, cleanEdits(edits), cleanChops(chops), cleanBenches(benches), cleanPicks(picks), cleanPiles(piles), cleanBoats(boats));
   else { // reconnected: catch up
     for (const [ix, iz, lvl, k, ul, uk] of cleanEdits(edits)) applyDig(ix, iz, lvl * STEP, k, ul >= 0 ? [ul * STEP, uk] : null);
     for (const [ix, iz] of cleanChops(chops)) applyChop(ix, iz);
-    for (const [ix, iz, r] of cleanBenches(benches)) applyBench(ix, iz, r, true);
+    for (const [ix, iz, r, t] of cleanBenches(benches)) applyBench(ix, iz, r, true, t);
     for (const [ix, iz, t] of cleanPicks(picks)) applyPick(ix, iz, t);
     for (const [ix, iz, r, n] of cleanPiles(piles)) applyPile(ix, iz, r, n);
+    for (const [id, x, z, yaw, look] of cleanBoats(boats)) game.boats.set(id, x, z, yaw, false, look);
   }
   $('loading').hidden = true;
   game.lastSent.a = -1; // force a position update
@@ -132,7 +142,17 @@ function onMap({ map, seed, by }) {
   toast(map ? `${by} loaded the world "${map.name}"` : `${by} started a new endless world`);
 }
 
-function buildWorld(seed, map = null, roomEdits = [], roomChops = [], roomBenches = [], roomPicks = [], roomPiles = []) {
+// a fresh tile-locked controller on (ix, iz): at the spawn, or stepping off a boat
+function placeController(ix, iz) {
+  game.ctrl = new GridController(game.paths, ix, iz);
+  game.ctrl.onLand = (drop) => {
+    const c = game.ctrl, p = c.pos;
+    game.scene.effects.impact(p.x, p.y, p.z, drop, game.world.kind(c.ix, c.iz));
+  };
+  return game.ctrl;
+}
+
+function buildWorld(seed, map = null, roomEdits = [], roomChops = [], roomBenches = [], roomPicks = [], roomPiles = [], roomBoats = []) {
   game.seed = seed;
   game.mapKey = mapKey(seed, map);
   // no map: the endless world from the seed; otherwise a saved endless world or an island map
@@ -148,7 +168,7 @@ function buildWorld(seed, map = null, roomEdits = [], roomChops = [], roomBenche
   for (const [ix, iz] of [...(endless?.chops ?? []), ...roomChops]) game.world.removeTree(ix, iz); // trees already chopped down
   // workbenches: saved with the world (endless saves, or an island save's extra field), then the room's
   const savedBenches = endless?.benches ?? (map && !isEndlessMap(map) ? cleanBenches(map.benches) : []);
-  for (const [ix, iz, r] of [...savedBenches, ...roomBenches]) game.world.benches.set(cellKey(ix, iz), [ix, iz, r]);
+  for (const [ix, iz, r, t] of [...savedBenches, ...roomBenches]) game.world.benches.set(cellKey(ix, iz), [ix, iz, r, t]);
   // log piles: saved with the world, then the room's
   const savedPiles = endless?.piles ?? (map && !isEndlessMap(map) ? cleanPiles(map.piles) : []);
   for (const [ix, iz, r, n] of [...savedPiles, ...roomPiles]) game.world.piles.set(cellKey(ix, iz), [ix, iz, r, n]);
@@ -164,6 +184,12 @@ function buildWorld(seed, map = null, roomEdits = [], roomChops = [], roomBenche
   game.scene = new WorldScene(game.world);
   game.scene.setBenches(game.world.benches);
   game.scene.setPiles(game.world.piles);
+  // boats: saved with the world (endless saves, or an island save's extra field), then the room's
+  game.boats = new Boats(game.scene.scene, game.world);
+  game.ride = null;
+  game.driving = null;
+  const savedBoats = endless?.boats ?? (map && !isEndlessMap(map) ? cleanBoats(map.boats) : []);
+  for (const [id, x, z, yaw, look] of [...savedBoats, ...roomBoats]) game.boats.set(id, x, z, yaw, true, look);
   for (const r of game.remotes.values()) r.label.remove();
   game.remotes.clear();
   game.ruinsFound.clear();
@@ -212,12 +238,8 @@ function buildWorld(seed, map = null, roomEdits = [], roomChops = [], roomBenche
     if (best) { spawn.x = toWorld(best[0]); spawn.z = toWorld(best[1]); }
   }
   const [six, siz] = game.paths.nearestOpen(toCell(spawn.x), toCell(spawn.z), 8) ?? [toCell(spawn.x), toCell(spawn.z)];
-  game.ctrl = new GridController(game.paths, six, siz);
+  placeController(six, siz);
   game.ctrl.ry = 0; // face the camera
-  game.ctrl.onLand = (drop) => {
-    const c = game.ctrl, p = c.pos;
-    game.scene.effects.impact(p.x, p.y, p.z, drop, game.world.kind(c.ix, c.iz));
-  };
   game.scene.preload(game.ctrl.pos); // endless: build the chunks around the spawn before the first frame
   game.cam.focus.set(game.ctrl.pos.x, game.ctrl.pos.y + 0.5, game.ctrl.pos.z);
   applyTime(game.time);
@@ -232,33 +254,64 @@ function buildWorld(seed, map = null, roomEdits = [], roomChops = [], roomBenche
   for (const [id, p] of game.roster) ensureCharacter(id, p);
 }
 
-// ---------- time of day (local only, not synced between players) ----------
+// ---------- time of day: a day/night cycle, one day every DAY_SECONDS (10 minutes) ----------
+// The clock (game.clock = { h, at }) runs from the wall clock. In multiplayer the room's clock comes
+// from the server (welcome.time) and the slider sets it for everyone (`time` message); alone, the
+// time is remembered per browser. `?time=N` sets the hour and stops the clock (for screenshots).
 const TIME_KEY = 'settleon.time';
+const FROZEN = (() => { const q = new URLSearchParams(location.search).get('time'); return q !== null && !Number.isNaN(Number(q)) ? Number(q) : null; })();
 function initialTime() {
-  const q = new URLSearchParams(location.search).get('time');
-  if (q !== null && !Number.isNaN(Number(q))) return Number(q);
+  if (FROZEN !== null) return FROZEN;
   try { const v = localStorage.getItem(TIME_KEY); if (v !== null && !Number.isNaN(Number(v))) return Number(v); } catch {}
   return DEFAULT_TIME;
+}
+// start the clock at hour h
+function setClock(h) {
+  game.clock = { h: ((h % 24) + 24) % 24, at: Date.now() };
+  applyTime(game.clock.h);
 }
 function applyTime(h) {
   game.time = h;
   game.scene?.setTimeOfDay(h);
-  const hh = Math.floor(h) % 24, mm = Math.round((h - Math.floor(h)) * 60);
+  const hh = Math.floor(h) % 24, mm = Math.floor((h - Math.floor(h)) * 60);
   $('time-label').textContent = `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
   $('time-icon').classList.toggle('night', h < 6 || h >= 19.5);
-  $('time-slider').value = h;
+  if (!game.dragTime) $('time-slider').value = h;
+}
+// every frame: move on to the clock's current minute (the sun moves in one-minute steps, about
+// once a real second, so shadows step instead of crawling), and remember it every few seconds when alone
+function tickClock() {
+  if (FROZEN !== null || game.dragTime || !game.clock) return;
+  const h = clockHour(game.clock.h, Date.now() - game.clock.at);
+  if (Math.floor(h * 60) === Math.floor(game.time * 60)) return;
+  applyTime(h);
+  const now = Date.now();
+  if (game.mode !== 'multi' && now - (game.timeSaved ?? 0) > 5000) {
+    game.timeSaved = now;
+    try { localStorage.setItem(TIME_KEY, String(h)); } catch {}
+  }
+}
+function onTime({ id, by, h }) {
+  if (id === game.me || !Number.isFinite(h)) return;
+  setClock(h);
+  if (by) toast(`${by} set the time to ${$('time-label').textContent}`);
 }
 {
   const slider = $('time-slider');
-  slider.addEventListener('input', () => {
-    applyTime(Number(slider.value));
-    try { localStorage.setItem(TIME_KEY, slider.value); } catch {}
+  slider.addEventListener('pointerdown', () => { game.dragTime = true; });
+  slider.addEventListener('input', () => applyTime(Number(slider.value)));
+  slider.addEventListener('change', () => { // released: the clock carries on from here
+    game.dragTime = false;
+    const h = Number(slider.value) % 24;
+    setClock(h);
+    if (game.mode === 'multi') send({ type: 'time', h });
+    else try { localStorage.setItem(TIME_KEY, String(h)); } catch {}
   });
   // don't keep focus, so WASD / arrows keep moving the character instead of the slider
-  slider.addEventListener('pointerup', () => slider.blur());
+  slider.addEventListener('pointerup', () => { game.dragTime = false; slider.blur(); });
   slider.addEventListener('keydown', (e) => e.preventDefault());
 }
-applyTime(initialTime());
+setClock(initialTime());
 
 function onRoster(players) {
   game.roster = new Map(players.map((p) => [p.id, p]));
@@ -308,10 +361,11 @@ function ensureCharacter(id, p) {
 }
 
 function onSnap(list) {
-  for (const [id, x, y, z, ry, code] of list) {
+  for (const [id, x, y, z, ry, code, rb] of list) {
     if (id === game.me) continue;
     const r = game.remotes.get(id);
     if (!r || y < -50) continue; // not placed yet
+    if (Array.isArray(rb) && game.boats?.list.has(rb[0])) { if (r.ride?.[0] !== rb[0]) r.rl = [rb[1], rb[2]]; r.ride = rb; } else r.ride = null; // on a boat: [id, deck x, deck z]
     const a = code % 10; // animation; the tens digit is the held tool
     setTool(r.char, Math.floor(code / 10) % TOOLS.length);
     // landing impacts for other players: an AIR hop that ends 2+ blocks lower, on dry ground
@@ -337,9 +391,10 @@ function sendPosition(now) {
   if (!c || now - l.at < SEND_MS) return;
   const moved = Math.abs(c.pos.x - l.x) + Math.abs(c.pos.y - l.y) + Math.abs(c.pos.z - l.z) > 0.01;
   const a = c.anim + 10 * game.tool; // animation + held tool
-  if (!moved && a === l.a && Math.abs(c.ry - l.ry) < 0.02) return;
-  send({ type: 'move', x: c.pos.x, y: c.pos.y, z: c.pos.z, ry: c.ry, a });
-  Object.assign(l, { x: c.pos.x, y: c.pos.y, z: c.pos.z, ry: c.ry, a, at: now });
+  const r = game.ride, b = r ? [r.id, +r.lx.toFixed(2), +r.lz.toFixed(2)] : null, bk = b ? b.join() : '';
+  if (!moved && a === l.a && Math.abs(c.ry - l.ry) < 0.02 && bk === l.b) return;
+  send({ type: 'move', x: c.pos.x, y: c.pos.y, z: c.pos.z, ry: c.ry, a, ...(b ? { b } : {}) });
+  Object.assign(l, { x: c.pos.x, y: c.pos.y, z: c.pos.z, ry: c.ry, a, b: bk, at: now });
 }
 
 // ---------- per-frame ----------
@@ -350,21 +405,39 @@ const tmp = new THREE.Vector3();
 function frame() {
   const dt = Math.min(clock.getDelta(), 0.1);
   const t = clock.elapsedTime;
+  tickClock();
   if (editor.active) { editor.frame(dt, t); return; }
   if (menu.active) { menu.frame(dt, t); return; }
   if (!game.world || !game.ctrl) return;
 
   const cam = game.cam;
-  cam.dist = Math.min(34, Math.max(6, cam.dist * (1 + input.takeZoom() * 0.1)));
+  // aboard a boat you can zoom out further (BOAT_ZOOM); stepping ashore eases back inside the normal limit
+  const zoomMax = game.ride ? BOAT_ZOOM : MAX_ZOOM;
+  const before = cam.dist;
+  cam.dist = Math.max(6, cam.dist * (1 + input.takeZoom() * 0.1));
+  if (cam.dist > zoomMax) cam.dist = before <= zoomMax ? zoomMax : Math.max(zoomMax, Math.min(before, cam.dist) - (before - zoomMax) * (1 - Math.exp(-dt * 4)));
+  // the far plane reaches as far as the fog, so a far zoom doesn't clip the horizon
+  const far = Math.max(110, Math.round(70 + cam.dist * 1.3));
+  if (camera.far !== far) { camera.far = far; camera.updateProjectionMatrix(); }
   // fixed camera angles: Q/E turn 45 degrees, eased
   cam.yawTarget += input.takeRotate() * (Math.PI / 4);
   cam.yaw += (cam.yawTarget - cam.yaw) * (1 - Math.exp(-dt * 10));
 
   // local player (tile-locked); keyboard overrides tap-to-go inside the controller.
   // WASD are screen directions, so turn them by the camera yaw and snap to the 8 grid directions.
-  const c = game.ctrl;
   const keys = input.read(); // read even when ignored, so a queued jump doesn't fire later
-  c.update(dt, inventory.isOpen ? { x: 0, z: 0, run: false, jump: false } : screenToGrid(keys, cam.yaw));
+  const k0 = inventory.isOpen || !$('boat-panel').hidden || game.boatEdit ? { x: 0, z: 0, run: false, jump: false } : keys;
+  if (game.boatEdit && (!game.ride || game.ride.id !== game.boatEdit)) setBoatEdit(false);
+  $('boat-btn').hidden = !game.ride; // the Boat button shows while you're aboard
+  if (!game.ride && !$('boat-panel').hidden) toggleBoatPanel(false);
+  // boats: sail the one you steer, ease the others, then walk on deck, board one, or walk the land
+  const throttleSteps = input.takeThrottle(); // W / S presses (only used at a boat's helm)
+  if (game.ride) driveBoat(dt, k0, inventory.isOpen ? 0 : throttleSteps);
+  else if (!$('throttle').hidden) throttleHud(null);
+  game.boats.update(dt, t, game.driving);
+  if (game.ride) walkOnDeck(dt, t, k0, cam.yaw);
+  else if (!tryBoard(k0, cam.yaw, t)) game.ctrl.update(dt, screenToGrid(k0, cam.yaw));
+  const c = game.ctrl;
   if (!c.moving && game.marker.visible && !game.marker.userData.bad) game.marker.visible = false;
   if (game.local) {
     const root = game.local.char.root;
@@ -406,7 +479,13 @@ function frame() {
   for (const r of game.remotes.values()) {
     if (!r.seen) continue;
     const before = tmp.copy(r.pos);
-    r.pos.lerp(r.target, k);
+    const rb = r.ride && game.boats.list.get(r.ride[0]);
+    if (rb) { // on a boat: ease their deck position, then place them on the deck as it's drawn now
+      r.rl[0] += (r.ride[1] - r.rl[0]) * k;
+      r.rl[1] += (r.ride[2] - r.rl[1]) * k;
+      const [wx, wz] = toWorldXZ(rb, r.rl[0], r.rl[1]);
+      r.pos.set(wx, deckY(rb, t), wz);
+    } else r.pos.lerp(r.target, k);
     r.speed = before.distanceTo(r.pos) / Math.max(dt, 1e-3);
     let d = r.targetRy - r.ry;
     d = Math.atan2(Math.sin(d), Math.cos(d));
@@ -428,7 +507,11 @@ function frame() {
   game.scene.setLanterns(lit ? [{ x: c.pos.x, y: c.pos.y, z: c.pos.z, ry: c.ry }, ...others.slice(0, 3).map((o) => o[1])] : [], t);
 
   // fixed-angle follow camera
-  cam.focus.lerp(tmp.set(c.pos.x, c.pos.y + 0.5, c.pos.z), 1 - Math.exp(-dt * 6));
+  // aboard a boat the camera follows the boat itself (its middle, at deck height), not you walking around on it;
+  // it follows faster then, so a boat at full speed doesn't run away from the view
+  const rideBoat = game.ride && game.boats.list.get(game.ride.id);
+  if (rideBoat) cam.focus.lerp(tmp.set(rideBoat.sx, deckY(rideBoat, t) + 0.5, rideBoat.sz), 1 - Math.exp(-dt * 10));
+  else cam.focus.lerp(tmp.set(c.pos.x, c.pos.y + 0.5, c.pos.z), 1 - Math.exp(-dt * 6));
   placeCamera(camera, cam.focus, cam.dist, cam.yaw);
 
   pixel.setZoom(cam.dist);
@@ -437,7 +520,7 @@ function frame() {
   game.scene.cloudRes.value.set(pixel.rt.width, pixel.rt.height);
   game.scene.update(t, dt, c.pos, cam.dist);
   camera.updateMatrixWorld();
-  game.scene.setSeeThrough(camera, c.pos, pixel.rt.width, pixel.rt.height);
+  game.scene.setSeeThrough(camera, game.boatEdit ? null : c.pos, pixel.rt.width, pixel.rt.height); // no cutaway while customizing the boat
   pixel.render(game.scene.scene, camera);
 
   updateLabels();
@@ -499,24 +582,35 @@ function onTap(px, py, first) {
   if (!game.world || !game.ctrl || editor.active || !first || inventory.isOpen) return;
   hideCtx();
   game.pendingAct = null;
+  if (game.boatEdit) return editClick(px, py); // edit mode: a click picks a part of the boat
+  if (game.ride) { // aboard: a click on the wheel takes (or leaves) the helm; nothing else from the deck yet
+    if (wheelAt(px, py)) toggleHelm();
+    return;
+  }
   const frog = frogAt(px, py);
   if (frog) return catchFrog(frog); // clicking a frog catches it, whatever is in hand
   const held = inventory.held;
   if (held && ITEMS[held.id].throwable) return throwAt(px, py); // holding a frog: throw it there
-  if (TOOLS[game.tool] === 'axe') { // a workbench, then a tree, else wood blocks
+  const item = held && ITEMS[held.id];
+  if (item?.boat) return launchBoat(px, py); // a boat in hand: put it in the water there
+  if (TOOLS[game.tool] === 'axe') { // a boat, furniture, then a log pile, then a tree, else wood blocks
+    const boat = boatAt(px, py);
+    if (boat) return takeBoat(boat);
     const bench = benchAt(px, py);
     if (bench) return takeBench(bench);
     const pile = pileAt(px, py);
     if (pile) return takeLog(pile);
     const tree = treeAt(px, py);
     if (tree) return chopTree(tree);
+  } else if (!item?.block && !item?.place) { // a workbench opens its crafting (unless you're placing something)
+    const bench = benchAt(px, py);
+    if (bench && bench[3] === 0) return useWorkbench(bench);
   }
   const bush = bushAt(px, py);
   if (bush) return breakBush(bush); // a click breaks a bush, whatever is in hand
   const pebble = pebbleAt(px, py);
   if (pebble) return pickPebble(pebble);
-  const item = held && ITEMS[held.id];
-  if (item && (item.tool || item.block || item.place)) useToolAt(px, py); // a tool digs, a block or workbench is placed
+  if (item &&(item.tool || item.block || item.place)) useToolAt(px, py); // a tool digs, a block or workbench is placed
 }
 
 // ---------- bushes and pebbles ----------
@@ -570,7 +664,8 @@ function breakBush(b) {
     if (!q) return;
     game.scene.effects.impact(q.x, q.y + 0.35, q.z, 1.6, 'leaves');
     applyPick(ix, iz, PICK.BUSH);
-    give('stick', 1 + Math.floor(Math.random() * 2)); // 1-2 sticks, and its berries if it had any
+    give('stick', 1 + Math.floor(Math.random() * 2)); // 1-2 sticks, 1-2 leaves, and its berries if it had any
+    give('leaves', 1 + Math.floor(Math.random() * 2));
     if (q.berries) give('berries', 1 + Math.floor(Math.random() * 2));
     if (game.mode === 'multi') send({ type: 'pick', ix, iz, t: PICK.BUSH });
     saveDigging();
@@ -619,19 +714,24 @@ function hideCtx() { $('ctx-menu').hidden = true; }
 function onRight(px, py) {
   hideCtx();
   if (!game.world || !game.ctrl || editor.active || inventory.isOpen || (game.mode !== 'single' && game.mode !== 'multi')) return;
-  const b = bushAt(px, py);
-  if (!b) return;
-  const el = $('ctx-menu');
+  if (game.ride) return; // aboard: nothing to right-click yet
+  const wb = benchAt(px, py);
+  if (wb && wb[3] === 0) return useWorkbench(wb); // right-clicking a workbench opens it too
+  // a small menu: a boat can go back in your inventory, a bush can be searched for berries
+  const boat = boatAt(px, py), b = boat ? null : bushAt(px, py);
+  if (!boat && !b) return;
+  const el = $('ctx-menu'), btn = el.querySelector('button');
   el.style.left = `${px}px`;
   el.style.top = `${py}px`;
   el.hidden = false;
-  el.querySelector('button').onclick = (e) => { e.currentTarget.blur(); hideCtx(); searchBush(b); };
+  btn.textContent = boat ? 'Put boat in inventory' : 'Search for berries';
+  btn.onclick = (e) => { e.currentTarget.blur(); hideCtx(); if (boat) takeBoat(boat); else searchBush(b); };
 }
 input.onRight = onRight;
 
 // ---------- chopping trees with the axe ----------
 const CHOP_REACH = 1.95;
-const TREE_WOOD = { leafy: 3, pine: 4, redwood: 8 }, TREE_HITS = { leafy: 3, pine: 3, redwood: 6 };
+const TREE_WOOD = { leafy: 3, pine: 4, redwood: 8 }, TREE_HITS = { leafy: 3, pine: 3, redwood: 6 }, TREE_LEAVES = { leafy: 3, pine: 2, redwood: 4 };
 const treeType = (t) => (t.pine ? 'pine' : t.pine === false ? 'leafy' : 'redwood');
 // trees near the player: the island's lists, or what's loaded in an endless world
 function nearbyTrees(range) {
@@ -679,7 +779,8 @@ function chopTree(t) {
     game.chopHits.delete(key);
     game.scene.effects.impact(t.x, t.y + (type === 'redwood' ? 5 : 1.4) * t.s, t.z, 2.4, 'leaves'); // the canopy bursts
     applyChop(t.ix, t.iz);
-    if (inventory.add('log', TREE_WOOD[type]) > 0) toast('Your inventory is full');
+    give('log', TREE_WOOD[type]);
+    give('leaves', TREE_LEAVES[type]);
     if (game.mode === 'multi') send({ type: 'chop', ix: t.ix, iz: t.iz });
     saveDigging();
   }, SWING_SECS * 450);
@@ -755,6 +856,278 @@ function throwAt(px, py) {
   }, SWING_SECS * 400);
 }
 
+// ---------- boats: launch, board, walk the deck, steer, step off ----------
+// game.boats (boat.js) holds every boat; game.ride = { id, lx, lz, steer, push } while you're aboard
+// (lx, lz = your deck position); game.driving = the boat id you're sailing (also while it coasts).
+const BOAT_SEND_MS = 100;
+const BOAT_LOCKER = 'settleon.boatlook'; // the look of the last boat you took out of the water
+// a screen-relative key direction as a unit world vector (not snapped), or null
+function screenDir(keys, yaw) {
+  if (!keys.x && !keys.z) return null;
+  const wx = Math.cos(yaw) * keys.x - Math.sin(yaw) * keys.z, wz = -Math.sin(yaw) * keys.x - Math.cos(yaw) * keys.z;
+  const l = Math.hypot(wx, wz);
+  return [wx / l, wz / l];
+}
+function sendBoat(b, on = true, withLook = false) {
+  if (game.mode !== 'multi') return;
+  send({ type: 'boat', id: b.id, x: +b.x.toFixed(2), z: +b.z.toFixed(2), yaw: +b.yaw.toFixed(3), on, ...(withLook ? { look: b.look } : {}) });
+}
+function onBoat({ id, x, z, yaw, on, look }) {
+  if (on) { if (game.driving !== id) game.boats.set(id, x, z, yaw, false, look); return; }
+  if (game.ride?.id === id) leaveBoat(); // it was taken out of the water under us
+  game.boats.remove(id);
+}
+
+// put the held boat in the water: its stern toward you, on open water around the clicked tile
+function launchBoat(px, py) {
+  const p = groundPoint(px, py);
+  if (!p) return;
+  if (launchAt(toCell(p.x), toCell(p.z)) && game.local) swingTool(game.local.char);
+}
+function launchAt(ix, iz) {
+  const c = game.ctrl, w = game.world, x0 = toWorld(ix), z0 = toWorld(iz);
+  if (Math.hypot(x0 - c.pos.x, z0 - c.pos.z) > 5) return void toast('Too far: click the water near you');
+  if (w.H(ix, iz) >= SEA) return void toast('Boats go in the water');
+  const yaw = Math.round(Math.atan2(x0 - c.pos.x, z0 - c.pos.z) / (Math.PI / 4)) * (Math.PI / 4);
+  for (const k of [2.5, 3, 2, 3.5, 4, 1.5, 5, 6, 7, 8, 10]) { // move it out (past sandbanks) until the whole hull floats
+    const x = x0 + Math.sin(yaw) * k, z = z0 + Math.cos(yaw) * k;
+    if (!hullClear(w, x, z, yaw)) continue;
+    if (!inventory.takeHeld(1)) return;
+    // it keeps the look (paint, name, upgrades) of the last boat you took out of the water
+    let look;
+    try { look = JSON.parse(localStorage.getItem(BOAT_LOCKER) ?? 'null') ?? undefined; } catch {}
+    const b = game.boats.set(1 + Math.floor(Math.random() * (2 ** 31 - 2)), x, z, yaw, true, look && cleanLook(look));
+    game.scene.effects.impact(x, SEA, z, 2, 'water');
+    sendBoat(b, true, true);
+    saveDigging();
+    toast('Walk aboard, then press F at the wheel to sail');
+    return true;
+  }
+  toast('Not enough open water here');
+}
+// the boat under the cursor (where the cursor meets the water), or null
+function boatAt(px, py) {
+  const p = groundPoint(px, py);
+  if (!p || !game.boats.list.size) return null;
+  const b = game.boats.at(p.x, p.z);
+  return b && Math.hypot(b.sx - game.ctrl.pos.x, b.sz - game.ctrl.pos.z) < 16 ? b : null;
+}
+// the axe takes a boat back out of the water (when nobody is aboard)
+function takeBoat(b) {
+  const c = game.ctrl;
+  const [lx, lz] = toLocal(b, c.pos.x, c.pos.z);
+  if (Math.hypot(lx, lz) > 5.5) return toast('Walk up to the boat first');
+  for (const r of game.remotes.values()) if (r.ride?.[0] === b.id) return toast('Someone is aboard');
+  if (game.local) swingTool(game.local.char);
+  try { localStorage.setItem(BOAT_LOCKER, JSON.stringify(b.look)); } catch {} // your boat's look comes back at the next launch
+  game.boats.remove(b.id);
+  game.scene.effects.impact(b.sx, SEA, b.sz, 2, 'water');
+  give('boat', 1);
+  sendBoat(b, false);
+  saveDigging();
+}
+
+// walking toward a boat from the shore or the water climbs aboard
+function tryBoard(keys, yaw, t) {
+  const c = game.ctrl;
+  if (!game.boats.list.size) return false; // also mid-step: holding a key chains steps back to back
+  const d = screenDir(keys, yaw);
+  if (!d) return false;
+  for (const b of game.boats.list.values()) {
+    if (Math.hypot(b.sx - c.pos.x, b.sz - c.pos.z) > 5) continue;
+    const [lx, lz] = toLocal(b, c.pos.x + d[0] * 1.25, c.pos.z + d[1] * 1.25); // far enough to reach the deck from the nearest half tile beside the hull
+    if (!onDeck(lx, lz)) continue;
+    const spot = nearestWalkable(lx, lz, b.obs);
+    if (!spot) continue;
+    const up = deckY(b, t) - c.pos.y;
+    if (!c.swimming && (up > 1.4 || up < -3)) continue; // too high a climb from here (from the water you just climb aboard)
+    board(b, spot[0], spot[1]);
+    return true;
+  }
+  return false;
+}
+function board(b, lx, lz) {
+  const c = game.ctrl;
+  c.step = null;
+  c.queue = [];
+  game.pendingDig = game.pendingChop = game.pendingAct = null;
+  game.pendingCatch = null;
+  game.ride = { id: b.id, lx, lz, steer: false, push: 0 };
+  if (!game.boatHint) { game.boatHint = true; toast('All aboard! Press F at the wheel to sail'); }
+}
+// step off onto the tile at world (x, z): land within a climb of the deck, or into the water
+function leaveBoat(ix = null, iz = null) {
+  const c = game.ctrl, ry = c.ry;
+  if (ix === null) [ix, iz] = game.paths.nearestOpen(toCell(c.pos.x), toCell(c.pos.z), 8) ?? [toCell(c.pos.x), toCell(c.pos.z)];
+  if (game.driving === game.ride?.id) game.driving = null;
+  game.ride = null;
+  placeController(ix, iz).ry = ry;
+}
+
+// F: aboard, take or leave the helm; ashore, board a boat that's close and take its helm
+function boatKey() {
+  if (!game.ctrl || !game.boats) return;
+  if (game.ride) return toggleHelm();
+  const c = game.ctrl;
+  let best = null, bd = 4.5;
+  for (const b of game.boats.list.values()) {
+    const [lx, lz] = toLocal(b, c.pos.x, c.pos.z);
+    const d = Math.hypot(Math.max(0, Math.abs(lx) - BOAT.W), Math.max(0, lz - BOAT.TIP, BOAT.STERN - lz));
+    if (d < bd) { bd = d; best = b; }
+  }
+  if (!best) return toast('No boat nearby');
+  if (!c.swimming && deckY(best, 0) - c.pos.y > 1.4) return toast("Can't climb aboard from here");
+  board(best, BOAT.HELM[0], BOAT.HELM[1]);
+  toggleHelm();
+}
+function toggleHelm() {
+  const r = game.ride;
+  if (!r) return;
+  r.steer = !r.steer;
+  const b = game.boats.list.get(r.id);
+  if (r.steer) { [r.lx, r.lz] = BOAT.HELM; game.driving = r.id; r.repeat = 0.4; }
+  else if (b) setThrottle(b, 0); // letting go of the wheel rings Stop: it glides to a halt
+  toast(r.steer ? 'At the helm: W / S throttle up and down, A / D steer, F to let go' : 'You let go of the wheel: throttle to Stop');
+}
+// the ship's wheel under the cursor, while aboard
+function wheelAt(px, py) {
+  const b = game.boats.list.get(game.ride?.id);
+  if (!b) return false;
+  const [x, z] = toWorldXZ(b, 0, -1.95);
+  const v = new THREE.Vector3(x, SEA + BOAT.DECK + 0.66, z).project(camera);
+  return Math.hypot((v.x + 1) / 2 * pixel.cssW - px, (1 - v.y) / 2 * pixel.cssH - py) < Math.max(18, 300 / game.cam.dist);
+}
+
+// sail: the boat turns toward the held screen direction and picks up speed when it's facing there;
+// it coasts to a stop when you let go, and stops dead against land
+// the throttle gauge (#throttle, shown at the helm): the current notch and the speed
+function setThrottle(b, t) {
+  b.throttle = Math.max(-1, Math.min(THROTTLE.length - 2, t));
+}
+const GEAR_PX = 26; // notch spacing on the throttle lever's track (index.html / style.css)
+function throttleHud(b) {
+  const el = $('throttle'), show = !!(b && game.ride?.steer);
+  if (el.hidden === show) el.hidden = !show;
+  if (!show) return;
+  const t = b.throttle ?? 0;
+  if (el.dataset.t !== String(t)) { // move the lever to its notch (CSS eases it there with a clunk)
+    el.dataset.t = String(t);
+    el.querySelector('.th-lever').style.top = `${(THROTTLE.length - 2 - t) * GEAR_PX}px`;
+    el.querySelectorAll('.th-labels span').forEach((x) => x.classList.toggle('on', Number(x.dataset.t) === t));
+  }
+  const v = (b.vx ?? 0) * Math.sin(b.yaw) + (b.vz ?? 0) * Math.cos(b.yaw);
+  $('th-speed').textContent = `${Math.abs(v) < 0.05 ? '0.0' : v.toFixed(1)} tiles/s`;
+}
+
+function driveBoat(dt, keys, steps = 0) {
+  const r = game.ride, b = game.boats.list.get(r.id), w = game.world;
+  if (!b) return leaveBoat();
+  throttleHud(b);
+  if (game.driving !== b.id) return;
+  b.vx ??= 0; b.vz ??= 0; b.sail ??= 0; b.rudder ??= 0; b.throttle ??= 0;
+  const k = r.steer ? keys : { x: 0, z: 0 };
+  // throttle: each press of W / S moves it one notch (holding repeats after 0.4 s), and it stays there
+  const z = Math.sign(k.z);
+  if (r.steer && steps) { setThrottle(b, b.throttle + steps); r.repeat = 0.4; }
+  else if (!z) r.repeat = 0.4;
+  else if ((r.repeat -= dt) <= 0) { r.repeat = 0.3; setThrottle(b, b.throttle + z); }
+  const sailTo = THROTTLE[b.throttle + 1].sail;
+  b.sail += (sailTo - b.sail) * (1 - Math.exp(-dt * BOAT.SAIL_RATE)); // the sails fill and slacken gradually
+  // steering is relative to the boat, not the camera, so it can turn a full 360° with the camera left alone:
+  // D puts the rudder over to the boat's right (its heading decreases), A to its left
+  const helm = r.steer ? -k.x : 0; // the wheel swings over at RUDDER_RATE and springs back to centre faster
+  b.rudder += (helm - b.rudder) * (1 - Math.exp(-dt * BOAT.RUDDER_RATE * (helm ? 1 : 1.8)));
+  // velocity in the boat's frame: forward speed eases toward what the sail gives (and glides a long way
+  // without it); sideways slip from turning is damped by the keel, so the boat drifts a little in turns
+  const fx = Math.sin(b.yaw), fz = Math.cos(b.yaw), rx = Math.cos(b.yaw), rz = -Math.sin(b.yaw);
+  let fwd = b.vx * fx + b.vz * fz, side = b.vx * rx + b.vz * rz;
+  // over shallow sand (how far it has ridden up, see Boats.update) the hull drags: top speed falls by up to
+  // SHALLOW_SLOW, and it sheds speed quickly on running onto a sandbank
+  const shallow = Math.min(1, (b.lift ?? 0) / BOAT.SHALLOW_LIFT);
+  const want = b.sail * BOAT.MAX_SPEED * engineFactor(b) * (1 - BOAT.SHALLOW_SLOW * shallow); // the engine upgrade adds 15% a level
+  // filling the sail builds speed (ACCEL); backing it against your way brakes a bit harder; no sail glides (GLIDE)
+  let rate = !want ? BOAT.GLIDE : fwd && Math.sign(want) !== Math.sign(fwd) ? BOAT.ACCEL * 1.4 : Math.abs(want) > Math.abs(fwd) ? BOAT.ACCEL : BOAT.GLIDE;
+  if (Math.abs(fwd) > Math.abs(want)) rate = Math.max(rate, BOAT.SAND_DRAG * shallow); // the sand drags it down
+  fwd += (want - fwd) * (1 - Math.exp(-dt * rate));
+  side *= Math.exp(-dt * BOAT.KEEL);
+  b.vx = fwd * fx + side * rx;
+  b.vz = fwd * fz + side * rz;
+  // the rudder only bites with water flowing past it: barely any turning at a standstill. It turns the same
+  // way going astern (not reversed like a real rudder), so the keys always mean the same thing
+  const bite = Math.min(1, Math.abs(fwd) / BOAT.FULL_TURN_SPEED);
+  b.turn = b.rudder * BOAT.TURN * rudderFactor(b) * Math.max(bite, BOAT.IDLE_TURN); // the rudder upgrade adds 20% a level
+  const ny = b.yaw + b.turn * dt;
+  if (hullClear(w, b.x, b.z, ny)) b.yaw = ny; else b.turn = 0;
+  // move; against land it bumps back a little and loses its way
+  const speed = Math.hypot(b.vx, b.vz);
+  if (speed > 0.005) {
+    const nx = b.x + b.vx * dt, nz = b.z + b.vz * dt;
+    if (hullClear(w, nx, nz, b.yaw)) { b.x = nx; b.z = nz; }
+    else {
+      if (speed > 1.2) {
+        toast('Bump! Land ahead');
+        game.scene.effects.impact(b.x + fx * 3.2 * Math.sign(fwd || 1), SEA, b.z + fz * 3.2 * Math.sign(fwd || 1), 1.5, 'water');
+      }
+      b.vx *= -0.25; b.vz *= -0.25;
+      b.sail *= 0.3;
+    }
+  }
+  b.speed = Math.hypot(b.vx, b.vz);
+  Object.assign(b, { sx: b.x, sz: b.z, syaw: b.yaw }); // the driver draws it exactly where it is
+  const now = performance.now(), moved = Math.abs(b.x - (b.sentX ?? 0)) + Math.abs(b.z - (b.sentZ ?? 0)) + Math.abs(b.yaw - (b.sentYaw ?? 0)) > 0.005;
+  if (moved && now - (b.sentAt ?? 0) > BOAT_SEND_MS) {
+    Object.assign(b, { sentX: b.x, sentZ: b.z, sentYaw: b.yaw, sentAt: now });
+    sendBoat(b);
+    saveDigging();
+  }
+  if (!r.steer && b.speed < 0.04 && Math.abs(b.sail) < 0.02) { // drifted to a stop after letting go
+    Object.assign(b, { vx: 0, vz: 0, sail: 0, rudder: 0, speed: 0, turn: 0, throttle: 0 });
+    sendBoat(b);
+    game.driving = null;
+  }
+}
+
+// walking on deck: free movement (not tile-locked) in deck coordinates, around the cabin and cargo;
+// pushing against the rail for a moment steps off onto land or into the water there
+function walkOnDeck(dt, t, keys, yaw) {
+  const r = game.ride, b = game.boats.list.get(r?.id), c = game.ctrl;
+  if (!b) return void (game.ride && leaveBoat());
+  let anim = ANIM.IDLE, speed = 0;
+  const g = r.steer ? null : screenToGrid(keys, yaw); // the same 8 directions as walking ashore
+  if (g && (g.x || g.z)) {
+    const l = Math.hypot(g.x, g.z), dx = g.x / l, dz = -g.z / l; // world direction
+    const cs = Math.cos(b.syaw), sn = Math.sin(b.syaw);
+    const dlx = dx * cs - dz * sn, dlz = dx * sn + dz * cs; // in deck coordinates
+    speed = keys.run ? 5.6 : 3.2;
+    const nlx = r.lx + dlx * speed * dt, nlz = r.lz + dlz * speed * dt;
+    let moved = true;
+    if (walkable(nlx, nlz, undefined, b.obs)) { r.lx = nlx; r.lz = nlz; }
+    else if (walkable(nlx, r.lz, undefined, b.obs) && Math.abs(dlx) > 0.2) r.lx = nlx;
+    else if (walkable(r.lx, nlz, undefined, b.obs) && Math.abs(dlz) > 0.2) r.lz = nlz;
+    else moved = false;
+    c.ry = Math.atan2(dx, dz);
+    anim = keys.run ? ANIM.RUN : ANIM.WALK;
+    // against the rail (the spot ahead is off the deck): after a moment, step off there
+    const [ax, az] = [r.lx + dlx * 0.75, r.lz + dlz * 0.75];
+    if (!moved && !onDeck(ax, az)) {
+      r.push += dt;
+      const [wx, wz] = toWorldXZ(b, r.lx + dlx * 1.1, r.lz + dlz * 1.1);
+      const ix = toCell(wx), iz = toCell(wz), dy = deckY(b, t);
+      const ok = game.paths.passable(ix, iz) && (game.paths.waterAt(ix, iz) || (game.paths.floorAt(ix, iz) - dy <= 1.3 && dy - game.paths.floorAt(ix, iz) <= 3));
+      if (ok && r.push > 0.25) return leaveBoat(ix, iz);
+      if (!ok && r.push > 0.25 && !r.warned) { r.warned = true; toast("Can't step off here"); }
+      if (!moved) { anim = ANIM.IDLE; speed = 0; }
+    } else { r.push = 0; r.warned = false; if (!moved) { anim = ANIM.IDLE; speed = 0; } }
+  } else r.push = 0;
+  if (r.steer) { [r.lx, r.lz] = BOAT.HELM; c.ry = b.syaw; }
+  const [wx, wz] = toWorldXZ(b, r.lx, r.lz);
+  c.pos.x = wx; c.pos.z = wz; c.pos.y = deckY(b, t);
+  c.ix = toCell(wx); c.iz = toCell(wz);
+  c.swimming = false;
+  c.anim = anim;
+  c.speed = speed;
+}
+
 // ---------- digging (shovel and pickaxe) ----------
 
 // ---------- inventory ----------
@@ -773,8 +1146,9 @@ function loadInventory(key) {
   game.invKey = key;
   inventory.reset();
   try { if (key) inventory.fromJSON(JSON.parse(localStorage.getItem(INV_KEY + key))); } catch {}
+  if (inventory.creative) inventory.setCreative(true); // a fresh inventory: creative still opens the bag
   syncTool();
-  if (inventory.slots.every((s) => !s)) toast('Break bushes for sticks and pick up pebbles, then craft tools (I)');
+  if (inventory.slots.every((s) => !s)) toast('Break bushes for sticks and leaves, pick up pebbles, then craft (I)');
 }
 function saveInventory() {
   if (!game.invKey || game.invTimer) return;
@@ -789,16 +1163,16 @@ function heldLabel() {
   let text = held ? ITEMS[held.id].name : '';
   if (held?.id === 'wood') text += ` · planks ${rot % 2 ? 'north-south' : 'east-west'} (R)`;
   if (held?.id === 'log') text += ` · place to stack, lying ${rot % 2 ? 'north-south' : 'east-west'} (R)`;
-  if (held?.id === 'workbench') text += rot ? ` · turned ${rot * 90}° (R)` : ' · R turns it';
+  if (held && ITEMS[held.id].furn) text += rot ? ` · turned ${rot * 90}° (R)` : ' · R turns it';
   $('held-name').textContent = text;
 }
-// R: turn the workbench under the cursor, or else what's in hand
+// R: turn the furniture under the cursor, or else what's in hand
 function rotateKey() {
   const b = input.hover && game.ctrl ? benchAt(input.hover[0], input.hover[1]) : null;
   if (b) {
     const r = (b[2] + 1) % 4;
-    applyBench(b[0], b[1], r, true);
-    if (game.mode === 'multi') send({ type: 'bench', ix: b[0], iz: b[1], r, on: true });
+    applyBench(b[0], b[1], r, true, b[3]);
+    if (game.mode === 'multi') send({ type: 'bench', ix: b[0], iz: b[1], r, t: b[3], on: true });
     saveDigging();
     return;
   }
@@ -810,17 +1184,17 @@ function rotateKey() {
     return;
   }
   const id = inventory.held?.id;
-  if (id !== 'wood' && id !== 'workbench' && id !== 'log') return;
+  if (id !== 'wood' && id !== 'log' && !ITEMS[id]?.furn) return;
   game.rot = ((game.rot ?? 0) + 1) % 4;
   heldLabel();
 }
 
 // what a broken block drops
-const DROPS = { [K.SAND]: 'sand', [K.ROCK]: 'stone', [K.SNOW]: 'snow', [K.WOOD]: 'wood', [K.WOOD2]: 'wood' }; // everything else the shovel digs gives dirt
+const DROPS = { [K.SAND]: 'sand', [K.ROCK]: 'stone', [K.SNOW]: 'snow', [K.WOOD]: 'wood', [K.WOOD2]: 'wood', [K.WALL]: 'wall' }; // everything else the shovel digs gives dirt
 
 const SHOVEL_KINDS = new Set([K.GRASS, K.FOREST, K.DEEP, K.DIRT, K.SOIL, K.SAND, K.TRAIL, K.SNOW, K.PATH]);
 const PICKAXE_KINDS = new Set([K.ROCK]);
-const AXE_KINDS = new Set([K.WOOD, K.WOOD2]); // the axe also chops trees (see chopTree)
+const AXE_KINDS = new Set([K.WOOD, K.WOOD2, K.WALL]); // the axe also chops trees (see chopTree)
 // a click with a tool or block: dig or place on the clicked tile, walking next to it first if it's
 // further away (this is the only time a click moves the character; plain movement is WASD)
 function useToolAt(px, py) {
@@ -880,7 +1254,7 @@ function makeOutline() {
   // see-through previews of what you're about to place, turned the way R set it (ghostParts)
   const { blockGeo, benchMat } = ghostParts();
   const block = new THREE.Mesh(blockGeo, null);
-  const bench = new THREE.Mesh(benchGeometry(), benchMat);
+  const bench = new THREE.Mesh(furnitureGeometry(0), benchMat); // its geometry follows the held furniture
   bench.position.y = -0.5; // the outline box is centred; the model stands on its base
   block.renderOrder = bench.renderOrder = 14;
   g.add(lines, fill, block, bench);
@@ -927,11 +1301,39 @@ function ghostParts() {
     mats: {
       wood: new THREE.MeshLambertMaterial({ map: tex(false), ...see }),
       wood2: new THREE.MeshLambertMaterial({ map: tex(true), ...see }),
-      dirt: color(0x8d5c3a), stone: color(0x8e8c88), sand: color(0xe2cf92), snow: color(0xeef3f8),
+      dirt: color(0x8d5c3a), stone: color(0x8e8c88), sand: color(0xe2cf92), snow: color(0xeef3f8), wall: color(0x8a5730),
     },
   };
   return ghost;
 }
+// What a click under the cursor would act on (the same order as onTap), for the hover highlight:
+// { kind: 'frog' | 'bench' | 'pile' | 'tree' | 'bush' | 'pebble', obj } or null.
+function hoverTarget(px, py) {
+  const held = inventory.held, item = held && ITEMS[held.id];
+  if (game.ride) return null;
+  const frog = frogAt(px, py);
+  if (frog) return { kind: 'frog', obj: frog };
+  if (item?.throwable) return null; // a click throws the frog in hand
+  if (TOOLS[game.tool] === 'axe') {
+    const boat = boatAt(px, py);
+    if (boat) return { kind: 'boat', obj: boat };
+    const bench = benchAt(px, py);
+    if (bench) return { kind: 'bench', obj: bench };
+    const pile = pileAt(px, py);
+    if (pile) return { kind: 'pile', obj: pile };
+    const tree = treeAt(px, py);
+    if (tree) return { kind: 'tree', obj: tree };
+  } else if (!item?.block && !item?.place) {
+    const bench = benchAt(px, py);
+    if (bench && bench[3] === 0) return { kind: 'bench', obj: bench }; // a workbench opens its crafting
+  }
+  const bush = bushAt(px, py);
+  if (bush) return { kind: 'bush', obj: bush };
+  const pebble = pebbleAt(px, py);
+  if (pebble) return { kind: 'pebble', obj: pebble };
+  return null;
+}
+
 function updateOutline() {
   const o = game.outline;
   if (!o) return;
@@ -939,33 +1341,15 @@ function updateOutline() {
   const hover = input.hover;
   o.visible = false;
   o.userData.block.visible = o.userData.bench.visible = o.userData.log.visible = false;
-  // a hand cursor over things a click gathers
-  $('view').style.cursor = hover && !inventory.isOpen && game.ctrl && (bushAt(hover[0], hover[1]) || pebbleAt(hover[0], hover[1])) ? 'pointer' : '';
+  if (game.boatEdit) return editHover(); // edit mode: outline the boat part under the cursor
+  // highlight what a click would act on (frogs, bushes, pebbles, workbenches; with the axe furniture
+  // and log piles), with a hand cursor; trees under the axe get the trunk box below
+  const target = hover && !inventory.isOpen && game.ctrl ? hoverTarget(hover[0], hover[1]) : null;
+  game.scene.setHighlight(target && target.kind !== 'tree' ? target : null, clock.elapsedTime, game.cam.dist);
+  $('view').style.cursor = target ? 'pointer' : '';
+  if (target && target.kind !== 'tree') return;
+  if (game.ride || item?.boat) return;
   if (!item || !(item.tool || item.block || item.place) || !hover || inventory.isOpen) return;
-  // the axe over a log pile: outline it
-  if (item.tool === 'axe') {
-    const pl = pileAt(hover[0], hover[1]);
-    if (pl) {
-      o.position.set(toWorld(pl[0]), game.world.H(pl[0], pl[1]) + 0.5, toWorld(pl[1]));
-      o.scale.set(1.04, 1.04, 1.04);
-      o.userData.lines.material.color.setHex(OUTLINE_OK);
-      o.userData.fill.visible = false;
-      o.visible = true;
-      return;
-    }
-  }
-  // the axe over a workbench: outline it
-  if (item.tool === 'axe') {
-    const b = benchAt(hover[0], hover[1]);
-    if (b) {
-      o.position.set(toWorld(b[0]), game.world.H(b[0], b[1]) + 0.5, toWorld(b[1]));
-      o.scale.set(1.04, 1.04, 1.04);
-      o.userData.lines.material.color.setHex(OUTLINE_OK);
-      o.userData.fill.visible = false;
-      o.visible = true;
-      return;
-    }
-  }
   // the axe over a tree: outline its trunk
   if (item.tool === 'axe') {
     const t = treeAt(hover[0], hover[1]);
@@ -1009,6 +1393,7 @@ function updateOutline() {
       o.userData.log.rotation.y = r * Math.PI / 2;
       o.userData.log.visible = true;
     } else if (item.place) {
+      o.userData.bench.geometry = furnitureGeometry(FURNITURE.indexOf(held.id));
       o.userData.bench.visible = true;
       o.userData.bench.rotation.y = (((Math.round(Math.atan2(c.ix - ix, c.iz - iz) / (Math.PI / 2)) % 4) + 4 + rot) % 4) * Math.PI / 2;
     } else {
@@ -1030,7 +1415,7 @@ function actAt(ix, iz) {
 }
 
 // what a placed block becomes, and the highest you can build
-const PLACE_KINDS = { dirt: K.SOIL, stone: K.ROCK, sand: K.SAND, snow: K.SNOW, wood: K.WOOD };
+const PLACE_KINDS = { dirt: K.SOIL, stone: K.ROCK, sand: K.SAND, snow: K.SNOW, wood: K.WOOD, wall: K.WALL };
 const MAX_BUILD_H = 24;
 
 // put the held block on a neighbouring tile: the tile rises one block
@@ -1135,45 +1520,56 @@ function takeLog(pl) {
   }, SWING_SECS * 450);
 }
 
-// ---------- workbenches ----------
-// Why a workbench can't go on this tile, or null.
+// ---------- furniture: workbenches, chairs, tables, beds, lamps, bookshelves ----------
+// world.benches: Map(cellKey -> [ix, iz, rot, type]); type = index in FURNITURE (and the item id).
+// Why a piece of furniture can't go on this tile, or null.
 function benchProblem(ix, iz) {
-  if (game.world.H(ix, iz) < SEA) return "A workbench can't stand in water";
+  if (game.world.H(ix, iz) < SEA) return "Furniture can't stand in water";
   return placeProblem(ix, iz);
 }
-// put the held workbench on a neighbouring tile, its front facing you
+// put the held furniture on a neighbouring tile, its front facing you
 function placeBench(ix, iz) {
   const t = clock.elapsedTime, c = game.ctrl, w = game.world, why = benchProblem(ix, iz);
   if (t < game.nextDig) return;
   c.ry = Math.atan2(ix - c.ix, iz - c.iz);
   if (why) return toast(why);
+  const type = FURNITURE.indexOf(inventory.held?.id);
+  if (type < 0) return;
   const r = ((Math.round(Math.atan2(c.ix - ix, c.iz - iz) / (Math.PI / 2)) % 4) + 4 + (game.rot ?? 0)) % 4; // facing you, plus R turns
   inventory.takeHeld(1);
   game.nextDig = t + SWING_SECS + 0.05;
   if (game.local) swingTool(game.local.char);
   setTimeout(() => {
     if (game.world !== w) return;
-    applyBench(ix, iz, r, true);
+    applyBench(ix, iz, r, true, type);
     game.scene.effects.impact(toWorld(ix), w.H(ix, iz) + 0.1, toWorld(iz), 1.0, 'wood');
-    if (game.mode === 'multi') send({ type: 'bench', ix, iz, r, on: true });
+    if (game.mode === 'multi') send({ type: 'bench', ix, iz, r, t: type, on: true });
     saveDigging();
   }, SWING_SECS * 450);
 }
-function applyBench(ix, iz, r, on) {
+function applyBench(ix, iz, r, on, type = 0) {
   const w = game.world, key = cellKey(ix, iz);
   const cur = w.benches.get(key);
-  if (on ? cur?.[2] === r : !cur) return;
-  if (on) w.benches.set(key, [ix, iz, r]); else w.benches.delete(key);
+  if (on ? cur?.[2] === r && cur[3] === type : !cur) return;
+  if (on) w.benches.set(key, [ix, iz, r, type]); else w.benches.delete(key);
   game.scene.setBenches(w.benches);
   game.digVersion = (game.digVersion ?? 0) + 1;
 }
-function onBench({ id, ix, iz, r, on }) {
+// clicking a workbench: walk up to it, then open the inventory screen with its recipes
+function useWorkbench(b) {
+  const o = { x: toWorld(b[0]), z: toWorld(b[1]) }, key = cellKey(b[0], b[1]);
+  if (!inReach(o, () => { const q = game.world.benches.get(key); if (q?.[3] === 0) useWorkbench(q); })) return;
+  game.ctrl.ry = Math.atan2(o.x - game.ctrl.pos.x, o.z - game.ctrl.pos.z);
+  hideCtx();
+  inventory.open('bench');
+}
+function onBench({ id, ix, iz, r, t = 0, on }) {
   if (id === game.me) return;
-  applyBench(ix, iz, r, on);
+  applyBench(ix, iz, r, on, t);
   const p = game.remotes.get(id);
   if (p) swingTool(p.char);
 }
-// the workbench under the cursor (closest projected middle), or null
+// the furniture under the cursor (closest projected middle), or null
 function benchAt(px, py) {
   let best = null, bd = Math.max(20, 300 / game.cam.dist);
   const p = game.ctrl.pos, a = new THREE.Vector3();
@@ -1189,10 +1585,10 @@ function benchAt(px, py) {
   }
   return best;
 }
-// the axe picks a workbench back up (one swing)
+// the axe picks furniture back up (one swing)
 function takeBench(b) {
-  const c = game.ctrl, now = clock.elapsedTime, [ix, iz] = b, x = toWorld(ix), z = toWorld(iz);
-  if (Math.hypot(x - c.pos.x, z - c.pos.z) > 1.6) return toast('Walk up to the workbench first');
+  const c = game.ctrl, now = clock.elapsedTime, [ix, iz] = b, x = toWorld(ix), z = toWorld(iz), id = FURNITURE[b[3]] ?? 'workbench';
+  if (Math.hypot(x - c.pos.x, z - c.pos.z) > 1.6) return toast(`Walk up to the ${ITEMS[id].name.toLowerCase()} first`);
   if (now < game.nextDig) return;
   game.nextDig = now + SWING_SECS + 0.05;
   c.ry = Math.atan2(x - c.pos.x, z - c.pos.z);
@@ -1202,8 +1598,8 @@ function takeBench(b) {
     if (game.world !== w || !w.benches.has(cellKey(ix, iz))) return;
     applyBench(ix, iz, 0, false);
     game.scene.effects.impact(x, w.H(ix, iz) + 0.4, z, 1.4, 'wood');
-    if (inventory.add('workbench', 1) > 0) toast('Your inventory is full');
-    if (game.mode === 'multi') send({ type: 'bench', ix, iz, r: 0, on: false });
+    give(id, 1);
+    if (game.mode === 'multi') send({ type: 'bench', ix, iz, r: 0, t: 0, on: false });
     saveDigging();
   }, SWING_SECS * 450);
 }
@@ -1274,8 +1670,8 @@ function saveDigging() {
     game.saveTimer = null;
     const w = game.world, name = game.saveName;
     if (!w || !getSave(name)) return;
-    const benches = [...w.benches.values()], picks = w.pickList(), piles = [...w.piles.values()];
-    putSave(name, w.endless ? endlessMap(name, w.seed, w.editsList(), w.choppedList(), benches, picks, piles) : { ...encodeMap(w.base, name), ...(benches.length ? { benches } : {}), ...(picks.length ? { picks } : {}), ...(piles.length ? { piles } : {}) });
+    const benches = [...w.benches.values()], picks = w.pickList(), piles = [...w.piles.values()], boats = game.boats?.listOut() ?? [];
+    putSave(name, w.endless ? endlessMap(name, w.seed, w.editsList(), w.choppedList(), benches, picks, piles, boats) : { ...encodeMap(w.base, name), ...(benches.length ? { benches } : {}), ...(picks.length ? { picks } : {}), ...(piles.length ? { piles } : {}), ...(boats.length ? { boats } : {}) });
   }, 1500);
 }
 
@@ -1329,7 +1725,7 @@ function updateLabels() {
 
 const AREA_NAMES = {
   [K.SEABED]: 'Open Water', [K.SAND]: 'Beach', [K.GRASS]: 'Meadow',
-  [K.FOREST]: 'Forest', [K.ROCK]: 'Mountains', [K.SNOW]: 'Snowy Peaks', [K.PATH]: 'Village', [K.DEEP]: 'Deep Forest', [K.TRAIL]: 'Mountain Trail', [K.DIRT]: 'Meadow', [K.SOIL]: 'Dug Soil', [K.WOOD]: 'Wooden Floor', [K.WOOD2]: 'Wooden Floor',
+  [K.FOREST]: 'Forest', [K.ROCK]: 'Mountains', [K.SNOW]: 'Snowy Peaks', [K.PATH]: 'Village', [K.DEEP]: 'Deep Forest', [K.TRAIL]: 'Mountain Trail', [K.DIRT]: 'Meadow', [K.SOIL]: 'Dug Soil', [K.WOOD]: 'Wooden Floor', [K.WOOD2]: 'Wooden Floor', [K.WALL]: 'Log Cabin',
 };
 
 function updateArea() {
@@ -1362,7 +1758,7 @@ function updateRuinsHud() {
 
 const MINI_COLORS = {
   [K.SEABED]: [63, 143, 214], [K.SAND]: [232, 217, 160], [K.GRASS]: [127, 191, 79],
-  [K.FOREST]: [70, 130, 60], [K.ROCK]: [143, 138, 128], [K.SNOW]: [242, 244, 246], [K.PATH]: [214, 205, 180], [K.DEEP]: [34, 74, 40], [K.TRAIL]: [204, 166, 112], [K.DIRT]: [150, 160, 88], [K.SOIL]: [140, 104, 70], [K.WOOD]: [168, 116, 68], [K.WOOD2]: [168, 116, 68],
+  [K.FOREST]: [70, 130, 60], [K.ROCK]: [143, 138, 128], [K.SNOW]: [242, 244, 246], [K.PATH]: [214, 205, 180], [K.DEEP]: [34, 74, 40], [K.TRAIL]: [204, 166, 112], [K.DIRT]: [150, 160, 88], [K.SOIL]: [140, 104, 70], [K.WOOD]: [168, 116, 68], [K.WOOD2]: [168, 116, 68], [K.WALL]: [122, 78, 44],
 };
 let miniBase = null;
 let miniOrigin = null; // top-left cell of the minimap: the whole island, or a window around you in an endless world
@@ -1380,7 +1776,13 @@ function drawMinimapBase() {
   for (let z = 0; z < WORLD; z++) {
     for (let x = 0; x < WORLD; x++) {
       const k = world.kind(ox + x, oz + z), h = world.H(ox + x, oz + z);
-      const shade = k === K.SEABED ? 0.75 + (h / SEA) * 0.25 : 0.85 + Math.min(h, 10) * 0.025;
+      if (k === K.SEABED) { // water by depth, like the water itself: turquoise shallows, reef teal, blue, deep navy
+        const d = SEA - h;
+        const [r, g, b] = d < 0.6 ? [112, 206, 204] : d < 1.5 ? [62, 168, 186] : d < 2.6 ? [44, 120, 186] : d < 3.6 ? [30, 86, 158] : [18, 52, 112];
+        img.data.set([r, g, b, 255], (z * WORLD + x) * 4);
+        continue;
+      }
+      const shade = 0.85 + Math.min(h, 10) * 0.025;
       const [r, g, b] = MINI_COLORS[k];
       img.data.set([r * shade, g * shade, b * shade, 255], (z * WORLD + x) * 4);
     }
@@ -1406,6 +1808,7 @@ function drawMinimap() {
   const { world } = game;
   dot(world.camp.x, world.camp.z, '#ff8c2a', 2);
   for (const ru of game.ruinsFound.values()) dot(ru.x, ru.z, '#7ef0ff', 2);
+  for (const b of game.boats.list.values()) dot(b.sx, b.sz, '#c8643a', 4);
   for (const r of game.remotes.values()) if (r.seen) dot(r.pos.x, r.pos.z, r.color);
   // which way the camera looks: a short tick from the player
   const px = Math.round(game.ctrl.pos.x + WORLD / 2 - ox), pz = Math.round(game.ctrl.pos.z + WORLD / 2 - oz);
@@ -1526,6 +1929,9 @@ function resetSession() {
   game.scene = null;
   game.world = null;
   game.ctrl = null;
+  game.ride = null;
+  game.driving = null;
+  game.boats = null;
   game.local = null;
   game.mapKey = null;
   game.seed = null;
@@ -1536,14 +1942,222 @@ function resetSession() {
 }
 
 $('open-menu').addEventListener('click', (e) => { e.currentTarget.blur(); toMenu(); });
+// ---------- the boat panel (B while aboard): name, paint and upgrades ----------
+const boatPanelBoat = () => (game.ride ? game.boats?.list.get(game.ride.id) : null);
+function toggleBoatPanel(open = $('boat-panel').hidden) {
+  if (open && !boatPanelBoat()) return toast('Board a boat first (B opens its panel)');
+  $('boat-panel').hidden = !open;
+  if (open) renderBoatPanel();
+}
+// change the boat's look here and for everyone, and keep it in the save
+// a new cabin or prop may now stand where you are: step to the nearest free spot on deck
+function unstickRider(b) {
+  const r = game.ride;
+  if (!r || r.id !== b.id || r.steer || walkable(r.lx, r.lz, undefined, b.obs)) return;
+  const spot = nearestWalkable(r.lx, r.lz, b.obs) ?? BOAT.HELM;
+  [r.lx, r.lz] = spot;
+}
+function setBoatLook(b, look) {
+  game.boats.setLook(b.id, look);
+  unstickRider(b);
+  if (game.mode === 'multi') send({ type: 'boatlook', id: b.id, look: b.look });
+  saveDigging();
+  renderBoatPanel();
+}
+const canPay = (cost) => inventory.creative || Object.entries(cost).every(([id, n]) => inventory.count(id) >= n);
+function renderBoatPanel() {
+  const b = boatPanelBoat();
+  if (!b) return;
+  const L = b.look;
+  if (document.activeElement !== $('bp-name')) $('bp-name').value = L.n;
+  // upgrades: level pips, the next level's cost, and a Build button
+  $('bp-ups').innerHTML = UPGRADES.map((u, i) => {
+    const lvl = L.u[i], max = UPGRADE_MAX[i], cost = u.cost[lvl];
+    const pips = Array.from({ length: max }, (_, k) => `<i class="${k < lvl ? 'on' : ''}"></i>`).join('');
+    const items = cost ? Object.entries(cost).map(([id, n]) => `<span class="craft-item${inventory.count(id) >= n || inventory.creative ? '' : ' short'}"><img alt="" src="${iconURL(id)}" /><b>${n}</b></span>`).join('') : '';
+    return `<div class="bp-up"><div class="bp-up-text"><b>${u.name}</b> <span class="bp-pips">${pips}</span><br><small>${u.desc}</small></div>
+      <div class="bp-up-cost">${items}</div>
+      <button class="btn${cost && canPay(cost) ? ' accent' : ''}" data-u="${i}" tabindex="-1" ${cost ? (canPay(cost) ? '' : 'disabled') : 'disabled'}>${cost ? (lvl ? 'Upgrade' : 'Build') : 'Done'}</button></div>`;
+  }).join('');
+}
+$('bp-ups').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-u]'), b = boatPanelBoat();
+  if (!btn || !b) return;
+  btn.blur();
+  const i = Number(btn.dataset.u), cost = UPGRADES[i].cost[b.look.u[i]];
+  if (!cost || !canPay(cost)) return;
+  if (!inventory.creative) for (const [id, n] of Object.entries(cost)) inventory.remove(id, n);
+  inventory.render(); inventory.onChange();
+  const u = b.look.u.slice();
+  u[i]++;
+  setBoatLook(b, { ...b.look, u });
+  toast(`${UPGRADES[i].name} ${UPGRADE_MAX[i] > 1 ? `level ${u[i]}` : 'built'}!`);
+});
+$('bp-name').maxLength = NAME_MAX;
+$('bp-name').addEventListener('change', () => { const b = boatPanelBoat(); if (b) setBoatLook(b, { ...b.look, n: $('bp-name').value }); $('bp-name').blur(); });
+$('bp-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('bp-name').blur(); e.stopPropagation(); });
+$('bp-close').addEventListener('click', (e) => { e.currentTarget.blur(); toggleBoatPanel(false); });
+$('boat-btn').addEventListener('click', (e) => { e.currentTarget.blur(); toggleBoatPanel(); });
+$('bp-edit').addEventListener('click', (e) => { e.currentTarget.blur(); setBoatEdit(true); });
+
+// ---------- boat edit mode: hover a part of your boat to outline it, click it to change it ----------
+// game.boatEdit = the boat's id while editing. Parts are found by raycasting the boat's meshes (boat.js tags each
+// with userData.part / slot). The part menu (#part-menu) shows the part's variants as little pictures (boaticons.js)
+// and, where the part takes one, a row of colours. Parts that are switched off (no cabin, no mast...) are reached
+// from the buttons in the edit banner.
+const PART_TITLES = { hull: 'Hull', cabin: 'Cabin', roof: 'Roof', top: 'On the roof', mast: 'Mast' };
+function setBoatEdit(on) {
+  const b = boatPanelBoat();
+  if (on && !b) return toast('Board your boat first');
+  if (game.boatEdit && game.boats?.list.has(game.boatEdit)) game.boats.setEditing(game.boatEdit, false);
+  game.boatEdit = on ? b.id : null;
+  if (on) {
+    if (game.ride.steer) toggleHelm();
+    toggleBoatPanel(false);
+    game.boats.setEditing(b.id, true);
+  }
+  $('edit-banner').hidden = !on;
+  hidePartMenu();
+  game.scene?.setHighlight(null, 0, 0);
+}
+// the boat part under the screen point, or null: { part, slot }
+const _ray = new THREE.Raycaster(), _ndc = new THREE.Vector2();
+function editPick(px, py) {
+  const b = game.boats?.list.get(game.boatEdit);
+  if (!b) return null;
+  _ndc.set((px / pixel.cssW) * 2 - 1, -(py / pixel.cssH) * 2 + 1);
+  _ray.setFromCamera(_ndc, camera);
+  const hits = _ray.intersectObjects(b.group.children.filter((o) => o.visible && o.userData.part), false);
+  const h = hits[0]?.object;
+  return h ? { part: h.userData.part, slot: h.userData.slot } : null;
+}
+function editHover() {
+  const b = game.boats?.list.get(game.boatEdit), hover = input.hover;
+  const hit = b && hover && !game.partMenu?.pinned ? editPick(hover[0], hover[1]) : null;
+  const sel = hit ?? game.partMenu; // keep the part you're editing outlined while its menu is open
+  const m = b && sel && game.boats.partMesh(b, sel.part, sel.slot);
+  game.scene.setHighlight(m ? { kind: 'mesh', obj: m } : null, clock.elapsedTime, game.cam.dist);
+  $('view').style.cursor = hit ? 'pointer' : '';
+}
+function editClick(px, py) {
+  const hit = editPick(px, py);
+  if (hit) openPartMenu(hit, px, py); else hidePartMenu();
+}
+function hidePartMenu() { $('part-menu').hidden = true; game.partMenu = null; }
+function openPartMenu(hit, px, py) {
+  game.partMenu = hit;
+  const el = $('part-menu');
+  el.hidden = false;
+  renderPartMenu();
+  // next to the click, kept on screen
+  const w = el.offsetWidth, h = el.offsetHeight;
+  el.style.left = `${Math.max(8, Math.min(window.innerWidth - w - 8, px + 14))}px`;
+  el.style.top = `${Math.max(8, Math.min(window.innerHeight - h - 8, py - h / 2))}px`;
+}
+function renderPartMenu() {
+  const b = game.boats?.list.get(game.boatEdit), pm = game.partMenu;
+  if (!b || !pm) return hidePartMenu();
+  const L = b.look, lay = layoutOf(L);
+  let title = PART_TITLES[pm.part], styles = [], colour = null, colourLabel = 'Colour';
+  const opt = (kind, names, cur) => names.map((n, v) => ({ v, name: n, icon: partIcon(pixel.renderer, kind, v, L), on: cur === v }));
+  if (pm.part === 'hull') colour = 0;
+  else if (pm.part === 'cabin') { styles = opt('cabin', CABINS.map((c) => c.name), L.p[0]); colour = lay.cab ? 1 : null; }
+  else if (pm.part === 'roof') {
+    styles = lay.cab ? opt('roof', ROOFS, L.p[1]) : [];
+    if (!lay.cab) title += ' (needs a cabin)';
+    colour = lay.cab ? (lay.roof === 2 ? 3 : 2) : null;
+    if (lay.roof === 2) colourLabel = 'Canvas colour';
+  } else if (pm.part === 'top') {
+    styles = lay.cab && lay.roof !== 2 ? opt('top', TOPS, L.p[2]) : [];
+    if (!lay.cab) title += ' (needs a cabin)'; else if (lay.roof === 2) title += ' (not on a canvas roof)';
+  } else if (pm.part === 'mast') { styles = opt('mast', MASTS, L.p[3]); colour = 3; colourLabel = 'Flag & sail colour'; }
+  else if (pm.part === 'slot') {
+    const sl = DECK_SLOTS[pm.slot];
+    title = sl.name;
+    styles = PROPS.map((pr, t) => ({ v: t, name: pr.name, ok: pr.r <= sl.maxR })).filter((o) => o.ok)
+      .map((o) => ({ ...o, icon: partIcon(pixel.renderer, 'prop', o.v, L), on: propAt(L, pm.slot) === o.v }));
+  }
+  $('part-menu').innerHTML = `<div class="pm-head"><b>${title}</b><button class="pm-x" tabindex="-1" title="Close">×</button></div>`
+    + (styles.length ? `<div class="pm-styles">${styles.map((o) => `<button class="pm-style${o.on ? ' on' : ''}" data-v="${o.v}" tabindex="-1" title="${o.name}"><img alt="" src="${o.icon}" /><span>${o.name}</span></button>`).join('')}</div>` : '')
+    + (colour !== null ? `<div class="pm-sub">${colourLabel}</div><div class="pm-colours">${BOAT_PALETTE.map((hex, ci) =>
+      `<button class="bp-swatch${L.c[colour] === ci ? ' on' : ''}" data-c="${ci}" style="background:#${hex.toString(16).padStart(6, '0')}" tabindex="-1"></button>`).join('')}</div>` : '');
+  $('part-menu').dataset.colour = colour ?? '';
+}
+$('part-menu').addEventListener('click', (e) => {
+  const b = game.boats?.list.get(game.boatEdit), pm = game.partMenu;
+  if (!b || !pm) return;
+  if (e.target.closest('.pm-x')) return hidePartMenu();
+  const st = e.target.closest('.pm-style'), sw = e.target.closest('.bp-swatch');
+  if (st) {
+    const v = Number(st.dataset.v);
+    if (pm.part === 'slot') { const d = b.look.d.slice(); d[pm.slot] = v; setBoatLook(b, { ...b.look, d }); }
+    else { const p = b.look.p.slice(); p[{ cabin: 0, roof: 1, top: 2, mast: 3 }[pm.part]] = v; setBoatLook(b, { ...b.look, p }); }
+  } else if (sw) {
+    const c = b.look.c.slice();
+    c[Number($('part-menu').dataset.colour)] = Number(sw.dataset.c);
+    setBoatLook(b, { ...b.look, c });
+  } else return;
+  renderPartMenu();
+});
+// the banner's part buttons open a part's menu even when that part is switched off (no cabin, no mast...)
+$('edit-banner').addEventListener('click', (e) => {
+  const btn = e.target.closest('button');
+  if (!btn) return;
+  btn.blur();
+  if (btn.dataset.part) { const r = btn.getBoundingClientRect(); openPartMenu({ part: btn.dataset.part }, r.left, r.bottom + 120); }
+  else if (btn.id === 'eb-panel') { setBoatEdit(false); toggleBoatPanel(true); }
+  else if (btn.id === 'eb-done') setBoatEdit(false);
+});
+// the throttle lever: click a gear's name, or drag the lever up and down its track
+{
+  const helmBoat = () => (game.ride?.steer ? game.boats?.list.get(game.ride.id) : null);
+  $('throttle').querySelector('.th-labels').addEventListener('click', (e) => {
+    const span = e.target.closest('[data-t]'), b = helmBoat();
+    if (span && b) setThrottle(b, Number(span.dataset.t));
+  });
+  const track = $('throttle').querySelector('.th-track');
+  const fromY = (e) => { // the notch nearest the pointer
+    const b = helmBoat();
+    if (!b) return;
+    const y = e.clientY - track.getBoundingClientRect().top - 7;
+    setThrottle(b, THROTTLE.length - 2 - Math.round(Math.max(0, Math.min(THROTTLE.length - 1, y / GEAR_PX))));
+  };
+  track.addEventListener('pointerdown', (e) => { e.preventDefault(); track.setPointerCapture(e.pointerId); fromY(e); });
+  track.addEventListener('pointermove', (e) => { if (track.hasPointerCapture(e.pointerId)) fromY(e); });
+}
+// creative mode (debug): every item in the inventory screen and free building, to try new things
+// instantly. The top-left button toggles it; `?creative` turns it on; remembered per browser.
+const CREATIVE_KEY = 'settleon.creative';
+function setCreative(on, quiet = false) {
+  inventory.setCreative(on);
+  $('creative-btn').classList.toggle('on', on);
+  $('creative-btn').textContent = `Creative: ${on ? 'on' : 'off'}`;
+  try { localStorage.setItem(CREATIVE_KEY, on ? '1' : '0'); } catch {}
+  if (!quiet) toast(on ? 'Creative mode: every item in your inventory (I), building is free' : 'Creative mode off');
+}
+$('creative-btn').addEventListener('click', (e) => { e.currentTarget.blur(); setCreative(!inventory.creative); });
+{
+  let on = new URLSearchParams(location.search).has('creative');
+  try { on ||= localStorage.getItem(CREATIVE_KEY) === '1'; } catch {}
+  setCreative(on, true);
+}
+// the controls card: the "?" button or H toggles it, Esc closes it first
+function toggleHelp(open = $('help').hidden) {
+  $('help').hidden = !open;
+  $('help-btn').setAttribute('aria-expanded', String(open));
+}
+$('help-btn').addEventListener('click', (e) => { e.currentTarget.blur(); toggleHelp(); });
 window.addEventListener('keydown', (e) => {
   const playing = (game.mode === 'single' || game.mode === 'multi') && !editor.active;
-  if (e.code === 'Escape' && playing) { if (inventory.isOpen) inventory.close(); else toMenu(); return; }
+  if (e.code === 'Escape' && playing) { if (game.boatEdit) { if (game.partMenu) hidePartMenu(); else setBoatEdit(false); } else if (!$('boat-panel').hidden) toggleBoatPanel(false); else if (!$('help').hidden) toggleHelp(false); else if (inventory.isOpen) inventory.close(); else toMenu(); return; }
   if (e.target.closest?.('input, select, textarea') || !playing) return;
+  if (e.code === 'KeyH') { toggleHelp(); return; }
+  if (e.code === 'KeyB' && !inventory.isOpen) { if (game.boatEdit) setBoatEdit(false); else toggleBoatPanel(); return; }
+  if (e.code === 'KeyF' && !inventory.isOpen) { boatKey(); return; }
   if (e.code === 'KeyI' || e.code === 'Tab') { e.preventDefault(); hideCtx(); inventory.toggle(); return; }
   if (e.code === 'KeyR' && !inventory.isOpen) { rotateKey(); return; }
   const n = e.code.startsWith('Digit') ? Number(e.code.slice(5)) - 1 : -1;
-  if (n >= 0 && n < 9) inventory.select(n);
+  if (n >= 0 && n < HOTBAR) inventory.select(n);
 });
 $('open-editor').addEventListener('click', (e) => {
   e.currentTarget.blur();
@@ -1568,7 +2182,7 @@ function openEditor() {
     return;
   }
   pixel.renderer.setAnimationLoop(frame);
-  if (import.meta.env.DEV) window.__dbg = { game, pixel, camera, inventory }; // dev only: lets headless tests inspect the renderer
+  if (import.meta.env.DEV) window.__dbg = { game, pixel, camera, inventory, actAt, useWorkbench, launchAt, boatKey, editPick }; // dev only: lets headless tests inspect the renderer and act
   // ?room=... jumps straight into multiplayer (handy for testing); otherwise the main menu
   if (new URLSearchParams(location.search).has('room')) startMulti(identity.room);
   else toMenu();

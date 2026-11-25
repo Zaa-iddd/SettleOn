@@ -9,8 +9,10 @@ import * as THREE from 'three';
 
 export const ANIM = { IDLE: 0, WALK: 1, RUN: 2, AIR: 3, SWIM: 4 };
 // what the hand can hold (index 0 = empty): the two tools, then blocks (the network sends this index)
-export const TOOLS = [null, 'shovel', 'pickaxe', 'dirt', 'stone', 'sand', 'snow', 'frog', 'axe', 'wood', 'log', 'workbench', 'stick', 'pebble', 'berries'];
-const BLOCK_COLORS = { wood: [0xa87444, 0x8a5a30], dirt: [0x8d5c3a, 0x6fb33a], stone: [0x8e8c88, 0x8e8c88], sand: [0xe2cf92, 0xe2cf92], snow: [0xeef3f8, 0xeef3f8] };
+// held-item index → id. Sent to others as the tens of the `a` code (the server allows up to 29).
+export const TOOLS = [null, 'shovel', 'pickaxe', 'dirt', 'stone', 'sand', 'snow', 'frog', 'axe', 'wood', 'log', 'workbench', 'stick', 'pebble', 'berries',
+  'leaves', 'wall', 'chair', 'table', 'bed', 'lamp', 'shelf', 'boat'];
+const BLOCK_COLORS = { wood: [0xa87444, 0x8a5a30], wall: [0x8a5730, 0xc08a56], dirt: [0x8d5c3a, 0x6fb33a], stone: [0x8e8c88, 0x8e8c88], sand: [0xe2cf92, 0xe2cf92], snow: [0xeef3f8, 0xeef3f8] };
 export const SWING_SECS = 0.38; // one tool swing: wind up over the head, then chop down
 
 const SKIN = [0xffdfc4, 0xf6c9a4, 0xe9b08a, 0xc68863, 0x8d5a3b];
@@ -379,6 +381,32 @@ export function setTool(ch, tool) {
     ch.toolGrip.add(box(0.17, 0.025, 0.11, 0xc08a56, 0, 0.03, 0.08));
     ch.toolGrip.add(box(0.15, 0.07, 0.09, 0x8a5a34, 0, -0.02, 0.08));
     ch.toolGrip.add(box(0.17, 0.08, 0.02, 0x7a4f2c, 0, 0.08, 0.035));
+  } else if (TOOLS[tool] === 'leaves') { // a little bundle of leaves
+    ch.toolGrip.add(box(0.12, 0.05, 0.1, 0x5fa83a, 0, 0, 0.07));
+    ch.toolGrip.add(box(0.08, 0.04, 0.08, 0x8fcf5a, 0.02, 0.035, 0.09));
+  } else if (TOOLS[tool] === 'boat') { // a toy-sized boat
+    ch.toolGrip.add(box(0.1, 0.06, 0.22, 0x8a5530, 0, -0.02, 0.09));
+    ch.toolGrip.add(box(0.07, 0.06, 0.08, 0xc8643a, 0, 0.04, 0.06));
+    ch.toolGrip.add(box(0.08, 0.02, 0.09, 0xd8562c, 0, 0.08, 0.06));
+  } else if (TOOLS[tool] === 'chair') { // tiny furniture, carried like a toy
+    ch.toolGrip.add(box(0.12, 0.02, 0.12, 0xa87444, 0, 0, 0.08));
+    ch.toolGrip.add(box(0.12, 0.12, 0.02, 0x94633a, 0, 0.06, 0.025));
+    ch.toolGrip.add(box(0.1, 0.06, 0.1, 0x74492a, 0, -0.04, 0.08));
+  } else if (TOOLS[tool] === 'table') {
+    ch.toolGrip.add(box(0.18, 0.025, 0.18, 0xc9945c, 0, 0.03, 0.09));
+    ch.toolGrip.add(box(0.14, 0.08, 0.14, 0x74492a, 0, -0.02, 0.09));
+  } else if (TOOLS[tool] === 'bed') {
+    ch.toolGrip.add(box(0.14, 0.05, 0.2, 0x94633a, 0, -0.01, 0.09));
+    ch.toolGrip.add(box(0.12, 0.03, 0.12, 0x5fa83a, 0, 0.03, 0.11));
+    ch.toolGrip.add(box(0.1, 0.03, 0.05, 0xffffff, 0, 0.03, 0.02));
+  } else if (TOOLS[tool] === 'lamp') {
+    ch.toolGrip.add(box(0.025, 0.025, 0.2, 0x94633a, 0, 0, 0.08));
+    ch.toolGrip.add(box(0.07, 0.08, 0.07, 0x3a3532, 0, 0, 0.2));
+    ch.toolGrip.add(box(0.05, 0.06, 0.05, 0xffd860, 0, 0, 0.2));
+  } else if (TOOLS[tool] === 'shelf') {
+    ch.toolGrip.add(box(0.16, 0.2, 0.07, 0x94633a, 0, 0.03, 0.07));
+    ch.toolGrip.add(box(0.12, 0.06, 0.02, 0x4f8fd0, 0, 0.07, 0.11));
+    ch.toolGrip.add(box(0.12, 0.06, 0.02, 0xe0334a, 0, -0.01, 0.11));
   } else if (BLOCK_COLORS[TOOLS[tool]]) { // a little block carried in the hand
     const [side, top] = BLOCK_COLORS[TOOLS[tool]];
     ch.toolGrip.add(box(0.13, 0.11, 0.13, side, 0, -0.02, 0.07));

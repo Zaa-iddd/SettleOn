@@ -5,7 +5,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
-import { WORLD, WORLD_LIMIT, MAX_PLAYERS, PLAYER_COLORS, MAX_KIND, cellKey } from '../src/shared/world.js';
+import { cleanLook } from '../src/shared/boatlook.js';
+import { WORLD, WORLD_LIMIT, MAX_PLAYERS, PLAYER_COLORS, MAX_KIND, MAX_FURNITURE, MIN_LEVEL, cellKey, clockHour } from '../src/shared/world.js';
 import { decodeMap, isEndlessMap, decodeEndless } from '../src/shared/mapfile.js';
 
 const PORT = Number(process.env.PORT ?? 3001);
@@ -71,7 +72,7 @@ const rooms = new Map();
 function getRoom(id) {
   let room = rooms.get(id);
   if (!room) {
-    room = { seed: Math.floor(Math.random() * 2 ** 31), map: null, edits: new Map(), chops: new Map(), benches: new Map(), picks: new Map(), piles: new Map(), players: new Map(), sockets: new Set(), dirty: false, emptySince: null };
+    room = { seed: Math.floor(Math.random() * 2 ** 31), map: null, edits: new Map(), chops: new Map(), benches: new Map(), picks: new Map(), piles: new Map(), boats: new Map(), players: new Map(), sockets: new Set(), dirty: false, emptySince: null, clock: { h: 8, at: Date.now() } }; // clock: the room's time of day (a new room starts at 8:00)
     rooms.set(id, room);
   }
   return room;
@@ -98,7 +99,7 @@ setInterval(() => {
     room.dirty = false;
     sendAll(room, {
       type: 'snap',
-      p: [...room.players.values()].map((p) => [p.id, round2(p.x), round2(p.y), round2(p.z), round2(p.ry), p.a]),
+      p: [...room.players.values()].map((p) => (p.rb ? [p.id, round2(p.x), round2(p.y), round2(p.z), round2(p.ry), p.a, p.rb] : [p.id, round2(p.x), round2(p.y), round2(p.z), round2(p.ry), p.a])),
     });
   }
 }, SNAPSHOT_MS);
@@ -157,7 +158,7 @@ wss.on('connection', (ws) => {
       room = r;
       player = p;
       room.sockets.add(ws);
-      send({ type: 'welcome', you: p.id, seed: room.seed, map: room.map, edits: [...room.edits.values()], chops: [...room.chops.values()], benches: [...room.benches.values()], picks: [...room.picks.values()], piles: [...room.piles.values()] });
+      send({ type: 'welcome', you: p.id, seed: room.seed, map: room.map, edits: [...room.edits.values()], chops: [...room.chops.values()], benches: [...room.benches.values()], picks: [...room.picks.values()], piles: [...room.piles.values()], boats: [...room.boats.values()], time: clockHour(room.clock.h, Date.now() - room.clock.at) });
       sendAll(room, { type: 'roster', players: roster(room) });
       room.dirty = true;
       return;
@@ -184,6 +185,7 @@ wss.on('connection', (ws) => {
       room.chops.clear();
       room.benches.clear();
       room.piles.clear();
+      room.boats.clear();
       room.picks.clear();
       sendAll(room, { type: 'map', map: room.map, seed: room.seed, by: player.name });
       return;
@@ -192,7 +194,7 @@ wss.on('connection', (ws) => {
     if (msg.type === 'dig') {
       const lim = WORLD_LIMIT + WORLD;
       const { ix, iz, lvl, k, ulvl = -1, uk = 0 } = msg; // ulvl/uk: the ground under placed blocks (-1: none)
-      if (![ix, iz, lvl, k, ulvl, uk].every(Number.isInteger) || Math.abs(ix) > lim || Math.abs(iz) > lim || lvl < 0 || lvl > 48 || k < 0 || k > MAX_KIND) return;
+      if (![ix, iz, lvl, k, ulvl, uk].every(Number.isInteger) || Math.abs(ix) > lim || Math.abs(iz) > lim || lvl < MIN_LEVEL || lvl > 48 || k < 0 || k > MAX_KIND) return;
       if (ulvl > 48 || uk < 0 || uk > MAX_KIND) return;
       const key = cellKey(ix, iz);
       room.edits.delete(key);
@@ -212,13 +214,46 @@ wss.on('connection', (ws) => {
       for (const s of room.sockets) if (s !== ws && s.readyState === s.OPEN) s.send(out);
       return;
     }
-    // a player put down (on) or picked up a workbench on cell (ix, iz), facing r (0..3)
+    // a player set the time of day (the slider): it's the room's clock, so everyone gets it
+    if (msg.type === 'time') {
+      const h = Number(msg.h);
+      if (!Number.isFinite(h) || h < 0 || h > 24) return;
+      room.clock = { h: h % 24, at: Date.now() };
+      const out = JSON.stringify({ type: 'time', id: player.id, by: player.name, h: h % 24 });
+      for (const s of room.sockets) if (s !== ws && s.readyState === s.OPEN) s.send(out);
+      return;
+    }
+    // a boat was launched or moved (on), or taken out of the water (on false). Kept per room.
+    if (msg.type === 'boat') {
+      const lim = WORLD_LIMIT + WORLD, id = msg.id;
+      const x = num(msg.x, -lim, lim), z = num(msg.z, -lim, lim), yaw = num(msg.yaw, -100, 100);
+      if (!Number.isInteger(id) || id <= 0 || id >= 2 ** 31 || x === null || z === null || yaw === null) return;
+      if (msg.on) {
+        if (!room.boats.has(id) && room.boats.size >= 200) return;
+        // a launch carries the boat's look; moves keep the one it has
+        const look = msg.look ? cleanLook(msg.look) : room.boats.get(id)?.[4] ?? cleanLook(null);
+        room.boats.set(id, [id, round2(x), round2(z), Math.round(yaw * 1000) / 1000, look]);
+      } else room.boats.delete(id);
+      const out = JSON.stringify({ type: 'boat', by: player.id, id, x, z, yaw, on: !!msg.on, ...(msg.on && msg.look ? { look: room.boats.get(id)[4] } : {}) });
+      for (const s of room.sockets) if (s !== ws && s.readyState === s.OPEN) s.send(out);
+      return;
+    }
+    // a boat was repainted, renamed or upgraded: keep its look and tell everyone else
+    if (msg.type === 'boatlook') {
+      const b = room.boats.get(msg.id);
+      if (!b) return;
+      b[4] = cleanLook(msg.look);
+      const out = JSON.stringify({ type: 'boatlook', by: player.id, id: msg.id, look: b[4] });
+      for (const s of room.sockets) if (s !== ws && s.readyState === s.OPEN) s.send(out);
+      return;
+    }
+    // a player put down (on) or picked up a piece of furniture (type t, see FURNITURE) on cell (ix, iz), facing r (0..3)
     if (msg.type === 'bench') {
-      const lim = WORLD_LIMIT + WORLD, { ix, iz, on } = msg, r = msg.r | 0;
-      if (![ix, iz].every(Number.isInteger) || Math.abs(ix) > lim || Math.abs(iz) > lim || r < 0 || r > 3) return;
-      if (on) room.benches.set(cellKey(ix, iz), [ix, iz, r]); else room.benches.delete(cellKey(ix, iz));
+      const lim = WORLD_LIMIT + WORLD, { ix, iz, on } = msg, r = msg.r | 0, t = msg.t | 0;
+      if (![ix, iz].every(Number.isInteger) || Math.abs(ix) > lim || Math.abs(iz) > lim || r < 0 || r > 3 || t < 0 || t > MAX_FURNITURE) return;
+      if (on) room.benches.set(cellKey(ix, iz), [ix, iz, r, t]); else room.benches.delete(cellKey(ix, iz));
       if (room.benches.size > MAX_ROOM_EDITS) room.benches.delete(room.benches.keys().next().value);
-      const out = JSON.stringify({ type: 'bench', id: player.id, ix, iz, r, on: !!on });
+      const out = JSON.stringify({ type: 'bench', id: player.id, ix, iz, r, t, on: !!on });
       for (const s of room.sockets) if (s !== ws && s.readyState === s.OPEN) s.send(out);
       return;
     }
@@ -246,7 +281,10 @@ wss.on('connection', (ws) => {
       const lim = WORLD_LIMIT + WORLD; // endless worlds reach out to the world border
       const x = num(msg.x, -lim, lim), y = num(msg.y, -10, 50), z = num(msg.z, -lim, lim), ry = num(msg.ry, -1e4, 1e4);
       if (x === null || y === null || z === null || ry === null) return;
-      Object.assign(player, { x, y, z, ry, a: Math.min(199, Math.max(0, msg.a | 0)) }); // a = anim + 10 × tool
+      Object.assign(player, { x, y, z, ry, a: Math.min(299, Math.max(0, msg.a | 0)) }); // a = anim + 10 × tool (tools 0..29)
+      // riding a boat: [boat id, deck x, deck z], so others draw them glued to the deck
+      const rb = msg.b;
+      player.rb = Array.isArray(rb) && rb.length === 3 && Number.isInteger(rb[0]) && Math.abs(rb[1]) < 5 && Math.abs(rb[2]) < 5 ? [rb[0], round2(rb[1]), round2(rb[2])] : null;
       room.dirty = true;
     }
   });

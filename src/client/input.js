@@ -12,6 +12,7 @@ export class Input {
     this.zoom = 0;
     this.jumpQueued = false;
     this.rotSteps = 0; // Q/E presses: +-1 per 45 degree step
+    this.throttleSteps = 0; // W / S (and up / down arrow) presses, for a boat's throttle: +1 / -1 each
     this.hover = null; // [x, y] of the mouse over the canvas (CSS px), or null (for the tool outline)
 
     window.addEventListener('keydown', (e) => {
@@ -19,6 +20,8 @@ export class Input {
       this.keys.add(e.code);
       if (e.code === 'Space') { this.jumpQueued = true; e.preventDefault(); }
       if (!e.repeat && (e.code === 'KeyQ' || e.code === 'KeyE')) this.rotSteps += e.code === 'KeyQ' ? -1 : 1;
+      if (!e.repeat && (e.code === 'KeyW' || e.code === 'ArrowUp')) this.throttleSteps++;
+      if (!e.repeat && (e.code === 'KeyS' || e.code === 'ArrowDown')) this.throttleSteps--;
     });
     window.addEventListener('keyup', (e) => this.keys.delete(e.code));
     window.addEventListener('blur', () => this.keys.clear());
@@ -68,6 +71,9 @@ export class Input {
     canvas.addEventListener('wheel', (e) => { e.preventDefault(); this.zoom += Math.sign(e.deltaY); }, { passive: false });
     canvas.addEventListener('contextmenu', (e) => e.preventDefault());
   }
+
+  /** W / S presses since the last call (counted as events, so a quick tap between two frames still counts). */
+  takeThrottle() { const n = this.throttleSteps; this.throttleSteps = 0; return n; }
 
   // keyboard movement in screen space: x = right, z = up/forward
   read() {

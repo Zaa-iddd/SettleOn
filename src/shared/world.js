@@ -14,9 +14,20 @@ export const PLAYER_COLORS = [
 // Ground kinds
 // TRAIL: endless mountain trails only. DIRT: a meadow tile with a patch of exposed dirt (grass around it).
 // SOIL: a tile a player dug with the shovel (all bare earth). WOOD: a placed wooden plank block.
-export const K = { SEABED: 0, SAND: 1, GRASS: 2, FOREST: 3, ROCK: 4, SNOW: 5, PATH: 6, DEEP: 7, TRAIL: 8, DIRT: 9, SOIL: 10, WOOD: 11, WOOD2: 12 }; // WOOD2: wood with its planks turned 90°
-export const MAX_KIND = 12;
-export const isWood = (k) => k === K.WOOD || k === K.WOOD2;
+// WALL: a placed log-cabin wall block (horizontal round logs).
+export const K = { SEABED: 0, SAND: 1, GRASS: 2, FOREST: 3, ROCK: 4, SNOW: 5, PATH: 6, DEEP: 7, TRAIL: 8, DIRT: 9, SOIL: 10, WOOD: 11, WOOD2: 12, WALL: 13 }; // WOOD2: wood with its planks turned 90°
+export const MAX_KIND = 13;
+// The seabed can go below 0 (endless oceans: deep water and an abyss), down to MIN_LEVEL × STEP.
+export const MIN_LEVEL = -8;
+// Coral reefs grow in shallow to mid water (depth REEF_MIN..REEF_MAX) where a slow reef noise passes REEF_T.
+export const REEF_T = 0.56, REEF_MIN = 0.25, REEF_MAX = 1.6;
+export const CORAL_TYPES = ['branch', 'brain', 'fan', 'tube', 'anemone'];
+export const isWood = (k) => k === K.WOOD || k === K.WOOD2 || k === K.WALL; // what the axe breaks
+
+// Furniture placed by players: world.benches: Map(cellKey -> [ix, iz, rot 0..3, type]), type = index
+// here (also the item id). Every piece blocks its tile. Old saves without a type are workbenches.
+export const FURNITURE = ['workbench', 'chair', 'table', 'bed', 'lamp', 'shelf'];
+export const MAX_FURNITURE = 15; // highest type number the server and saves accept (room to grow)
 
 // Things players took from the world, kept as "picks" [ix, iz, t] per cell:
 // a bush broken (BUSH), a bush's berries picked (BERRIES), a pebble picked up (PEBBLE).
@@ -70,6 +81,12 @@ export function rng(seed) {
 // Endless worlds: cells further than this from the origin are a world border (float precision
 // on the GPU stays fine out to here).
 export const WORLD_LIMIT = 30000;
+
+// Day/night cycle: one full day (24 in-game hours) every DAY_SECONDS of real time. A clock is a
+// start hour plus the real time since then, so it runs from the wall clock (no drift, and a
+// background tab is right again as soon as it comes back). The server keeps one per room.
+export const DAY_SECONDS = 1440; // 24 real minutes: one game hour per real minute
+export const clockHour = (h0, ms) => (((h0 + (ms / 1000) * (24 / DAY_SECONDS)) % 24) + 24) % 24;
 
 // One number per grid cell (or grid vertex), for cells anywhere in an endless world.
 const KEY_SPAN = 2 ** 21, KEY_OFF = 2 ** 20;
@@ -371,7 +388,7 @@ export function finishWorld(base) {
 
   // Foliage (decorative, walk-through): grass tufts, bushes, ferns, mushrooms, reeds
   const tufts = [], tallGrass = [], bushes = [], ferns = [], mushrooms = [], reeds = [], motes = [], pebbles = [];
-  const water = { lilies: [], seaweed: [], seaRocks: [] };
+  const water = { lilies: [], seaweed: [], seaRocks: [], corals: [], seagrass: [], pickles: [] };
   const lush = { reeds, tallGrass, ferns, bushes, ...water }; // lists waterLife / bankLife add to
   const nearWater = (ix, iz) => [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => kind(ix + dx, iz + dz) === K.SEABED);
   const nearCamp = (ix, iz) => Math.hypot(camp.ix - ix, camp.iz - iz) < 1.5;
@@ -424,7 +441,7 @@ export function finishWorld(base) {
       if (roll(45) < pebbleChance(k)) pebbles.push(spot(ix, iz, 140, 0.6));
       if (k === K.ROCK && roll(8) < 0.3) tufts.push(spot(ix, iz, 50));
       if (k === K.DIRT && roll(0) < 0.5) tufts.push(spot(ix, iz, 0, 0.9)); // a stray tuft at a dirt patch's grassy edge
-      if (k === K.SEABED) waterLife(ix, iz, H, kind, spot, roll, lush);
+      if (k === K.SEABED) waterLife(ix, iz, H, kind, spot, roll, lush, seed);
       else bankLife(ix, iz, k, kind, spot, roll, lush);
       if (k === K.SAND && !nearWater(ix, iz) && roll(10) < 0.35) tufts.push(spot(ix, iz, 55));
     }
@@ -512,9 +529,25 @@ export function finishWorld(base) {
  * swaying seaweed and mossy rocks on the seabed, and lily pads (some flowering) floating in
  * shallow water near a shore. `spot`/`roll` are the per-cell helpers of the caller.
  */
-export function waterLife(ix, iz, H, kind, spot, roll, out) {
+export function waterLife(ix, iz, H, kind, spot, roll, out, seed = 0) {
   const depth = SEA - H(ix, iz);
   if (depth <= 0.05) return;
+  // coral reefs: in patches (a slow noise) where the water is shallow enough for light, several corals
+  // per cell; colourful, and with fewer seaweed ribbons among them
+  let reef = 0;
+  if (depth >= REEF_MIN && depth <= REEF_MAX) {
+    reef = smooth(REEF_T, REEF_T + 0.12, fbm(ix / 15, iz / 15, seed + 515, 3));
+    if (reef > 0 && roll(60) < 0.35 + reef * 0.6) {
+      const n = 1 + Math.floor(roll(61) * (1 + reef * 3));
+      for (let p = 0; p < n; p++) {
+        const it = spot(ix, iz, 130 + p, 0.9);
+        const t = Math.floor(roll(62 + p) * (depth < 0.45 ? 4 : 5)); // no tall fans in the very shallow water
+        out.corals.push({ ...it, type: t === 2 && depth < 0.6 ? 1 : t, c: Math.floor(roll(70 + p) * 6), s: Math.min(1.15, 0.55 + depth * 0.5) * (0.75 + it.r * 0.5) });
+      }
+    }
+  }
+  // starfish on the sandy bottom of the shallows
+  if (depth < 0.9 && roll(66) < 0.045) out.corals.push({ ...spot(ix, iz, 150, 0.8), type: 5, c: Math.floor(roll(67) * 3), s: 0.8 + roll(68) * 0.4 });
   let shore = false;
   for (let dz = -2; dz <= 2 && !shore; dz++) for (let dx = -2; dx <= 2; dx++) if (kind(ix + dx, iz + dz) !== K.SEABED) { shore = true; break; }
   // reeds and cattails standing in the shallows, tall enough to poke out of the water
@@ -529,9 +562,17 @@ export function waterLife(ix, iz, H, kind, spot, roll, out) {
     const n = 1 + Math.floor(roll(15) * 3);
     for (let p = 0; p < n; p++) out.lilies.push({ ...spot(ix, iz, 80 + p, 0.85), y: SEA, flower: roll(16 + p) < 0.25 });
   }
-  if (roll(20) < 0.3) {
+  // seagrass meadows: dense patches of short swaying blades on the seabed (a slow noise), and a few stray clumps
+  const meadow = depth >= 0.25 && depth <= 2.8 ? smooth(0.44, 0.56, fbm(ix / 12, iz / 12, seed + 717, 2)) * (1 - reef * 0.7) : 0;
+  if (roll(80) < (meadow > 0 ? 0.45 + meadow * 0.5 : 0.08)) {
+    const n = 1 + Math.floor(roll(81) * (1 + meadow * 4));
+    for (let m = 0; m < n; m++) out.seagrass.push({ ...spot(ix, iz, 170 + m, 0.9), h: Math.min(depth, 1.3) });
+  }
+  // sea pickles: little clusters of pale tubes on the bottom that glow at night (more in meadows and reefs)
+  if (depth >= 0.3 && depth <= 2.4 && roll(84) < 0.035 + meadow * 0.05 + reef * 0.05) out.pickles.push({ ...spot(ix, iz, 180, 0.7), n: 1 + Math.floor(roll(85) * 4) });
+  if (roll(20) < (reef > 0 ? 0.18 : 0.42)) {
     const c = 1 + Math.floor(roll(21) * 3);
-    for (let m = 0; m < c; m++) out.seaweed.push({ ...spot(ix, iz, 90 + m, 0.85), h: depth });
+    for (let m = 0; m < c; m++) out.seaweed.push({ ...spot(ix, iz, 90 + m, 0.85), h: Math.min(depth, 2.2) });
   }
   if (roll(24) < 0.07) out.seaRocks.push({ ...spot(ix, iz, 99, 0.5), s: 0.18 + roll(25) * 0.22 });
 }

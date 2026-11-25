@@ -4,9 +4,11 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { Effects } from './effects.js';
+import { Atmosphere } from './atmosphere.js';
+import { boatGeometry } from './boat.js';
 import { leafyTreeGeometry, pineTreeGeometry, redwoodGeometry, bushGeometry } from './trees3d.js';
 import { Ambient, WIND } from './ambient.js';
-import { WORLD, SEA, K, toWorld, rng, cellKey } from '../shared/world.js';
+import { WORLD, SEA, K, toWorld, rng, cellKey, MIN_LEVEL, STEP } from '../shared/world.js';
 import { CH } from '../shared/endless.js';
 
 export const SKY = 0xa3d2ec; // a soft, slightly hazy blue
@@ -44,6 +46,8 @@ export function mat(color, opts = {}) {
 // side, so up to ~164 cells across. At 128, chunks on opposite sides overwrote each other's heights,
 // which drew shore foam on every tile edge after walking away and back.
 const HT = 256;
+// terrain columns reach down to here: 1 below the deepest seabed (MIN_LEVEL), so drop-offs never show gaps
+const COL_BASE = MIN_LEVEL * STEP - 1;
 const jitter = (i, k) => { const v = Math.sin(i * 12.9898 + k * 78.233) * 43758.5453; return v - Math.floor(v); };
 
 // one InstancedMesh for a list of items (null when the list is empty)
@@ -246,6 +250,22 @@ const TERRAIN_GLSL = /* glsl */`
       else if (joint < 1.0) c *= 0.75;                     // end joints, staggered per row
       else if (lp < 2.0) c *= 1.08;                        // lit plank edge
       if (joint > 5.0 && joint < 6.0 && lp > 1.0 && lp < 3.0 && h21(vec2(row, 9.0)) > 0.5) c = vec3(0.30, 0.28, 0.27); // nail
+    } else if (k == 13) {                                // wooden wall: a log-cabin block, one round log per block
+      // sides: a horizontal log per 8 texels (one STEP), rounded by shading, with a dark gap between
+      // logs, bark streaks, and pale cut ends at the column's corners. Top: the logs seen from above.
+      float ly = top ? mod(tx.y, 8.0) : mod(floor(vWPos.y * 16.0 + 0.001), 8.0);
+      float run = tx.x;                                    // texels along the log
+      float course = top ? floor(tx.y / 8.0) : floor(vWPos.y * 2.0 + 0.001);
+      float edge = mod(run, 16.0);                         // position within the tile along the log
+      float round_ = sin((ly + 0.5) / 8.0 * 3.14159);      // 0 at the gaps, 1 mid-log
+      c = mix(vec3(0.36, 0.22, 0.12), vec3(0.62, 0.40, 0.22), round_);
+      if (h21(vec2(floor(run / 3.0), course * 7.0 + ly)) > 0.78) c *= 0.82;   // bark streaks
+      if (ly < 1.0) c = vec3(0.27, 0.17, 0.10);           // the gap between logs
+      else if (ly < 2.0) c *= 1.12;                        // lit top of each log
+      if (!top && (edge < 1.5 || edge > 14.5) && ly >= 1.0) { // cut log ends at the corners
+        float rr = abs(ly - 4.5);
+        c = rr > 2.6 ? vec3(0.40, 0.25, 0.13) : rr > 1.5 ? vec3(0.86, 0.68, 0.42) : vec3(0.74, 0.55, 0.30);
+      }
     } else if (k == 10) {                                // dug soil: all bare earth
       if (top) {
         vec2 blk = floor(tx / 4.0);
@@ -262,9 +282,11 @@ const TERRAIN_GLSL = /* glsl */`
       c = top ? cobble(tx) : grassSide(tx, depth, false, r);
     } else if (k == 1) {                                 // sand
       c = top ? sand(r, false) : sand(r, false) * (depth < 0.06 ? 1.0 : 0.93);
-    } else if (k == 0) {                                 // seabed: wet sand tinted teal, darker deeper down
-      float under = clamp((${SEA.toFixed(2)} - vTop) / 1.3, 0.0, 1.0);
-      c = mix(sand(r, true), vec3(0.28, 0.56, 0.55), 0.35 + 0.35 * under) * (top ? 1.0 - 0.25 * under : 0.85);
+    } else if (k == 0) {                                 // seabed: sand in the shallows, teal over the reefs, dark in the deep
+      float bd = ${SEA.toFixed(2)} - vTop;
+      c = mix(sand(r, true), vec3(0.28, 0.56, 0.55), 0.2 + 0.5 * smoothstep(0.2, 1.4, bd));
+      c = mix(c, vec3(0.08, 0.22, 0.30), smoothstep(1.4, 4.6, bd));
+      c *= top ? 1.0 - 0.15 * smoothstep(0.3, 1.5, bd) : 0.82;
     } else if (k == 4) {                                 // rock
       c = rock(r, top ? 0.0 : vWPos.y);
       if (top && h21(floor(uv * 3.0) + 41.0) > 0.8) c = mix(c, vec3(0.42, 0.55, 0.30), 0.55); // mossy patches
@@ -324,7 +346,11 @@ function swayMaterial(color, strength, side = THREE.FrontSide, vertexColors = fa
       .replace('#include <common>', '#include <common>\nuniform float uTime;')
       .replace('#include <begin_vertex>', `#include <begin_vertex>
         vec3 ip = instanceMatrix[3].xyz;
-        float sw = sin(uTime * 2.2 + ip.x * 0.8 + ip.z * 0.6) + 0.4 * sin(uTime * 3.7 + ip.z * 1.3);
+        // a calm rustle, plus slow gusts that roll across the land along the wind (WIND in ambient.js)
+        float sw = 0.8 * sin(uTime * 1.6 + ip.x * 0.8 + ip.z * 0.6) + 0.3 * sin(uTime * 2.9 + ip.z * 1.3);
+        float gust = sin(dot(ip.xz, vec2(0.944, 0.33)) * 0.24 - uTime * 0.85);
+        gust = smoothstep(0.15, 1.0, gust) * (0.6 + 0.4 * sin(ip.x * 0.05 - ip.z * 0.07 + uTime * 0.13));
+        sw += gust * 1.5;
         float lift = max(transformed.y, 0.0);
         transformed.x += sw * ${strength.toFixed(3)} * lift;
         transformed.z += sw * ${(strength * 0.5).toFixed(3)} * lift;`);
@@ -397,16 +423,24 @@ const seeThrough = {
   uSeeRadius: { value: 0 }, // in render-target pixels
   uSeeDepth: { value: 0 }, // player's distance along the view axis
 };
-export function seeThroughMaterial(params) {
+// `minY`: only fragments above this world height open up (a boat's cabin, not its deck)
+export function seeThroughMaterial(params, { minY = null } = {}) {
   const m = new THREE.MeshLambertMaterial(params);
+  const low = minY === null ? '' : ` && vSeeY > ${minY.toFixed(3)}`;
   m.onBeforeCompile = (sh) => {
     Object.assign(sh.uniforms, seeThrough);
     sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', '#include <common>\nvarying float vSeeDepth;')
-      .replace('#include <project_vertex>', '#include <project_vertex>\nvSeeDepth = -mvPosition.z;');
+      .replace('#include <common>', '#include <common>\nvarying float vSeeDepth;\nvarying float vSeeY;')
+      .replace('#include <project_vertex>', `#include <project_vertex>
+        vSeeDepth = -mvPosition.z;
+        #ifdef USE_INSTANCING
+          vSeeY = (modelMatrix * instanceMatrix * vec4(transformed, 1.0)).y;
+        #else
+          vSeeY = (modelMatrix * vec4(transformed, 1.0)).y;
+        #endif`);
     sh.fragmentShader = sh.fragmentShader
       .replace('#include <common>', `#include <common>
-        varying float vSeeDepth;
+        varying float vSeeDepth; varying float vSeeY;
         uniform vec2 uSeePos; uniform float uSeeRadius; uniform float uSeeDepth;
         float seeBayer(vec2 p) {
           ivec2 i = ivec2(mod(p, 4.0));
@@ -414,12 +448,13 @@ export function seeThroughMaterial(params) {
           return (m[i.x + i.y * 4] + 0.5) / 16.0;
         }`)
       .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>
-        if (uSeeRadius > 0.0 && vSeeDepth < uSeeDepth - 0.25) {
+        if (uSeeRadius > 0.0 && vSeeDepth < uSeeDepth - 0.25${low}) {
           float d = distance(gl_FragCoord.xy, uSeePos) / uSeeRadius;
           float keep = smoothstep(0.55, 1.0, d); // fully open in the middle, dithered edge
           if (keep < seeBayer(gl_FragCoord.xy)) discard;
         }`);
   };
+  m.customProgramCacheKey = () => `see:${minY}`; // a program per height limit
   return m;
 }
 const _seeV = new THREE.Vector3();
@@ -431,6 +466,8 @@ const LANTERN_LIGHTS = 4; // lantern lights: the local player + the 3 nearest ot
 const LANTERN_RANGE = 8, LANTERN_I = 2.2;
 const FIREFLY_LIGHTS = 4; // point lights shared by the fireflies nearest the player (each one costs every lit pixel)
 const FIREFLY_LIGHT_I = 0.4; // peak intensity of each, at full night (kept subtle)
+const PICKLE_LIGHTS = 4; // green point lights on the glowing sea pickles nearest the player (night only)
+const PICKLE_LIGHT_I = 1.6, PICKLE_RANGE = 3.2; // intensity at full night, and how far each one reaches
 
 // Redwoods near the player are cut away above head height (cone-shaped: the allowed height grows
 // with horizontal distance), with a dithered edge, so the camera can see under the canopy. The cut
@@ -479,6 +516,7 @@ export function setEditorView() {
 }
 
 export function setSeeThrough(camera, pos, rtW, rtH) {
+  if (!pos) { seeThrough.uSeeRadius.value = 0; return; } // off (boat edit mode: you're looking at the boat, not yourself)
   const depth = -_seeV.set(pos.x, pos.y + 0.5, pos.z).applyMatrix4(camera.matrixWorldInverse).z;
   if (depth <= camera.near) { seeThrough.uSeeRadius.value = 0; return; }
   _seeV.set(pos.x, pos.y + 0.5, pos.z).project(camera);
@@ -508,6 +546,11 @@ const GEO = {
   stem: () => sharedGeo('stem', () => new THREE.CylinderGeometry(0.025, 0.03, 0.1, 5).translate(0, 0.05, 0)),
   cap: () => sharedGeo('cap', () => new THREE.CylinderGeometry(0.03, 0.085, 0.06, 6).translate(0, 0.12, 0)),
   seaweed: () => sharedGeo('seaweed', seaweedGeometry),
+  seagrass: () => sharedGeo('seagrass', seagrassGeometry),
+  pickle1: () => sharedGeo('pickle1', () => pickleGeometry(1)),
+  pickle2: () => sharedGeo('pickle2', () => pickleGeometry(2)),
+  pickle3: () => sharedGeo('pickle3', () => pickleGeometry(3)),
+  pickle4: () => sharedGeo('pickle4', () => pickleGeometry(4)),
   // a loose pebble with a smaller one beside it (players pick these up)
   pebble: () => sharedGeo('pebble', () => mergeGeometries([
     new THREE.DodecahedronGeometry(0.13, 0).scale(1, 0.6, 0.85).translate(0, 0.06, 0),
@@ -526,6 +569,75 @@ const GEO = {
   ])),
 };
 
+// ---------- coral reefs (waterLife in world.js): original low-poly corals ----------
+// Geometry is pale grey-to-white with darker bases (vertex colours); each instance gets its colour from
+// CORAL_COLORS (or STAR_COLORS for starfish), so one mesh per shape serves every colour.
+export const CORAL_COLORS = [0xff6f91, 0xff8a4c, 0xb07ae8, 0xffd04a, 0x3fd8c4, 0xf0584e]; // pink, coral orange, violet, yellow, teal, red
+const STAR_COLORS = [0xff7a3c, 0xe8504a, 0xffb84a];
+function coralParts(build) {
+  const parts = [], col = new THREE.Color();
+  // a box from (x, y0) up `h`, leaning by (ax, az), shaded darker at the base and pale at the tip
+  const add = (g, lo = 0.62, hi = 1.0, y0 = 0, h = 0.5) => {
+    g = g.index ? g.toNonIndexed() : g;
+    g.deleteAttribute('uv');
+    const p = g.attributes.position, c = new Float32Array(p.count * 3);
+    for (let i = 0; i < p.count; i++) { const k = Math.max(0, Math.min(1, (p.getY(i) - y0) / h)); col.setScalar(lo + (hi - lo) * k); c.set([col.r, col.g, col.b], i * 3); }
+    g.setAttribute('color', new THREE.BufferAttribute(c, 3));
+    parts.push(g);
+  };
+  build(add);
+  const geo = mergeGeometries(parts);
+  for (const g of parts) g.dispose();
+  return geo;
+}
+// branching (staghorn) coral: a stub with antler branches reaching up and out
+const coralBranchGeometry = () => coralParts((add) => {
+  add(new THREE.BoxGeometry(0.09, 0.14, 0.09).translate(0, 0.07, 0), 0.55, 0.75, 0, 0.5);
+  for (let i = 0; i < 6; i++) {
+    const a = i * 1.05 + 0.3, lean = 0.45 + (i % 3) * 0.18, len = 0.22 + (i % 2) * 0.12;
+    const g = new THREE.BoxGeometry(0.045, len, 0.045).translate(0, len / 2, 0).rotateX(lean).rotateY(a).translate(0, 0.1, 0);
+    add(g, 0.7, 1.0, 0.05, 0.45);
+    const tip = new THREE.BoxGeometry(0.035, 0.12, 0.035).translate(0, 0.06, 0).rotateX(lean * 0.3).rotateY(a + 0.4)
+      .translate(Math.sin(a) * Math.sin(lean) * len, 0.1 + Math.cos(lean) * len, Math.cos(a) * Math.sin(lean) * len);
+    add(tip, 0.85, 1.08, 0.1, 0.45);
+  }
+});
+// brain coral: a low dome with grooved bands
+const coralBrainGeometry = () => coralParts((add) => {
+  const g = new THREE.IcosahedronGeometry(0.24, 1).scale(1, 0.62, 1).translate(0, 0.06, 0).toNonIndexed();
+  add(g, 0.7, 1.0, -0.05, 0.25);
+  const c = g.attributes.color, p = g.attributes.position;
+  for (let i = 0; i < p.count; i++) if (Math.floor((p.getX(i) + p.getZ(i) * 0.6) * 22) % 2) c.setXYZ(i, c.getX(i) * 0.8, c.getY(i) * 0.8, c.getZ(i) * 0.8);
+});
+// sea fan: flat slats fanning out from a short stem, criss-crossed by a few thin bars
+const coralFanGeometry = () => coralParts((add) => {
+  add(new THREE.BoxGeometry(0.05, 0.1, 0.03).translate(0, 0.05, 0), 0.5, 0.7, 0, 0.6);
+  for (let i = -3; i <= 3; i++) add(new THREE.BoxGeometry(0.03, 0.48, 0.016).translate(0, 0.24, 0).rotateZ(i * 0.2).translate(0, 0.08, 0), 0.68, 1.02, 0.05, 0.55);
+  for (const y of [0.24, 0.38]) add(new THREE.BoxGeometry(0.2 + y * 0.9, 0.018, 0.018).translate(0, y, 0), 0.9, 0.95, 0, 0.6);
+});
+// tube coral: a cluster of short open tubes with dark mouths
+const coralTubeGeometry = () => coralParts((add) => {
+  for (const [x, z, h, r] of [[0, 0, 0.32, 0.05], [0.09, 0.03, 0.24, 0.04], [-0.07, 0.06, 0.2, 0.04], [0.02, -0.09, 0.27, 0.045], [-0.08, -0.06, 0.15, 0.035]]) {
+    add(new THREE.CylinderGeometry(r, r * 1.1, h, 6).translate(x, h / 2, z), 0.62, 1.0, 0, 0.32);
+    add(new THREE.CylinderGeometry(r * 0.7, r * 0.7, 0.01, 6).translate(x, h + 0.004, z), 0.25, 0.25, 0, 1);
+  }
+});
+// anemone: a soft base with a ring of tentacles (sways with the current)
+const anemoneGeometry = () => coralParts((add) => {
+  add(new THREE.CylinderGeometry(0.08, 0.1, 0.07, 8).translate(0, 0.035, 0), 0.6, 0.8, 0, 0.3);
+  for (let i = 0; i < 14; i++) {
+    const a = i * 2.4, rr = i < 8 ? 0.06 : 0.03, lean = i < 8 ? 0.55 : 0.2;
+    add(new THREE.BoxGeometry(0.018, 0.17, 0.018).translate(0, 0.085, 0).rotateX(lean).rotateY(a).translate(Math.sin(a) * rr, 0.06, Math.cos(a) * rr), 0.8, 1.1, 0.06, 0.2);
+  }
+});
+// starfish: five flat arms on the sand
+const starfishGeometry = () => coralParts((add) => {
+  add(new THREE.CylinderGeometry(0.035, 0.04, 0.02, 6).translate(0, 0.012, 0), 0.9, 0.9, 0, 1);
+  for (let i = 0; i < 5; i++) add(new THREE.BoxGeometry(0.035, 0.016, 0.12).translate(0, 0.01, 0.07).rotateY(i * 1.2566), 0.85, 0.85, 0, 1);
+});
+const CORAL_GEO = [coralBranchGeometry, coralBrainGeometry, coralFanGeometry, coralTubeGeometry, anemoneGeometry, starfishGeometry];
+const coralGeo = (t) => sharedGeo(`coral${t}`, CORAL_GEO[t]);
+
 // seaweed: three thin ribbons, 1 unit tall (scaled to the water depth per instance)
 function seaweedGeometry() {
   const parts = [];
@@ -533,6 +645,55 @@ function seaweedGeometry() {
     parts.push(new THREE.BoxGeometry(0.06, 1, 0.012).translate(0, 0.5, 0).rotateZ(tilt).rotateY(a).translate(x, 0, z));
   }
   return mergeGeometries(parts);
+}
+
+// seagrass: a clump of nine slim blades, 1 unit tall, leaning out a little (scaled per instance)
+function seagrassGeometry() {
+  const parts = [];
+  for (let i = 0; i < 9; i++) {
+    const a = i * 2.4 + 0.3, r = 0.03 + (i % 3) * 0.035, h = 0.75 + ((i * 37) % 10) / 40;
+    parts.push(new THREE.BoxGeometry(0.035, h, 0.008).translate(0, h / 2, 0).rotateZ(0.08 + (i % 4) * 0.07).rotateY(a).translate(Math.cos(a) * r, 0, Math.sin(a) * r));
+  }
+  return mergeGeometries(parts);
+}
+// sea pickles: n stubby tubes with darker rims around their open tops (the whole tube glows at night)
+function pickleGeometry(n) {
+  const parts = [], spots = [[0, 0, 0.16], [0.07, 0.05, 0.12], [-0.06, 0.05, 0.1], [0.02, -0.08, 0.13]];
+  for (let i = 0; i < n; i++) {
+    const [x, z, h] = spots[i];
+    const g = new THREE.CylinderGeometry(0.03, 0.036, h, 6).translate(0, h / 2, 0).rotateZ((i - 1.5) * 0.12).translate(x, 0, z);
+    g.deleteAttribute('uv');
+    parts.push(g);
+  }
+  return mergeGeometries(parts);
+}
+
+// Sea pickles: their night glow (emissive, set in applyDarkness) fades with depth (strong in the shallows, faint
+// down deep) and with distance from the player (uFocus, set every frame), so only the ones near you stand out.
+const pickleFade = /* js */ (depth, dist) => Math.max(0.08, 1 - Math.min(1, Math.max(0, (depth - 0.5) / 1.4))) * (1 - 0.94 * Math.min(1, Math.max(0, (dist - 6) / 12)));
+function pickleMaterial() {
+  const m = new THREE.MeshLambertMaterial({ color: 0x9db45a, emissive: 0x000000 });
+  m.userData.uFocus = { value: new THREE.Vector3() };
+  m.onBeforeCompile = (sh) => {
+    sh.uniforms.uFocus = m.userData.uFocus;
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', `#include <common>
+        varying vec3 vPickleW;`)
+      .replace('#include <worldpos_vertex>', `#include <worldpos_vertex>
+        vec4 pw = vec4(transformed, 1.0);
+        #ifdef USE_INSTANCING
+          pw = instanceMatrix * pw;
+        #endif
+        vPickleW = (modelMatrix * pw).xyz;`);
+    sh.fragmentShader = sh.fragmentShader
+      .replace('#include <common>', `#include <common>
+        varying vec3 vPickleW;
+        uniform vec3 uFocus;`)
+      .replace('vec3 totalEmissiveRadiance = emissive;', `vec3 totalEmissiveRadiance = emissive;
+        float pDepth = ${SEA.toFixed(2)} - vPickleW.y, pDist = distance(vPickleW.xz, uFocus.xz);
+        totalEmissiveRadiance *= max(0.08, 1.0 - clamp((pDepth - 0.5) / 1.4, 0.0, 1.0)) * (1.0 - 0.94 * clamp((pDist - 6.0) / 12.0, 0.0, 1.0));`);
+  };
+  return m;
 }
 
 // Lambert material that bobs with the water surface (same motion as the water plane in update())
@@ -581,8 +742,6 @@ function logGeometry() {
 /** The log model (shared, never disposed), also for the placement preview in main.js. */
 export const logGeo = () => sharedGeo('log', logGeometry);
 
-/** The workbench model (shared, never disposed), for the placement preview in main.js. */
-export const benchGeometry = () => sharedGeo('workbench', workbenchGeometry);
 
 // The workbench (original model, after the user's reference): a desk with a plank back board and
 // pinned notes, a drawer cabinet on the right, an open shelf on the left, and bits and pieces on top.
@@ -639,12 +798,117 @@ function workbenchGeometry() {
   return geo;
 }
 
+// ---------- furniture (crafted at the workbench; see FURNITURE in world.js) ----------
+// Original cozy models, each fitting one tile, front toward +z (it faces whoever placed it),
+// standing on y = 0. Vertex-coloured boxes merged into one geometry, like the workbench.
+function boxModel(build) {
+  const parts = [], col = new THREE.Color();
+  const add = (w, h, d, color, x, y, z, rx = 0, rz = 0) => {
+    const g = new THREE.BoxGeometry(w, h, d).toNonIndexed();
+    if (rx) g.rotateX(rx);
+    if (rz) g.rotateZ(rz);
+    g.translate(x, y, z);
+    col.setHex(color);
+    const n = g.attributes.position.count, c = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) c.set([col.r, col.g, col.b], i * 3);
+    g.setAttribute('color', new THREE.BufferAttribute(c, 3));
+    g.deleteAttribute('uv');
+    parts.push(g);
+  };
+  build(add);
+  const geo = mergeGeometries(parts);
+  for (const g of parts) g.dispose();
+  return geo;
+}
+const FW = { LIGHT: 0xc9945c, WOOD: 0xa87444, MID: 0x94633a, DARK: 0x74492a, DEEP: 0x553420 };
+
+const chairGeometry = () => boxModel((add) => {
+  for (const x of [-0.17, 0.17]) for (const z of [-0.17, 0.17]) add(0.06, 0.32, 0.06, FW.DARK, x, 0.16, z);
+  add(0.46, 0.06, 0.46, FW.WOOD, 0, 0.35, 0);
+  add(0.38, 0.05, 0.36, 0x6fae4a, 0, 0.405, 0.02);           // a leafy green cushion
+  add(0.3, 0.012, 0.28, 0x8fcf5a, 0, 0.432, 0.02);
+  for (const x of [-0.19, 0.19]) add(0.06, 0.48, 0.06, FW.MID, x, 0.6, -0.2); // back posts
+  add(0.44, 0.07, 0.05, FW.LIGHT, 0, 0.82, -0.2);            // top rail
+  for (const x of [-0.08, 0, 0.08]) add(0.045, 0.34, 0.035, FW.WOOD, x, 0.6, -0.2); // slats
+  add(0.36, 0.04, 0.04, FW.DARK, 0, 0.27, 0.2);              // a stretcher between the front legs
+});
+
+const tableGeometry = () => boxModel((add) => {
+  for (const x of [-0.36, 0.36]) for (const z of [-0.36, 0.36]) add(0.08, 0.5, 0.08, FW.DARK, x, 0.25, z);
+  add(0.8, 0.08, 0.8, FW.MID, 0, 0.47, 0);                   // apron
+  add(0.94, 0.06, 0.94, FW.LIGHT, 0, 0.54, 0);               // top
+  for (const z of [-0.155, 0.155]) add(0.94, 0.008, 0.012, FW.WOOD, 0, 0.574, z); // plank seams
+  add(0.5, 0.01, 0.34, 0xeee2c8, 0.04, 0.575, 0.04);         // a little runner
+  add(0.09, 0.1, 0.09, 0xc06a44, -0.22, 0.62, -0.16);        // a terracotta pot
+  add(0.1, 0.02, 0.1, 0xa8553a, -0.22, 0.675, -0.16);
+  add(0.02, 0.1, 0.02, 0x4a8f30, -0.22, 0.73, -0.16);        // with a flower
+  add(0.07, 0.05, 0.07, 0xf2c94c, -0.22, 0.79, -0.16);
+  add(0.035, 0.035, 0.035, 0xe07a2a, -0.22, 0.8, -0.13);
+  add(0.07, 0.08, 0.07, 0xeef3f8, 0.2, 0.61, 0.14);          // a mug
+  add(0.03, 0.05, 0.02, 0xeef3f8, 0.25, 0.61, 0.14);
+  add(0.18, 0.025, 0.13, 0x4f8fd0, 0.18, 0.585, -0.18);      // a book
+});
+
+const bedGeometry = () => boxModel((add) => {
+  for (const x of [-0.37, 0.37]) for (const z of [-0.43, 0.43]) add(0.08, 0.16, 0.08, FW.DARK, x, 0.08, z);
+  add(0.8, 0.14, 0.94, FW.MID, 0, 0.2, 0);                   // frame
+  for (const x of [-0.37, 0.37]) add(0.08, 0.78, 0.08, FW.WOOD, x, 0.39, -0.45); // headboard posts
+  add(0.68, 0.46, 0.05, FW.LIGHT, 0, 0.5, -0.45);            // headboard
+  add(0.68, 0.05, 0.06, FW.DARK, 0, 0.73, -0.45);
+  for (const x of [-0.37, 0.37]) add(0.08, 0.5, 0.08, FW.WOOD, x, 0.25, 0.45); // footboard
+  add(0.68, 0.22, 0.05, FW.LIGHT, 0, 0.36, 0.45);
+  add(0.72, 0.12, 0.86, 0xf3e6c8, 0, 0.33, 0);               // mattress, cream linen
+  add(0.5, 0.1, 0.2, 0xffffff, 0, 0.43, -0.3);               // pillow
+  add(0.46, 0.02, 0.16, 0xe8eef4, 0, 0.485, -0.3);
+  add(0.76, 0.1, 0.56, 0x5fa83a, 0, 0.39, 0.12);             // a quilt of leaves
+  add(0.77, 0.04, 0.12, 0x4a8f30, 0, 0.42, -0.12);           // folded-back edge
+  for (const [x, z] of [[-0.2, 0.05], [0.12, 0.2], [0.22, -0.02], [-0.1, 0.3]]) add(0.12, 0.012, 0.1, 0x8fcf5a, x, 0.446, z); // leaf pattern
+});
+
+// the lamp's frame; its glowing panes are lampGlowGeometry (an unlit HDR mesh, so it blooms)
+const lampGeometry = () => boxModel((add) => {
+  add(0.34, 0.06, 0.34, FW.DEEP, 0, 0.03, 0);
+  add(0.22, 0.05, 0.22, FW.DARK, 0, 0.085, 0);
+  add(0.08, 0.9, 0.08, FW.MID, 0, 0.55, 0);                  // post
+  add(0.26, 0.04, 0.26, 0x3a3532, 0, 1.0, 0);                // lantern bottom
+  for (const x of [-0.11, 0.11]) for (const z of [-0.11, 0.11]) add(0.03, 0.26, 0.03, 0x3a3532, x, 1.15, z);
+  add(0.28, 0.05, 0.28, 0x3a3532, 0, 1.3, 0);                // cap
+  add(0.16, 0.06, 0.16, 0x2c2826, 0, 1.355, 0);
+  add(0.05, 0.05, 0.05, 0x2c2826, 0, 1.405, 0);
+});
+const lampGlowGeometry = () => { const g = new THREE.BoxGeometry(0.19, 0.22, 0.19).translate(0, 1.15, 0); g.deleteAttribute('uv'); return g; };
+
+const shelfGeometry = () => boxModel((add) => {
+  const z0 = -0.24; // stands against the back of its tile
+  for (const x of [-0.43, 0.43]) add(0.06, 1.24, 0.36, FW.MID, x, 0.62, z0);
+  add(0.92, 1.18, 0.03, FW.DEEP, 0, 0.62, z0 - 0.165);       // back panel
+  for (const y of [0.04, 0.42, 0.8, 1.22]) add(0.86, 0.05, 0.36, FW.WOOD, 0, y, z0);
+  add(0.96, 0.05, 0.4, FW.LIGHT, 0, 1.26, z0);               // top
+  const BOOKS = [0x4f8fd0, 0xe0334a, 0x5fa83a, 0xf2c94c, 0x8a5aa8, 0xeee2c8, 0x35669e, 0xc06a44];
+  [0.065, 0.445].forEach((y, row) => {                       // two rows of books
+    let x = -0.38, i = row * 3;
+    while (x < 0.36) {
+      const w = 0.05 + ((i * 37) % 4) * 0.012, h = 0.24 + ((i * 53) % 5) * 0.025;
+      if ((i * 7 + row) % 9 !== 4) add(w, h, 0.24, BOOKS[(i * 5 + row) % BOOKS.length], x + w / 2, y + h / 2, z0 + 0.02);
+      x += w + 0.008; i++;
+    }
+  });
+  add(0.14, 0.12, 0.14, 0xc06a44, -0.22, 0.885, z0 + 0.02);  // top shelf: a potted plant, a jar, a pebble
+  add(0.2, 0.14, 0.2, 0x5fa83a, -0.22, 1.01, z0 + 0.02);
+  add(0.1, 0.16, 0.1, 0xbfe3ef, 0.05, 0.905, z0 + 0.02);
+  add(0.12, 0.06, 0.1, 0xb0aba0, 0.26, 0.855, z0 + 0.04);
+});
+
+const FURN_BUILD = [workbenchGeometry, chairGeometry, tableGeometry, bedGeometry, lampGeometry, shelfGeometry];
+/** The model for a furniture type (index into FURNITURE; shared, never disposed). Also the placement preview. */
+export const furnitureGeometry = (t) => sharedGeo(`furn${t}`, FURN_BUILD[t] ?? workbenchGeometry);
+export const LAMP_TYPE = 4;
+
 // a stable per-object number from its position (variants, rotation and tint don't depend on list order)
 const posKey = (o) => Math.floor(o.x * 7.31 + o.z * 131.7);
 
 // Endless worlds stream CH×CH-cell chunks around the player (see endless.js)
-const LOAD_R = 50; // world units from the player to a chunk's nearest edge
-const UNLOAD_R = LOAD_R + 24;
+const LOAD_R0 = 50; // world units from the player to a chunk's nearest edge (more when zoomed out past 34, see updateChunks)
 const LOAD_BUDGET_MS = 5; // per frame
 const TREE_LOD_R = 20; // trees in chunks farther than this from the player use low-detail models
 const SMALL_R = 30; // grass, flowers, ferns, reeds and mushrooms are hidden in chunks farther than this
@@ -704,6 +968,10 @@ export class WorldScene {
       stem: mat(0xf3ead8),
       cap: mat(0xd8452f),
       seaweed: swayMaterial(0xffffff, 0.1),
+      seagrass: swayMaterial(0xffffff, 0.16),
+      pickle: pickleMaterial(), // glows at night (applyDarkness), dimmer deep down and far away
+      coral: new THREE.MeshLambertMaterial({ vertexColors: true }),
+      coralSway: swayMaterial(0xffffff, 0.12, THREE.FrontSide, true), // sea fans and anemones sway with the current
       seaRock: mat(0x7d8a72),
       cairn: mat(0xa8a39a),
       pebble: mat(0xc2bdb1),
@@ -715,7 +983,7 @@ export class WorldScene {
     this.buildMotes();
     if (world.endless) {
       this.chunks = new Map(); // cellKey(cx, cz) -> { cx, cz, group, data, gems }
-      this.live = { flowers: [], reeds: [], trees: [], redwoods: [], lilies: [] }; // what's loaded now (ambient life, chopping)
+      this.live = { flowers: [], reeds: [], trees: [], redwoods: [], lilies: [], corals: [] }; // what's loaded now (ambient life, chopping)
     } else {
       this.terrain = this.terrainMesh(0, 0, WORLD, WORLD);
       scene.add(this.terrain);
@@ -733,6 +1001,7 @@ export class WorldScene {
     this.ambient = new Ambient(world, scene, this.live);
     this.effects = new Effects(scene);
     this.ambient.effects = this.effects; // fish splash when they leap
+    this.atmosphere = new Atmosphere(world, scene); // campfire embers and smoke, daytime pollen
     this.shadowHalf = 22;
   }
 
@@ -782,6 +1051,8 @@ export class WorldScene {
       const x0 = cx * CH, z0 = cz * CH;
       return Math.hypot(Math.max(0, x0 - fx, fx - x0 - CH), Math.max(0, z0 - fz, fz - z0 - CH));
     };
+    // zoomed out past the normal limit (aboard a boat), load further so the screen corners aren't empty
+    const LOAD_R = Math.max(LOAD_R0, LOAD_R0 + ((this.camDist ?? 10) - 34) * 1.3), UNLOAD_R = LOAD_R + 24;
     let changed = false;
     for (const [k, rec] of this.chunks) {
       if (dist(rec.cx, rec.cz) > UNLOAD_R) { this.unloadChunk(rec); this.chunks.delete(k); changed = true; }
@@ -868,7 +1139,7 @@ export class WorldScene {
       return;
     }
     const i = iz * WORLD + ix, mesh = this.terrain, m = new THREE.Matrix4();
-    m.makeScale(1, world.heights[i] + 1, 1).setPosition(toWorld(ix), -1, toWorld(iz));
+    m.makeScale(1, world.heights[i] - COL_BASE, 1).setPosition(toWorld(ix), COL_BASE, toWorld(iz));
     mesh.setMatrixAt(i, m);
     mesh.geometry.attributes.aKind.array[i] = world.kinds[i];
     mesh.geometry.attributes.aTop.array[i] = world.heights[i];
@@ -889,6 +1160,90 @@ export class WorldScene {
       }
       if (dirty) o.instanceMatrix.needsUpdate = true;
     });
+  }
+
+  /**
+   * Hover highlight for things a click acts on (main.js `hoverTarget`): a cream outline (an inverted
+   * hull: the same model, back faces only, pushed out along its normals) plus a soft pulsing glow on
+   * the object itself. `h` = { kind: 'bush' | 'pebble' | 'frog' | 'bench' | 'pile' | 'boat', obj } or null.
+   */
+  setHighlight(h, t, camDist) {
+    if (!this.hl) {
+      // The glow pass marks the object's visible pixels in the stencil (2); the hull (the same model,
+      // both sides, pushed out along its normals) then draws only outside them, so the outline is a
+      // solid band around the silhouette even for one-sided leaf cards. Both are in the transparent
+      // list so renderOrder runs glow (9) before hull (10).
+      const width = { value: 0.04 };
+      const hullMat = new THREE.MeshBasicMaterial({
+        color: 0xfff4d2, side: THREE.DoubleSide, transparent: true, opacity: 1,
+        stencilWrite: true, stencilRef: 2, stencilFunc: THREE.NotEqualStencilFunc,
+        stencilFail: THREE.KeepStencilOp, stencilZFail: THREE.KeepStencilOp, stencilZPass: THREE.KeepStencilOp,
+      });
+      hullMat.onBeforeCompile = (sh) => {
+        sh.uniforms.uW = width;
+        sh.vertexShader = sh.vertexShader
+          .replace('#include <common>', '#include <common>\nuniform float uW;')
+          .replace('#include <begin_vertex>', '#include <begin_vertex>\ntransformed += normalize(normal) * uW;');
+      };
+      hullMat.customProgramCacheKey = () => 'hlHull';
+      const glowMat = new THREE.MeshBasicMaterial({
+        color: 0xfff0c8, transparent: true, opacity: 0.08, blending: THREE.AdditiveBlending, depthWrite: false, depthFunc: THREE.LessEqualDepth,
+        // pulled a hair toward the camera: a plain (non-instanced) mesh, like a boat part, can land a little deeper than
+        // this instanced copy, which then failed the depth test in stripes and let the outline paint over the part
+        polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -4,
+        stencilWrite: true, stencilRef: 2, stencilFunc: THREE.AlwaysStencilFunc, stencilZPass: THREE.ReplaceStencilOp,
+      });
+      const mk = (mat, order) => {
+        const m = new THREE.InstancedMesh(logGeo(), mat, 6); // up to a full log pile
+        m.frustumCulled = false;
+        m.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+        m.renderOrder = order;
+        m.visible = false;
+        this.scene.add(m);
+        return m;
+      };
+      this.hl = { width, hull: mk(hullMat, 10), glow: mk(glowMat, 9) };
+    }
+    const { hull, glow, width } = this.hl;
+    hull.visible = glow.visible = false;
+    if (!h) return;
+    const o = h.obj, m = new THREE.Matrix4(), q = new THREE.Quaternion(), p = new THREE.Vector3(), s = new THREE.Vector3(), up = new THREE.Vector3(0, 1, 0);
+    const mats = [];
+    let geo;
+    const yawScale = (sc) => m.makeRotationY(o.r * 6.283).scale(s.set(sc, sc, sc)).setPosition(o.x, o.y, o.z).clone();
+    if (h.kind === 'bush') { geo = bushGeometry(); mats.push(yawScale(0.9 + o.r * 0.6)); } // same transforms as addFoliage
+    else if (h.kind === 'pebble') { geo = GEO.pebble(); mats.push(yawScale(0.85 + o.r * 0.5)); }
+    else if (h.kind === 'frog') { const fm = this.ambient.frogMesh; geo = fm.geometry; fm.getMatrixAt(o.i, m); mats.push(m.clone()); }
+    else if (h.kind === 'bench') { // [ix, iz, r, type], as in setBenches
+      geo = furnitureGeometry(o[3] ?? 0);
+      mats.push(m.compose(p.set(toWorld(o[0]), this.world.H(o[0], o[1]), toWorld(o[1])), q.setFromAxisAngle(up, o[2] * Math.PI / 2), s.set(1, 1, 1)).clone());
+    } else if (h.kind === 'mesh') { // any single mesh, where it's drawn right now (a part of a boat in edit mode)
+      geo = o.geometry;
+      o.updateWorldMatrix(true, false);
+      mats.push(o.matrixWorld.clone());
+    } else if (h.kind === 'boat') { // a boat object from boat.js: its hull, where it's drawn right now
+      geo = boatGeometry();
+      o.group.updateMatrixWorld();
+      mats.push(o.group.matrixWorld.clone());
+    } else if (h.kind === 'pile') { // [ix, iz, r, n], as in setPiles
+      geo = logGeo();
+      q.setFromAxisAngle(up, o[2] * Math.PI / 2);
+      for (let i = 0; i < o[3]; i++) {
+        logOffset(i, o[2], p);
+        p.x += toWorld(o[0]); p.y += this.world.H(o[0], o[1]); p.z += toWorld(o[1]);
+        mats.push(m.compose(p, q, s.set(1, 1, 1)).clone());
+      }
+    }
+    if (!geo || !mats.length) return;
+    width.value = Math.max(0.035, camDist * 0.0052); // about 2 art pixels at any zoom
+    glow.material.opacity = 0.05 + 0.035 * Math.sin(t * 4.5); // a gentle pulse that doesn't wash the colours out
+    for (const mesh of [hull, glow]) {
+      mesh.geometry = geo;
+      mats.forEach((mm, i) => mesh.setMatrixAt(i, mm));
+      mesh.count = mats.length;
+      mesh.instanceMatrix.needsUpdate = true;
+      mesh.visible = true;
+    }
   }
 
   /** Log piles placed by players (world.piles: cellKey -> [ix, iz, r, n]), rebuilt whenever they change. */
@@ -914,22 +1269,37 @@ export class WorldScene {
     this.scene.add(mesh);
   }
 
-  /** Workbenches placed by players (world.benches: cellKey -> [ix, iz, rot]), rebuilt whenever they change. */
+  /**
+   * Furniture placed by players (world.benches: cellKey -> [ix, iz, rot, type]), rebuilt whenever it
+   * changes: one instanced mesh per type, plus the lamps' glowing panes (unlit HDR, so they bloom).
+   */
   setBenches(benches) {
-    if (this.benchMesh) { this.scene.remove(this.benchMesh); this.benchMesh.dispose(); this.benchMesh = null; }
-    const list = [...benches.values()];
-    if (!list.length) return;
+    for (const mesh of this.benchMeshes ?? []) { this.scene.remove(mesh); mesh.dispose(); }
+    this.benchMeshes = [];
+    const byType = new Map();
+    for (const b of benches.values()) { const t = b[3] ?? 0; if (!byType.has(t)) byType.set(t, []); byType.get(t).push(b); }
+    if (!byType.size) return;
     if (!this.benchMat) this.benchMat = new THREE.MeshLambertMaterial({ vertexColors: true });
     const m = new THREE.Matrix4(), q = new THREE.Quaternion(), p = new THREE.Vector3(), one = new THREE.Vector3(1, 1, 1), up = new THREE.Vector3(0, 1, 0);
-    const mesh = new THREE.InstancedMesh(sharedGeo('workbench', workbenchGeometry), this.benchMat, list.length);
-    list.forEach(([ix, iz, r], i) => {
-      p.set(toWorld(ix), this.world.H(ix, iz), toWorld(iz));
-      mesh.setMatrixAt(i, m.compose(p, q.setFromAxisAngle(up, r * Math.PI / 2), one));
-    });
-    mesh.castShadow = mesh.receiveShadow = true;
-    mesh.computeBoundingSphere();
-    this.benchMesh = mesh;
-    this.scene.add(mesh);
+    const build = (geo, mat, list, shadows) => {
+      const mesh = new THREE.InstancedMesh(geo, mat, list.length);
+      list.forEach(([ix, iz, r], i) => {
+        p.set(toWorld(ix), this.world.H(ix, iz), toWorld(iz));
+        mesh.setMatrixAt(i, m.compose(p, q.setFromAxisAngle(up, r * Math.PI / 2), one));
+      });
+      mesh.castShadow = shadows;
+      mesh.receiveShadow = true;
+      mesh.computeBoundingSphere();
+      this.benchMeshes.push(mesh);
+      this.scene.add(mesh);
+    };
+    for (const [t, list] of byType) {
+      build(furnitureGeometry(t), this.benchMat, list, true);
+      if (t === LAMP_TYPE) {
+        this.lampGlowMat ??= new THREE.MeshBasicMaterial({ color: new THREE.Color(1.9, 1.05, 0.32) }); // warm amber, still bright enough to bloom
+        build(sharedGeo('lampGlow', lampGlowGeometry), this.lampGlowMat, list, false);
+      }
+    }
   }
 
   /** Island: hide the berries on a bush (picked, or the bush was broken). */
@@ -964,19 +1334,21 @@ export class WorldScene {
 
   // gather what's loaded: ambient life, fireflies and gems use these
   refreshLive() {
-    const flowers = [], reeds = [], trees = [], motes = [], gems = [], lilies = [], redwoods = [], bushes = [], pebbles = [];
+    const flowers = [], reeds = [], trees = [], motes = [], gems = [], lilies = [], redwoods = [], bushes = [], pebbles = [], corals = [], pickles = [];
     for (const { data, gems: g } of this.chunks.values()) {
       bushes.push(...data.bushes);
       pebbles.push(...data.pebbles);
       flowers.push(...data.flowers);
       lilies.push(...data.lilies);
+      corals.push(...(data.corals ?? []));
+      pickles.push(...(data.pickles ?? []));
       redwoods.push(...data.redwoods);
       reeds.push(...data.reeds);
       trees.push(...data.trees);
       motes.push(...data.motes);
       gems.push(...g);
     }
-    Object.assign(this.live, { flowers, reeds, trees, lilies, redwoods, bushes, pebbles });
+    Object.assign(this.live, { flowers, reeds, trees, lilies, redwoods, bushes, pebbles, corals, pickles });
     this.gems = gems;
     this.setMotes(motes);
   }
@@ -995,7 +1367,7 @@ export class WorldScene {
       for (let x = 0; x < w; x++) {
         const ix = x0 + x, iz = z0 + z, i = z * w + x;
         const top = H(ix, iz);
-        m.makeScale(1, top + 1, 1).setPosition(toWorld(ix), -1, toWorld(iz)); // extend 1 below 0 so edges never show gaps
+        m.makeScale(1, top - COL_BASE, 1).setPosition(toWorld(ix), COL_BASE, toWorld(iz)); // down to below the deepest seabed, so edges never show gaps
         mesh.setMatrixAt(i, m);
         kindAttr[i] = kind(ix, iz);
         topAttr[i] = top;
@@ -1065,7 +1437,7 @@ export class WorldScene {
   // grass, ferns, reeds, bushes and mushrooms (fireflies are global: setMotes). With `lod`, everything
   // but bushes counts as small stuff, hidden in far chunks (see updateLod)
   addFoliage(target, d, lod = null) {
-    const { tufts, tallGrass, bushes, ferns, mushrooms, reeds, pebbles = [], seaweed = [], seaRocks = [], lilies = [], cairns = [] } = d;
+    const { tufts, tallGrass, bushes, ferns, mushrooms, reeds, pebbles = [], seaweed = [], seaRocks = [], lilies = [], cairns = [], corals = [], seagrass = [], pickles = [] } = d;
     const M = this.mats;
     const c = new THREE.Color();
     const add = (mesh) => { if (mesh) target.add(mesh); return mesh; };
@@ -1103,10 +1475,25 @@ export class WorldScene {
     small(tint(instanced(GEO.pebble(), M.pebble, pebbles, (m, p) => yawScale(m, p, 0.85 + p.r * 0.5), { shadows: false }), pebbles, 0xffffff, 0.16));
     // trail markers: little stone cairns beside mountain trails
     add(instanced(GEO.cairn(), M.cairn, cairns, (m, c) => m.makeRotationY(c.r * 6.283).setPosition(c.x, c.y, c.z)));
+    // coral reefs: one mesh per shape, each coral coloured from the reef palette (starfish their own)
+    for (let t = 0; t < CORAL_GEO.length; t++) {
+      const items = corals.filter((co) => co.type === t);
+      const mesh = small(instanced(coralGeo(t), t === 2 || t === 4 ? M.coralSway : M.coral, items, (m, co) => yawScale(m, co, co.s ?? 1), { shadows: false }));
+      if (mesh) items.forEach((co, i) => mesh.setColorAt(i, c.setHex((t === 5 ? STAR_COLORS : CORAL_COLORS)[co.c % (t === 5 ? 3 : 6)]).multiplyScalar(1.02 + co.r * 0.2)));
+    }
     // underwater: seaweed ribbons reaching most of the way up to the surface, and mossy rocks
     small(tint(instanced(GEO.seaweed(), M.seaweed, seaweed, (m, w) => {
       m.makeRotationY(w.r * 6.283).scale(new THREE.Vector3(1, Math.max(0.15, (w.h - 0.08) * (0.55 + w.r * 0.4)), 1)).setPosition(w.x, w.y, w.z);
     }, { shadows: false }), seaweed, 0x3c8a5a, 0.35));
+    // seagrass meadows: short clumps of blades swaying with the current
+    small(tint(instanced(GEO.seagrass(), M.seagrass, seagrass, (m, g) => {
+      m.makeRotationY(g.r * 6.283).scale(new THREE.Vector3(1, (0.22 + g.h * 0.32) * (0.7 + g.r * 0.6), 1)).setPosition(g.x, g.y, g.z);
+    }, { shadows: false }), seagrass, 0x4f9a48, 0.4));
+    // sea pickles in clusters of 1–4 (one mesh per cluster size), glowing at night
+    for (let n = 1; n <= 4; n++) {
+      const items = pickles.filter((p) => p.n === n);
+      small(instanced(GEO['pickle' + n](), M.pickle, items, (m, p) => yawScale(m, p, 1.7 + p.r * 0.7), { shadows: false }));
+    }
     small(instanced(GEO.rock(), M.seaRock, seaRocks, (m, r) => {
       m.makeRotationY(r.r * 6.283).scale(new THREE.Vector3(r.s, r.s * 0.7, r.s)).setPosition(r.x, r.y + r.s * 0.2, r.z);
     }, { shadows: false }));
@@ -1178,6 +1565,13 @@ export class WorldScene {
       return { light, idx: -1, fade: 0 };
     });
     this.fireflyPick = 0;
+    this.pickleLights = Array.from({ length: PICKLE_LIGHTS }, () => {
+      const light = new THREE.PointLight(0x6dff8e, 0, PICKLE_RANGE, 1.6);
+      light.visible = false;
+      s.add(light);
+      return { light, p: null, fade: 0 };
+    });
+    this.picklePick = 0;
   }
 
   setMotes(list) {
@@ -1222,7 +1616,9 @@ export class WorldScene {
   buildWater() {
     // a big plane that follows the player (update), so it covers any endless ocean too
     const geo = new THREE.PlaneGeometry(400, 400).rotateX(-Math.PI / 2);
-    const wm = new THREE.MeshPhongMaterial({ color: 0x3f8fd6, specular: 0xfff3d6, shininess: 70, transparent: true, opacity: 0.74 });
+    // Sun glints are kept subtle: a dimmer, tighter highlight, gentler ripple normals, and a cap on the
+    // reflected sun (a low sun used to light up a huge checkered glare across the sea).
+    const wm = new THREE.MeshPhongMaterial({ color: 0x3f8fd6, specular: 0x8f8a80, shininess: 240, transparent: true, opacity: 0.74 });
     const heightTex = this.heightTex;
     wm.onBeforeCompile = (sh) => {
       sh.uniforms.uTime = wind;
@@ -1246,14 +1642,20 @@ export class WorldScene {
           // depth blended between cell centres (texel-snapped), so shallows fade into the ocean without tile edges
           vec2 dp = wcell - 0.5, dc = floor(dp), df = floor(fract(dp) * 16.0) / 16.0;
           float bedH = mix(mix(wColH(dc), wColH(dc + vec2(1.0, 0.0)), df.x), mix(wColH(dc + vec2(0.0, 1.0)), wColH(dc + vec2(1.0, 1.0)), df.x), df.y);
-          float depth = clamp(${SEA.toFixed(2)} - min(bedH, ${SEA.toFixed(2)}), 0.0, 1.6);
-          float deepT = smoothstep(0.25, 1.25, depth);
-          vec3 wc = mix(vec3(0.26, 0.68, 0.80), vec3(0.12, 0.46, 0.70), deepT); // soft turquoise to calm blue
-          float wAlpha = mix(0.52, 0.74, deepT);
-          float oceanT = smoothstep(0.45, 0.9, depth);           // open water: deeper blue, fainter ripples
+          float depth = clamp(${SEA.toFixed(2)} - min(bedH, ${SEA.toFixed(2)}), 0.0, 6.0);
+          // Layers, from the beach out: clear turquoise shallows (you see the sand), a teal lagoon over the
+          // reefs (still clear enough to see the coral), open blue water, deep blue, and a dark abyss.
+          float l1 = smoothstep(0.2, 0.75, depth), l2 = smoothstep(0.9, 1.7, depth), l3 = smoothstep(1.8, 2.9, depth), l4 = smoothstep(3.2, 4.6, depth);
+          vec3 wc = mix(vec3(0.38, 0.84, 0.84), vec3(0.20, 0.68, 0.76), l1);
+          wc = mix(wc, vec3(0.13, 0.48, 0.72), l2);
+          wc = mix(wc, vec3(0.08, 0.31, 0.58), l3);
+          wc = mix(wc, vec3(0.04, 0.15, 0.36), l4);
+          float wAlpha = mix(0.38, 0.5, l1);
+          wAlpha = mix(wAlpha, 0.74, l2);
+          wAlpha = mix(wAlpha, 0.86, l3);
+          wAlpha = mix(wAlpha, 0.93, l4);
+          float oceanT = smoothstep(0.9, 2.0, depth);            // open water: fainter ripples
           float shallowT = mix(0.8, 0.2, oceanT);                // ripple strength (gentle)
-          wc = mix(wc, vec3(0.14, 0.40, 0.62), oceanT);
-          wAlpha = mix(wAlpha, 0.88, oceanT);
           {
             // Pixel caustics: drifting cellular (Voronoi) noise snapped to 10 texels per unit. Cell borders are
             // bright light-blue lines with a softer band inside them; each cell's interior gets one of three shades.
@@ -1288,7 +1690,9 @@ export class WorldScene {
           vec2 wp = floor(vWaterPos.xz * 8.0) / 8.0; // ripples snapped to an 8-per-unit grid
           float wa = sin(wp.x * 3.1 + uTime * 1.7) + sin(wp.y * 2.3 - uTime * 1.3) + sin((wp.x + wp.y) * 5.7 + uTime * 2.9) * 0.5;
           float wb = sin(wp.y * 3.7 + uTime * 1.9) + sin(wp.x * 2.9 + uTime * 1.1) + sin((wp.x - wp.y) * 6.3 - uTime * 2.3) * 0.5;
-          normal = normalize(normal + (viewMatrix * vec4(wa * 0.09, 0.0, wb * 0.09, 0.0)).xyz);`);
+          normal = normalize(normal + (viewMatrix * vec4(wa * 0.05, 0.0, wb * 0.05, 0.0)).xyz);`)
+        .replace('#include <lights_fragment_end>', `#include <lights_fragment_end>
+          reflectedLight.directSpecular = min(reflectedLight.directSpecular, vec3(0.14)) * (1.0 - 0.7 * smoothstep(12.0, 36.0, length(vViewPosition)));`);
     };
     this.water = new THREE.Mesh(geo, wm);
     this.water.position.y = SEA;
@@ -1368,8 +1772,9 @@ export class WorldScene {
           else c = vec3(0.60, 0.55, 0.74);                 // lavender undersides
           c = pow(c, vec3(2.2)) * uTint;                   // to linear for the HDR pipeline, tinted by time of day
           vec2 sc = gl_FragCoord.xy / uRes - 0.5;
-          sc.x *= uRes.x / uRes.y;
-          float a = uOpacity * smoothstep(0.16, 0.38, length(sc)) * smoothstep(3.0, 7.0, length(vView));
+          // an oval hole shaped like the screen (wider on wide screens), with a long, soft fade around the clear middle
+          float hole = smoothstep(0.2, 0.8, length(sc));
+          float a = uOpacity * hole * hole * smoothstep(3.0, 7.0, length(vView));
           gl_FragColor = vec4(c, a);
         }`,
       transparent: true,
@@ -1457,6 +1862,8 @@ export class WorldScene {
     const night = (this.night = Math.max(this.timeNight ?? 0, deep * 0.85));
     this.moteGlow.material.uniforms.uGlow.value = night * 0.45;
     this.moteMesh.material.color.setRGB(2.6, 2.4, 0.9).multiplyScalar(1 + night * 0.5);
+    // sea pickles light up after dusk: a soft green HDR glow that blooms through the water
+    this.mats.pickle.emissive.setRGB(0.45, 2.3, 0.6).multiplyScalar(night);
   }
 
   /** Move the firefly light pool onto the fireflies nearest the player (night only). */
@@ -1471,6 +1878,7 @@ export class WorldScene {
       this.fireflyLightsOn = on;
       for (const l of lights) l.light.visible = on;
       for (const l of this.lanternLights) l.visible = on;
+      for (const l of this.pickleLights) l.light.visible = on;
     }
     if (!on || night <= 0) { for (const l of lights) { l.light.intensity = 0; l.idx = -1; l.fade = 0; } return; }
     // re-pick the nearest fireflies a few times a second
@@ -1501,6 +1909,39 @@ export class WorldScene {
     }
   }
 
+  /** Light the sea pickles nearest the player with a small pool of soft green lights (night only, see updateFireflyLights). */
+  updatePickleLights(dt, focus, t) {
+    const night = this.night ?? 0, lights = this.pickleLights;
+    this.mats.pickle.userData.uFocus.value.copy(focus);
+    if (!this.fireflyLightsOn || night <= 0) { for (const l of lights) { l.light.intensity = 0; l.p = null; l.fade = 0; } return; }
+    this.picklePick -= dt;
+    if (this.picklePick <= 0) {
+      this.picklePick = 0.5;
+      const list = this.live?.pickles ?? [], best = [];
+      for (const p of list) {
+        const d = (p.x - focus.x) ** 2 + (p.z - focus.z) ** 2;
+        if (d > 24 * 24) continue;
+        if (best.length < lights.length) best.push([d, p]);
+        else if (d < best[best.length - 1][0]) best[best.length - 1] = [d, p];
+        else continue;
+        best.sort((a, b) => a[0] - b[0]);
+      }
+      const want = new Set(best.map((b) => b[1]));
+      const free = lights.filter((l) => !want.has(l.p));
+      for (const l of lights) want.delete(l.p);
+      for (const p of want) { const l = free.pop(); l.p = p; l.fade = 0; }
+      for (const l of free) l.p = null;
+    }
+    for (const l of lights) {
+      if (!l.p) { l.light.intensity = 0; continue; }
+      l.fade = Math.min(1, l.fade + dt * 2);
+      // just above the cluster, under the surface: lights the seabed, the plants around it and the water above
+      l.light.position.set(l.p.x, Math.min(l.p.y + 0.4, SEA - 0.1), l.p.z);
+      const fade = pickleFade(SEA - l.p.y, Math.hypot(l.p.x - focus.x, l.p.z - focus.z)); // same falloff as the glow
+      l.light.intensity = PICKLE_LIGHT_I * night * l.fade * fade * (0.85 + 0.15 * Math.sin(t * 1.3 + l.p.r * 20)); // a slow, gentle pulse
+    }
+  }
+
   /** Map editor (islands): push edited heights/kinds (this.world.heights/kinds) to the terrain right away. */
   updateTerrain() {
     const { heights, kinds } = this.world;
@@ -1509,7 +1950,7 @@ export class WorldScene {
     for (let iz = 0; iz < WORLD; iz++) {
       for (let ix = 0; ix < WORLD; ix++) {
         const i = iz * WORLD + ix;
-        m.makeScale(1, heights[i] + 1, 1).setPosition(toWorld(ix), -1, toWorld(iz));
+        m.makeScale(1, heights[i] - COL_BASE, 1).setPosition(toWorld(ix), COL_BASE, toWorld(iz));
         mesh.setMatrixAt(i, m);
         kindA.array[i] = kinds[i];
         topA.array[i] = heights[i];
@@ -1546,6 +1987,7 @@ export class WorldScene {
   setSeeThrough(camera, pos, rtW, rtH) { setSeeThrough(camera, pos, rtW, rtH); }
 
   update(t, dt, focus, camDist = 10) {
+    this.camDist = camDist;
     wind.value = t;
     if (this.world.endless) { this.updateChunks(focus); this.updateLod(focus); }
     // how deep in the redwood forest the player is: share of DEEP cells in the 7×7 around them, smoothed
@@ -1560,6 +2002,7 @@ export class WorldScene {
     }
     this.ambient.update(t, dt, focus);
     this.effects.update(dt);
+    this.atmosphere.update(t, dt, focus, this.night ?? 0);
 
     // zoomed out: push fog back, widen shadow coverage, fade the cloud layer in
     this.scene.fog.near = 28 + camDist;
@@ -1591,6 +2034,7 @@ export class WorldScene {
     this.moteMesh.instanceMatrix.needsUpdate = true;
     if (glowOn) gp.needsUpdate = gt.needsUpdate = true;
     this.updateFireflyLights(dt, focus);
+    this.updatePickleLights(dt, focus, t);
     // keep the shadow camera centered on the player, snapped to shadow texels to avoid shimmering
     const texel = (this.shadowHalf * 2) / SHADOW_MAP;
     const fx = Math.round(focus.x / texel) * texel, fz = Math.round(focus.z / texel) * texel;

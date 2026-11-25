@@ -26,6 +26,17 @@ const SNOW_H = 13.5, ROCK_BAND = 1.5, MOUNTAIN_FOREST_T = 0.42;
 // Their height follows a smooth surface (bilinear over raw heights sampled every TRAIL_GRID cells),
 // so neighbouring trail cells stay within a climbable step.
 const TRAIL_MIN = 4.5, TRAIL_RANGE = 0.2, TRAIL_GRID = 8, TRAIL_WIDTH = 1.3;
+// Archipelago: big islands where fbm(/ISLAND_SCALE) passes SHELF_LO..HI, islets where fbm(/22) passes ISLET_LO..HI
+const ISLAND_SCALE = 150, SHELF_LO = 0.5, SHELF_HI = 0.61, ISLET_LO = 0.65, ISLET_HI = 0.79;
+// mid-sized islands between the big ones and the islets: fbm(/ISLE_SCALE) passing ISLE_LO..HI
+const ISLE_SCALE = 55, ISLE_LO = 0.62, ISLE_HI = 0.74;
+// Rivers: the winding line where a slow, domain-warped noise crosses 0.5 (so they never break), on the big
+// islands only, starting at the foot of the mountains. The channel is carved below the sea (water) and a
+// valley whose slopes stay walkable leads down to it. Wider near the coast (estuaries).
+const RIVER_SCALE = 95, RIVER_WARP = 34;
+// Seabed: about level 3 (depth 0.3) at the coast, falling SEABED_SLOPE levels per unit of eRaw across the
+// shelf, then DROP_SLOPE more past SHELF_EDGE (the drop-off), down to SEABED_MIN
+const SEABED_SLOPE = 6, SHELF_EDGE = 0.35, DROP_SLOPE = 10, SEABED_MIN = -6;
 const VR = VILLAGE_RADIUS;
 const FLOWER_COLORS = [0xf2e15c, 0xf28cc0, 0xffffff, 0x9fb8ff, 0xff7a59];
 const TERRAIN_CACHE = 2500; // chunks of heights/kinds kept (cheap)
@@ -38,21 +49,60 @@ const isLand = (k) => k === K.GRASS || k === K.FOREST || k === K.SAND || k === K
 // Natural terrain at a cell, before trails, the campfire clearing and deep forest.
 // Returns [height (rounded to STEP), kind, smooth height (unrounded), mountain range share 0..1].
 function rawCell(seed, ix, iz) {
-  const c = fbm(ix / 260, iz / 260, seed + 11, 4); // continents and oceans
+  // Archipelago (a sea adventure world): mostly open ocean. `shelf` raises the bigger islands where a
+  // slow noise peaks; `islet` scatters small isles across the open sea. Land only rises where one of
+  // them is up, so islands are separated by real stretches of water.
+  const c = fbm(ix / ISLAND_SCALE, iz / ISLAND_SCALE, seed + 11, 4);
+  const shelf = smooth(SHELF_LO, SHELF_HI, c);
+  const islet = smooth(ISLET_LO, ISLET_HI, fbm(ix / 22, iz / 22, seed + 91, 3)) * 0.9;
+  const isle = smooth(ISLE_LO, ISLE_HI, fbm(ix / ISLE_SCALE, iz / ISLE_SCALE, seed + 131, 3)) * 0.93;
+  const land = Math.max(shelf, islet, isle);
   const n = fbm(ix / 26, iz / 26, seed);
   const ridge = 1 - Math.abs(fbm(ix / 18, iz / 18, seed + 7) * 2 - 1); // craggy ridges
   const m = fbm(ix / 120, iz / 120, seed + 21, 3);
-  const mount = 0.2 + 0.38 * smooth(0.6, 0.76, m); // where ranges rise (rarer: high thresholds)
+  // mountain ranges only rise on the big islands (islets stay low and sandy)
+  const mount = (0.2 + 0.38 * smooth(0.6, 0.76, m)) * (0.4 + 0.6 * shelf);
   // tall massifs inside mountain ranges: broad ridged noise, so slopes stay hikeable
   const massif = 1 - Math.abs(fbm(ix / 44, iz / 44, seed + 71, 3) * 2 - 1);
-  const range = smooth(0.63, 0.78, m); // inside a mountain range (0..1)
-  let e = n * 0.8 + ridge * ridge * mount + range * massif ** 3 * 0.62 - (1 - smooth(0.35, 0.49, c)) * 0.95 - 0.08;
+  const range = smooth(0.63, 0.78, m) * shelf; // inside a mountain range (0..1)
+  let e = n * 0.8 + ridge * ridge * mount + range * massif ** 3 * 0.62 - (1 - land) * 0.95 - 0.08;
+  const eRaw = e; // below 0 out at sea: how far from land, used to shape the seabed
   e = Math.max(0, e);
   e = Math.pow(e, 1.6);
   let lv = e * 26;
   if (lv > PEAK_EASE) lv = PEAK_EASE + (lv - PEAK_EASE) * 0.45; // ease the tallest peaks instead of clipping them flat
-  const hf = Math.max(STEP, Math.min(MAX_LEVEL * STEP, lv * STEP));
-  const h = Math.max(1, Math.min(MAX_LEVEL, Math.round(lv))) * STEP;
+  // rivers: carve a valley and a channel on the big islands (fading out where the mountains begin)
+  let chan = null;
+  const lv0 = lv; // before the rivers (trails take their heights from this, so they don't dip into valleys)
+  // rp: river strength. The channel runs wherever rp > 0.3 (always wide and deep enough for a boat); the valley
+  // around it is fully carved there and only fades where rp falls toward 0 (the source, at the foot of the mountains)
+  const rp = smooth(0.25, 0.55, shelf) * (1 - smooth(0.04, 0.18, range)); // gone before the trails start (range 0.2)
+  if (rp > 0.02 && lv > 1) {
+    const d = riverDist(seed, ix, iz);
+    const chW = 2.8 + 0.8 * (1 - smooth(3, 12, lv)); // the channel's half width (5.6–7 cells across: a boat fits, bends included)
+    const VW = Math.min(14, chW + 1.5 + lv * 0.75); // valley half width: gentle enough to walk down to the water
+    if (d < VW) {
+      const BANK = 4; // a sandy bank just above the water (level 4 = 2.0)
+      let carved = lv > BANK ? BANK + (lv - BANK) * smooth(chW, VW, d) : lv;
+      if (d < chW) carved = Math.min(lv, d < chW - 0.9 ? 2 : 3); // deep middle (0.8), a wadeable edge (0.3)
+      lv += (carved - lv) * smooth(0, 0.3, rp);
+      if (d < chW && rp > 0.3) chan = d < chW - 0.9 ? 2 : 3;
+    }
+  }
+  const hf = Math.max(STEP, Math.min(MAX_LEVEL * STEP, lv0 * STEP));
+  let h = Math.max(1, Math.min(MAX_LEVEL, Math.round(lv))) * STEP;
+  // The seabed falls away from the islands in layers: sandy shallows you can wade (depth 0.3), reef flats
+  // and lagoons, open water, deep water and a dark abyss far out (down to SEABED_MIN, about 4.8 deep).
+  // A little noise makes banks, holes and shelves instead of smooth rings.
+  if (h < SEA) {
+    // a gentle shelf around the islands (reef flats), then a drop-off past SHELF_EDGE into deep water
+    const bed = 3.4 + eRaw * SEABED_SLOPE - Math.max(0, -eRaw - SHELF_EDGE) * DROP_SLOPE + (fbm(ix / 9, iz / 9, seed + 61, 2) - 0.5) * 1.8;
+    const bedLv = Math.max(SEABED_MIN, Math.min(3, Math.round(bed)));
+    // where the land formula only gives its floor (level 1, no land rising here) the shelf decides; right
+    // at the coast, where the land is already rising out of the water, keep the higher of the two
+    h = (Math.round(lv) <= 1 ? bedLv : Math.max(bedLv, Math.round(lv))) * STEP;
+  }
+  if (chan !== null) h = Math.min(h, chan * STEP); // river water
   let k;
   if (h < SEA) k = K.SEABED;
   else if (h <= SEA + 0.3) k = K.SAND;
@@ -65,6 +115,18 @@ function rawCell(seed, ix, iz) {
     if (k === K.GRASS && isDirt(ix, iz, seed)) k = K.DIRT;
   }
   return [h, k, hf, range];
+}
+
+// Distance in cells from (ix, iz) to the nearest river line (Infinity when clearly far from one)
+export function riverDist(seed, ix, iz) {
+  const n = (x, z) => {
+    const wx = x + (fbm(x / 40, z / 40, seed + 141, 2) - 0.5) * RIVER_WARP, wz = z + (fbm(x / 40, z / 40, seed + 142, 2) - 0.5) * RIVER_WARP;
+    return fbm(wx / RIVER_SCALE, wz / RIVER_SCALE, seed + 151, 3);
+  };
+  const c = n(ix, iz) - 0.5;
+  if (Math.abs(c) > 0.3) return Infinity; // far enough that no valley reaches here (a valley is at most 14 cells wide)
+  const g = Math.hypot(n(ix + 1, iz) - n(ix - 1, iz), n(ix, iz + 1) - n(ix, iz - 1)) / 2;
+  return Math.abs(c) / Math.max(g, 1e-5);
 }
 
 // small LRU cache on a Map (insertion order)
@@ -91,6 +153,12 @@ export function createEndlessWorld(seed) {
     for (let z = -r; z <= r; z++) for (let x = -r; x <= r; x++) if (Math.abs(raw(ix + x, iz + z)[0] - h) > STEP + 0.01) return false;
     return true;
   };
+  // the camp needs a proper island to start on, not an islet: most of the 37×37 around it is land
+  const roomy = (ix, iz) => {
+    let n = 0, land = 0;
+    for (let z = -18; z <= 18; z += 3) for (let x = -18; x <= 18; x += 3) { n++; if (raw(ix + x, iz + z)[0] >= SEA) land++; }
+    return land >= n * 0.6;
+  };
   let camp = null;
   const o = WORLD / 2; // cell of world origin
   for (let r = 0; r < 700 && !camp; r += r < 64 ? 1 : 3) {
@@ -98,7 +166,7 @@ export function createEndlessWorld(seed) {
       for (let x = -r; x <= r && !camp; x++) {
         if (Math.max(Math.abs(x), Math.abs(z)) !== r) continue;
         const k = raw(o + x, o + z)[1];
-        if ((k === K.GRASS || k === K.FOREST) && rawFlat(o + x, o + z, 2)) camp = { ix: o + x, iz: o + z };
+        if ((k === K.GRASS || k === K.FOREST) && rawFlat(o + x, o + z, 2) && roomy(o + x, o + z)) camp = { ix: o + x, iz: o + z };
       }
     }
   }
@@ -343,7 +411,7 @@ export function createEndlessWorld(seed) {
 
     const trees = [], redwoods = [], rocks = [], flowers = [], corners = new Set();
     const tufts = [], tallGrass = [], bushes = [], ferns = [], mushrooms = [], reeds = [], motes = [], pebbles = [];
-    const pond = { lilies: [], seaweed: [], seaRocks: [] };
+    const pond = { lilies: [], seaweed: [], seaRocks: [], corals: [], seagrass: [], pickles: [] };
     const cairns = [];
     const lush = { reeds, tallGrass, ferns, bushes, ...pond }; // lists waterLife / bankLife add to
     const obstacles = new Map(); // cell key -> circles
@@ -465,7 +533,7 @@ export function createEndlessWorld(seed) {
         if (k === K.DIRT && roll(0) < 0.5) tufts.push(spot(ix, iz, 0, 0.9)); // a stray tuft at a dirt patch's grassy edge
         // trail markers: a stone cairn now and then on the ground beside a trail
         if (k !== K.TRAIL && k !== K.SEABED && roll(40) < 0.035 && [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => kind(ix + dx, iz + dz) === K.TRAIL)) cairns.push(spot(ix, iz, 130, 0.4));
-        if (k === K.SEABED) waterLife(ix, iz, H, kind, spot, roll, lush);
+        if (k === K.SEABED) waterLife(ix, iz, H, kind, spot, roll, lush, seed);
         else bankLife(ix, iz, k, kind, spot, roll, lush);
         if (k === K.SAND && !nearWater(ix, iz) && roll(10) < 0.35) tufts.push(spot(ix, iz, 55));
       }

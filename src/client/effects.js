@@ -7,8 +7,8 @@ import { K } from '../shared/world.js';
 const MAX_PUFFS = 96, MAX_CHIPS = 48;
 // dust and chip colours per ground kind
 // 'water' is a splash (fish leaping), not a ground kind
-const DUST = { water: 0xd6f0ff, [K.SAND]: 0xf1e2b0, [K.ROCK]: 0xc9c4ba, [K.SNOW]: 0xffffff, [K.PATH]: 0xe2dacb, [K.TRAIL]: 0xdcc69c, [K.DIRT]: 0xcdb38c, [K.SOIL]: 0xc4a47c, [K.WOOD]: 0xd8b48a, [K.WOOD2]: 0xd8b48a, wood: 0xd8b48a, leaves: 0x8fcf4a };
-const CHIPS = { water: [0x9fd8ff, 0xe8f7ff], [K.GRASS]: [0x6fb33a, 0x8fcf4a, 0x9a7a52], [K.FOREST]: [0x4f8f32, 0x6fb33a, 0x7a5c3c], [K.SAND]: [0xe0c98a, 0xcfb576], [K.ROCK]: [0x9a958c, 0x7c776f], [K.SNOW]: [0xffffff, 0xdfe8f2], [K.TRAIL]: [0xb08a5a, 0x9a7a52], [K.DIRT]: [0x8f6a44, 0x6fb33a], [K.SOIL]: [0x8f6a44, 0x6f4f32], [K.WOOD]: [0xa87444, 0x7a4f2c], [K.WOOD2]: [0xa87444, 0x7a4f2c], wood: [0xc89a64, 0x8a5a30, 0x6e4426], leaves: [0x5fae3e, 0x8fcf4a, 0x3f7f2c] };
+const DUST = { water: 0xd6f0ff, [K.SAND]: 0xf1e2b0, [K.ROCK]: 0xc9c4ba, [K.SNOW]: 0xffffff, [K.PATH]: 0xe2dacb, [K.TRAIL]: 0xdcc69c, [K.DIRT]: 0xcdb38c, [K.SOIL]: 0xc4a47c, [K.WOOD]: 0xd8b48a, [K.WOOD2]: 0xd8b48a, [K.WALL]: 0xd8b48a, wood: 0xd8b48a, leaves: 0x8fcf4a };
+const CHIPS = { water: [0x9fd8ff, 0xe8f7ff], [K.GRASS]: [0x6fb33a, 0x8fcf4a, 0x9a7a52], [K.FOREST]: [0x4f8f32, 0x6fb33a, 0x7a5c3c], [K.SAND]: [0xe0c98a, 0xcfb576], [K.ROCK]: [0x9a958c, 0x7c776f], [K.SNOW]: [0xffffff, 0xdfe8f2], [K.TRAIL]: [0xb08a5a, 0x9a7a52], [K.DIRT]: [0x8f6a44, 0x6fb33a], [K.SOIL]: [0x8f6a44, 0x6f4f32], [K.WOOD]: [0xa87444, 0x7a4f2c], [K.WOOD2]: [0xa87444, 0x7a4f2c], [K.WALL]: [0x8a5730, 0x5a3418], wood: [0xc89a64, 0x8a5a30, 0x6e4426], leaves: [0x5fae3e, 0x8fcf4a, 0x3f7f2c] };
 const tmpM = new THREE.Matrix4(), tmpQ = new THREE.Quaternion(), tmpE = new THREE.Euler(), tmpS = new THREE.Vector3(), tmpP = new THREE.Vector3(), tmpC = new THREE.Color();
 
 function pool(geo, mat, count) {

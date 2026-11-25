@@ -39,6 +39,10 @@ const FISH_RANGE = 24; // schools live within this distance of the player (re-ho
 // (after the water), so they read as "under the water" at any depth; deep water is nearly opaque and
 // would hide real underwater fish. A leaping fish is drawn solid (separate meshes).
 const FISH_TINT = 0x2f72b0, FISH_TINT_MIX = 0.35, FISH_OPACITY = 0.62;
+// Reef fish: bright little schools that each circle a coral near the player, really underwater (reef water is
+// shallow and clear enough to see them). One school is re-homed at a time when its coral falls behind.
+const REEF_SCHOOLS = 12, REEF_SCHOOL_MAX = 6, REEF_RANGE = 26, REEF_FISH_SIZE = 1.35;
+const REEF_COLORS = [0xff7a2a, 0x3a7ff0, 0xffd23a, 0x9a5ae0, 0xff6fa8, 0x2fd6b8, 0xf4f4fa]; // clownfish, blue tang, yellow tang, violet, pink, teal, silver
 const FLOCKS = 4, FLOCK_MAX = 7;
 const BIRD_COLORS = [0xf3f0e8, 0x3a3944, 0x8a6a4a]; // gulls, swifts, sparrows
 const BIRD_SIZE = 1.8; // model scale (the model is a small, readable silhouette at this size)
@@ -217,6 +221,25 @@ export class Ambient {
     });
     this.jumpBody.castShadow = this.jumpTail.castShadow = true;
     scene.add(this.fishBody, this.fishTail, this.jumpBody, this.jumpTail);
+
+    // ---------- reef fish: schools circling corals under the water ----------
+    this.reefSchools = Array.from({ length: REEF_SCHOOLS }, (_, s) => ({ home: null, dir: s % 2 ? 1 : -1, color: REEF_COLORS[s % REEF_COLORS.length] }));
+    this.reefFish = [];
+    this.reefSchools.forEach((sch, s) => {
+      const n = 3 + Math.floor(rand() * (REEF_SCHOOL_MAX - 2));
+      for (let k = 0; k < n; k++) {
+        this.reefFish.push({ school: s, a: rand() * 6.28, w: (0.55 + rand() * 0.45) * sch.dir, r: 0.35 + rand() * 0.75, ph: rand() * 100, yo: 0.18 + rand() * 0.45 });
+      }
+    });
+    const reefMat = new THREE.MeshLambertMaterial();
+    this.reefBody = instancedMesh(fishBody, reefMat, this.reefFish.length);
+    this.reefTail = instancedMesh(fishTail, reefMat, this.reefFish.length);
+    this.reefFish.forEach((f, i) => {
+      c.setHex(this.reefSchools[f.school].color).multiplyScalar(1 + (i % 3) * 0.06);
+      this.reefBody.setColorAt(i, c);
+      this.reefTail.setColorAt(i, c.multiplyScalar(0.8));
+    });
+    scene.add(this.reefBody, this.reefTail);
   }
 
   // is (x, z) water deep enough to swim in?
@@ -295,6 +318,42 @@ export class Ambient {
       tail.setMatrixAt(i, tmpM);
     });
     for (const m of [this.fishBody, this.fishTail, this.jumpBody, this.jumpTail]) m.instanceMatrix.needsUpdate = true;
+  }
+
+  // reef fish: re-home one school at a time onto a coral near the player, then everyone circles their coral
+  updateReefFish(t, dt, focus) {
+    const corals = this.src.corals ?? [];
+    const s = Math.floor(t * 3) % REEF_SCHOOLS, sch = this.reefSchools[s];
+    if (!sch.home || Math.hypot(sch.home.x - focus.x, sch.home.z - focus.z) > REEF_RANGE + 8) {
+      sch.home = null;
+      for (let tries = 0; tries < 40 && corals.length; tries++) {
+        const co = corals[Math.floor(Math.random() * corals.length)];
+        if (co.type !== 5 && Math.hypot(co.x - focus.x, co.z - focus.z) < REEF_RANGE) { sch.home = co; break; }
+      }
+    }
+    const top = SEA - 0.14, zero = tmpS.set(0, 0, 0);
+    this.reefFish.forEach((f, i) => {
+      const home = this.reefSchools[f.school].home;
+      if (!home) {
+        tmpM.compose(tmpP.set(0, -100, 0), tmpQ.identity(), zero);
+        this.reefBody.setMatrixAt(i, tmpM);
+        this.reefTail.setMatrixAt(i, tmpM);
+        return;
+      }
+      f.a += f.w * dt * (1 + 0.3 * Math.sin(t * 0.9 + f.ph)); // a little surge now and then
+      const r = f.r + Math.sin(t * 0.6 + f.ph) * 0.15;
+      const x = home.x + Math.cos(f.a) * r, z = home.z + Math.sin(f.a) * r;
+      const y = Math.min(top, Math.max(home.y + 0.12, home.y + f.yo + Math.sin(t * 1.4 + f.ph) * 0.05));
+      const sg = Math.sign(f.w), yaw = Math.atan2(-Math.sin(f.a) * sg, Math.cos(f.a) * sg); // along the circle
+      tmpQ.setFromEuler(tmpE.set(0, yaw + Math.sin(t * 8 + f.ph) * 0.1, 0, 'YXZ'));
+      tmpM.compose(tmpP.set(x, y, z), tmpQ, tmpS.set(REEF_FISH_SIZE, REEF_FISH_SIZE, REEF_FISH_SIZE));
+      this.reefBody.setMatrixAt(i, tmpM);
+      const back = 0.085 * REEF_FISH_SIZE, hx = Math.sin(yaw), hz = Math.cos(yaw);
+      tmpQ.setFromEuler(tmpE.set(0, yaw + Math.sin(t * 14 + f.ph) * 0.6, 0, 'YXZ'));
+      tmpM.compose(tmpP.set(x - hx * back, y, z - hz * back), tmpQ, tmpS.set(REEF_FISH_SIZE, REEF_FISH_SIZE, REEF_FISH_SIZE));
+      this.reefTail.setMatrixAt(i, tmpM);
+    });
+    this.reefBody.instanceMatrix.needsUpdate = this.reefTail.instanceMatrix.needsUpdate = true;
   }
 
   // a flock enters from the edge of the range and heads across, passing near the player
@@ -670,5 +729,6 @@ export class Ambient {
     if (this.swarms.length || this.striders.length) this.updateInsects(t, focus);
     this.updateBirds(t, dt, focus);
     this.updateFish(t, dt, focus);
+    this.updateReefFish(t, dt, focus);
   }
 }

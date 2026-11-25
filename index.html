@@ -18,18 +18,75 @@
           <button id="open-menu" class="btn" tabindex="-1">Menu</button>
           <button id="open-editor" class="btn" tabindex="-1">Map editor</button>
         </div>
+        <div class="hud-buttons">
+          <button id="creative-btn" class="btn" tabindex="-1" title="Debug: every item, free building">Creative: off</button>
+        </div>
       </div>
       <div id="area"></div>
       <div id="top-right">
         <canvas id="minimap" width="96" height="96"></canvas>
         <div id="ruins-found" class="panel"></div>
       </div>
+      <!-- the boat's throttle, shown at the helm (main.js throttleHud): W / S or a click moves it -->
+      <div id="throttle" hidden>
+        <div class="th-title">Throttle</div>
+        <div class="th-body">
+          <div class="th-track" title="Drag the lever, or press W / S">
+            <div class="th-groove"></div>
+            <i style="top: 0px"></i><i style="top: 26px"></i><i style="top: 52px"></i><i style="top: 78px"></i><i style="top: 104px"></i>
+            <div class="th-lever"><div class="th-knob"></div></div>
+          </div>
+          <div class="th-labels">
+            <span data-t="3">Full</span><span data-t="2">Half</span><span data-t="1">Slow</span><span data-t="0">Stop</span><span data-t="-1">Astern</span>
+          </div>
+        </div>
+        <div id="th-speed">0.0 tiles/s</div>
+      </div>
       <div id="time-panel" class="panel">
         <label for="time-slider"><span id="time-icon"></span> <span id="time-label">10:00</span></label>
         <input id="time-slider" type="range" min="0" max="24" step="0.25" value="10" tabindex="-1" aria-label="Time of day" />
       </div>
-      <div id="help" class="panel">
-        <b>WASD</b> move · <b>Shift</b> run · <b>Space</b> jump · <b>click</b> use, break, pick up · <b>right-click</b> bush · <b>R</b> rotate · <b>I</b> inventory · <b>Q/E</b> camera · <b>Esc</b> menu
+      <!-- the boat panel (main.js renderBoatPanel): name, paint and upgrades, opened with B (or the Boat button) aboard -->
+      <button id="boat-btn" class="btn" tabindex="-1" title="Your boat: name, paint and upgrades (B)" hidden>Boat</button>
+      <div id="boat-panel" hidden>
+        <div class="panel bp-panel">
+          <h2>Your boat</h2>
+          <label class="bp-name">Name <input id="bp-name" type="text" placeholder="Name your boat" autocomplete="off" spellcheck="false" /></label>
+          <button id="bp-edit" class="btn accent bp-edit" tabindex="-1">Customize: click the parts of your boat</button>
+          <h3>Upgrades</h3>
+          <div id="bp-ups"></div>
+          <div class="bp-foot"><span class="inv-help">B or Esc to close</span><button id="bp-close" class="btn" tabindex="-1">Close</button></div>
+        </div>
+      </div>
+      <!-- boat edit mode (main.js setBoatEdit): a banner, and the menu for the part you clicked -->
+      <div id="edit-banner" class="panel" hidden>
+        <span><b>Customizing your boat</b>: hover a part, click it to change it. Or pick:</span>
+        <span class="eb-parts"><button class="btn" data-part="hull" tabindex="-1">Hull</button><button class="btn" data-part="cabin" tabindex="-1">Cabin</button><button class="btn" data-part="roof" tabindex="-1">Roof</button><button class="btn" data-part="top" tabindex="-1">Top</button><button class="btn" data-part="mast" tabindex="-1">Mast</button></span>
+        <span class="eb-end"><button id="eb-panel" class="btn" tabindex="-1">Name &amp; upgrades</button><button id="eb-done" class="btn accent" tabindex="-1">Done (B)</button></span>
+      </div>
+      <div id="part-menu" class="panel" hidden></div>
+      <!-- controls: a "?" button (or H) opens a small card with the keys -->
+      <button id="help-btn" class="btn" tabindex="-1" title="Controls (H)" aria-label="Controls" aria-expanded="false">?</button>
+      <div id="help" class="panel" hidden>
+        <h3>Controls</h3>
+        <dl>
+          <dt>WASD / arrows</dt><dd>move</dd>
+          <dt>Shift</dt><dd>run</dd>
+          <dt>Space</dt><dd>jump</dd>
+          <dt>Click</dt><dd>use, break, pick up</dd>
+          <dt>Click workbench</dt><dd>craft</dd>
+          <dt>Right-click bush</dt><dd>search for berries</dd>
+          <dt>1–8</dt><dd>pick a hotbar slot</dd>
+          <dt>I / Tab</dt><dd>inventory</dd>
+          <dt>R</dt><dd>rotate</dd>
+          <dt>Q / E</dt><dd>turn camera</dd>
+          <dt>Wheel</dt><dd>zoom</dd>
+          <dt>F</dt><dd>board a boat / take the helm</dd>
+          <dt>B</dt><dd>your boat: name, upgrades, customize</dd>
+          <dt>At the helm</dt><dd>W/S throttle · A/D steer</dd>
+          <dt>H</dt><dd>show / hide this</dd>
+          <dt>Esc</dt><dd>menu</dd>
+        </dl>
       </div>
       <!-- inventory (see src/client/inventory.js): hotbar, held item name, and the inventory screen -->
       <div id="held-name"></div>
@@ -37,11 +94,18 @@
       <div id="ctx-menu" class="panel" hidden><button class="btn" tabindex="-1">Search for berries</button></div>
       <div id="inventory" hidden>
         <div class="panel inv-panel">
-          <h2>Inventory</h2>
+          <h2 id="inv-title">Inventory</h2>
           <div id="inv-bag" class="inv-grid"></div>
+          <p id="inv-nobag">No bag yet: only your hotbar can hold things. Craft a <b>Backpack</b> from sticks and leaves for 24 more slots.</p>
           <div id="inv-bar" class="inv-grid"></div>
           <h3>Crafting</h3>
           <div id="inv-craft"></div>
+          <p id="inv-craft-hint"></p>
+          <div id="inv-creative" hidden>
+            <h3>Creative: every item <span class="muted">(click: a stack · right-click: one)</span></h3>
+            <div id="inv-all"></div>
+            <button id="inv-clear" class="btn" tabindex="-1">Empty inventory</button>
+          </div>
           <div id="inv-name"></div>
           <p class="inv-help">Click: pick up / put down · Right-click: half / one · Shift-click: move · click a recipe to craft · <b>I</b> or <b>Esc</b> to close</p>
         </div>

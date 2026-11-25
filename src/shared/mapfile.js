@@ -13,7 +13,8 @@
 // Endless worlds (endless.js) are generated from the seed alone, so their file is tiny:
 // { v: 1, type: 'endless', name, seed, edits?: [[ix, iz, level, kind]...] }  (edits = player digging)
 
-import { WORLD, STEP, SEA, K, MAX_KIND, WORLD_LIMIT, inWorld } from './world.js';
+import { WORLD, STEP, SEA, K, MAX_KIND, MAX_FURNITURE, MIN_LEVEL, WORLD_LIMIT, inWorld } from './world.js';
+import { cleanLook } from './boatlook.js';
 
 export const MAP_VERSION = 1;
 export const MAX_LEVEL = 40; // 20 units high
@@ -44,14 +45,24 @@ const cellOk = (ix, iz) => Number.isInteger(ix) && Number.isInteger(iz) && inWor
 
 /** A saved endless world. */
 export const MAX_EDITS = 20000;
-export const endlessMap = (name, seed, edits = [], chops = [], benches = [], picks = [], piles = []) => ({
+export const endlessMap = (name, seed, edits = [], chops = [], benches = [], picks = [], piles = [], boats = []) => ({
   v: MAP_VERSION, type: 'endless', name: String(name ?? 'Endless world').slice(0, 40), seed: seed >>> 0,
   ...(edits.length ? { edits: edits.slice(-MAX_EDITS) } : {}),
   ...(chops.length ? { chops: chops.slice(-MAX_EDITS) } : {}),
   ...(benches.length ? { benches: benches.slice(-MAX_EDITS) } : {}),
   ...(picks.length ? { picks: picks.slice(-MAX_EDITS) } : {}),
   ...(piles.length ? { piles: piles.slice(-MAX_EDITS) } : {}),
+  ...(boats.length ? { boats: boats.slice(-MAX_BOATS) } : {}),
 });
+/** Validate a list of boats [[id, x, z, yaw, look?]...] (look: see boatlook.js) (id a positive integer, x/z world units); bad entries are dropped. */
+export const MAX_BOATS = 200;
+export function cleanBoats(list) {
+  if (!Array.isArray(list)) return [];
+  const lim = WORLD_LIMIT + WORLD;
+  return list.slice(-MAX_BOATS).filter((e) => Array.isArray(e) && (e.length === 4 || e.length === 5) && Number.isInteger(e[0]) && e[0] > 0 && e[0] < 2 ** 31
+    && e.slice(1, 4).every(Number.isFinite) && Math.abs(e[1]) <= lim && Math.abs(e[2]) <= lim && Math.abs(e[3]) <= 100)
+    .map(([id, x, z, yaw, look]) => [id, x, z, yaw, cleanLook(look)]); // older saves (no look) get the default look
+}
 /** Validate a list of log piles [[ix, iz, r 0..1, n 1..6]...]; bad entries are dropped. */
 export function cleanPiles(list) {
   if (!Array.isArray(list)) return [];
@@ -64,11 +75,12 @@ export function cleanPicks(list) {
   const lim = WORLD_LIMIT + WORLD;
   return list.slice(-MAX_EDITS).filter((e) => Array.isArray(e) && e.length === 3 && e.every(Number.isInteger) && Math.abs(e[0]) <= lim && Math.abs(e[1]) <= lim && e[2] >= 0 && e[2] <= 2);
 }
-/** Validate a list of placed workbenches [[ix, iz, rot 0..3]...]; bad entries are dropped. */
+/** Validate a list of placed furniture [[ix, iz, rot 0..3, type?]...] (no type = a workbench); bad entries are dropped. */
 export function cleanBenches(list) {
   if (!Array.isArray(list)) return [];
   const lim = WORLD_LIMIT + WORLD;
-  return list.slice(-MAX_EDITS).filter((e) => Array.isArray(e) && e.length === 3 && e.every(Number.isInteger) && Math.abs(e[0]) <= lim && Math.abs(e[1]) <= lim && e[2] >= 0 && e[2] <= 3);
+  return list.slice(-MAX_EDITS).filter((e) => Array.isArray(e) && (e.length === 3 || e.length === 4) && e.every(Number.isInteger) && Math.abs(e[0]) <= lim && Math.abs(e[1]) <= lim && e[2] >= 0 && e[2] <= 3 && (e[3] ?? 0) >= 0 && (e[3] ?? 0) <= MAX_FURNITURE)
+    .map(([ix, iz, r, t = 0]) => [ix, iz, r, t]);
 }
 /** Validate a list of chopped trees [[ix, iz]...] (the tree's own cell); bad entries are dropped. */
 export function cleanChops(list) {
@@ -82,7 +94,7 @@ export function cleanEdits(list) {
   const lim = WORLD_LIMIT + WORLD;
   // [ix, iz, level, kind] or [ix, iz, level, kind, underLevel, underKind] (the ground under placed blocks)
   return list.slice(-MAX_EDITS).filter((e) => Array.isArray(e) && (e.length === 4 || e.length === 6) && e.every(Number.isInteger)
-    && Math.abs(e[0]) <= lim && Math.abs(e[1]) <= lim && e[2] >= 0 && e[2] <= 48 && e[3] >= 0 && e[3] <= MAX_KIND
+    && Math.abs(e[0]) <= lim && Math.abs(e[1]) <= lim && e[2] >= MIN_LEVEL && e[2] <= 48 && e[3] >= 0 && e[3] <= MAX_KIND
     && (e.length === 4 || (e[4] >= 0 && e[4] <= 48 && e[5] >= 0 && e[5] <= MAX_KIND)));
 }
 export const isEndlessMap = (m) => !!m && typeof m === 'object' && m.type === 'endless';
@@ -91,7 +103,7 @@ export function decodeEndless(m) {
   if (!isEndlessMap(m)) throw new Error('not an endless world');
   if (m.v !== MAP_VERSION) throw new Error(`unsupported map version ${m.v}`);
   if (!Number.isFinite(m.seed)) throw new Error('endless world has no seed');
-  return endlessMap(m.name, m.seed, cleanEdits(m.edits), cleanChops(m.chops), cleanBenches(m.benches), cleanPicks(m.picks), cleanPiles(m.piles));
+  return endlessMap(m.name, m.seed, cleanEdits(m.edits), cleanChops(m.chops), cleanBenches(m.benches), cleanPicks(m.picks), cleanPiles(m.piles), cleanBoats(m.boats));
 }
 
 /** Parse and validate an island map object (from a file, storage or the network). Throws on bad input. */
