@@ -622,6 +622,7 @@ function nameTexture(name) {
 // ---------- the wake: foam left on the water ----------
 // Pooled flat squares on the surface (additive, so they fade by darkening). A moving boat sheds a V of
 // foam from both sides of the bow that spreads outward, and a churned trail from the stern that lingers.
+const NET_DELAY = 0.12; // other players' boats are drawn this far behind the driver (s), to interpolate between updates
 const WAKE_MAX = 520;
 const _m = new THREE.Matrix4(), _q = new THREE.Quaternion(), _e = new THREE.Euler(), _s = new THREE.Vector3(), _p = new THREE.Vector3(), _c = new THREE.Color();
 class Wake {
@@ -791,6 +792,16 @@ export class Boats {
       instant = true;
       if (look === undefined) look = defaultLook();
     }
+    // Network updates come about 10 times a second. Estimate the boat's velocity and turn rate from them, so
+    // update() can glide it along where it should be by now instead of surging toward each update and stalling.
+    const now = performance.now() / 1000, gap = now - (b.netAt ?? -1);
+    if (!instant && gap > 0.02 && gap < 1) {
+      let dyaw = yaw - b.yaw;
+      dyaw = Math.atan2(Math.sin(dyaw), Math.cos(dyaw));
+      const nv = [(x - b.x) / gap, (z - b.z) / gap, dyaw / gap];
+      b.nv = b.nv ? b.nv.map((v, i) => v + (nv[i] - v) * 0.6) : nv; // a little smoothing against network jitter
+    } else b.nv = [0, 0, 0];
+    b.netAt = now;
     Object.assign(b, { x, z, yaw });
     if (instant) Object.assign(b, { sx: x, sz: z, syaw: yaw });
     if (look !== undefined) this.setLook(id, look);
@@ -840,6 +851,39 @@ export class Boats {
       for (const p of b.plates) p.visible = !!L.n;
     }
   }
+  /**
+   * A timestamped pose from the boat's driver (t = the driver's clock in ms). Other players' screens replay the
+   * boat's path NET_DELAY behind, interpolating between these, so it glides as smoothly as it does for the driver.
+   */
+  sample(id, x, z, yaw, t, h = null, l = null) {
+    const b = this.list.get(id);
+    if (!b) return;
+    const ts = t / 1000, o = performance.now() / 1000 - ts, buf = (b.buf ??= []), last = buf[buf.length - 1];
+    if (last && ts <= last.t) { if (ts < last.t - 5) buf.length = 0; else return; } // late or repeated (a restart resets)
+    // clock offset: the quickest delivery seen, drifting up slowly so one lucky packet doesn't skew it for good
+    // and backing off faster when samples keep arriving later than the playback delay allows (a laggy connection)
+    b.off = b.off == null || o < b.off ? o : b.off + (o - b.off) * (o - b.off > NET_DELAY * 0.8 ? 0.15 : 0.02);
+    let y = yaw;
+    if (buf.length) { const p = buf[buf.length - 1].yaw; y = p + Math.atan2(Math.sin(yaw - p), Math.cos(yaw - p)); } // unwrapped
+    buf.push({ t: ts, x, z, yaw: y, h, l }); // h, l: the driver's heel and bow lift (null from older clients)
+    if (buf.length > 24) buf.shift();
+  }
+  // where a networked boat is at local time `now`, from its samples (null without any)
+  netPose(b, now) {
+    const buf = b.buf;
+    if (!buf?.length) return null;
+    const rt = now - b.off - NET_DELAY;
+    if (rt <= buf[0].t) return buf[0];
+    for (let i = buf.length - 1; i > 0; i--) {
+      const a = buf[i - 1], c = buf[i];
+      if (rt >= a.t && rt <= c.t) { const f = (rt - a.t) / Math.max(1e-4, c.t - a.t); return { x: a.x + (c.x - a.x) * f, z: a.z + (c.z - a.z) * f, yaw: a.yaw + (c.yaw - a.yaw) * f, h: a.h == null || c.h == null ? c.h : a.h + (c.h - a.h) * f, l: a.l == null || c.l == null ? c.l : a.l + (c.l - a.l) * f }; }
+    }
+    // past the newest sample (a late packet): carry on along the last motion briefly, then hold
+    const c = buf[buf.length - 1], a = buf[buf.length - 2];
+    if (!a) return c;
+    const f = Math.min(rt - c.t, 0.25) / Math.max(1e-3, c.t - a.t);
+    return { x: c.x + (c.x - a.x) * f, z: c.z + (c.z - a.z) * f, yaw: c.yaw + (c.yaw - a.yaw) * f, h: c.h, l: c.l };
+  }
   /** Edit mode on a boat: shows a ring on each empty deck spot. */
   setEditing(id, on) {
     const b = this.list.get(id);
@@ -872,10 +916,22 @@ export class Boats {
     materials().flagTime.value = t;
     const k = 1 - Math.exp(-dt * 8);
     for (const b of this.list.values()) {
-      if (b.id !== drivenId) {
-        b.sx += (b.x - b.sx) * k;
-        b.sz += (b.z - b.sz) * k;
-        let d = b.yaw - b.syaw;
+      if (b.id === drivenId && b.buf) { b.buf = null; b.off = null; } // we're sailing it now: forget the old network path
+      const np = b.id !== drivenId ? this.netPose(b, performance.now() / 1000) : null;
+      if (np) {
+        // replaying the driver's timestamped path: follow it closely (a little easing hides small corrections)
+        const kk = 1 - Math.exp(-dt * 25);
+        b.sx += (np.x - b.sx) * kk;
+        b.sz += (np.z - b.sz) * kk;
+        const d = Math.atan2(Math.sin(np.yaw - b.syaw), Math.cos(np.yaw - b.syaw));
+        b.syaw += d * kk;
+      } else if (b.id !== drivenId) {
+        // aim for where it should be by now (last update + velocity × time since, for up to 0.3 s), then ease there
+        // (no news for longer, e.g. the driver left: ease back to the last known spot by 0.6 s)
+        const since = b.nv ? performance.now() / 1000 - b.netAt : 0, age = since < 0.3 ? since : Math.max(0, 0.6 - since), nv = b.nv ?? [0, 0, 0];
+        b.sx += (b.x + nv[0] * age - b.sx) * k;
+        b.sz += (b.z + nv[1] * age - b.sz) * k;
+        let d = b.yaw + nv[2] * age - b.syaw;
         d = Math.atan2(Math.sin(d), Math.cos(d));
         b.syaw += d * k;
       }
@@ -890,7 +946,7 @@ export class Boats {
       const fwd = vx * Math.sin(b.syaw) + vz * Math.cos(b.syaw);
       b.vis = (b.vis ?? 0) + (Math.hypot(vx, vz) - (b.vis ?? 0)) * ease;
       b.visTurn = (b.visTurn ?? 0) + (dy * idt - (b.visTurn ?? 0)) * ease;
-      b.visAcc = (b.visAcc ?? 0) + ((fwd - (b.visFwd ?? fwd)) * idt - (b.visAcc ?? 0)) * ease;
+      b.visAcc = (b.visAcc ?? 0) + ((fwd - (b.visFwd ?? fwd)) * idt - (b.visAcc ?? 0)) * (1 - Math.exp(-dt * 1.5));
       b.visFwd = fwd;
       b.px = b.sx; b.pz = b.sz; b.pyaw = b.syaw;
       // bob on the waves, lean out of turns, lift the bow when picking up speed and ride a little bow-up
@@ -905,8 +961,15 @@ export class Boats {
         b.lift = (b.lift ?? want) + (want - (b.lift ?? want)) * (1 - Math.exp(-dt * 3));
       }
       g.position.set(b.sx, SEA + bobY(b, t) + (b.lift ?? 0), b.sz);
-      const roll = Math.sin(t * 1.1 + b.id % 3) * 0.028 * (1 + b.vis * 0.15) - THREE.MathUtils.clamp(b.visTurn * Math.abs(b.visFwd) * 0.035, -0.12, 0.12);
-      const pitch = Math.sin(t * 0.9 + b.id % 5) * 0.018 - THREE.MathUtils.clamp(b.visAcc * 0.03 + b.vis * 0.006, -0.09, 0.09);
+      // Heel out of turns and lift the bow with speed. Worked out from how the boat moves on this screen, which is
+      // smooth for its driver; everyone else uses the driver's values from the network (np.h / np.l), because
+      // deriving them from a replayed path (a derivative of a derivative) twitched.
+      let heel = THREE.MathUtils.clamp(b.visTurn * Math.abs(b.visFwd) * 0.035, -0.12, 0.12);
+      let lean = THREE.MathUtils.clamp(b.visAcc * 0.03 + b.vis * 0.006, -0.09, 0.09);
+      if (np && np.h != null) { heel = np.h; lean = np.l ?? lean; }
+      b.heel = heel; b.lean = lean; // sent with the driver's boat updates
+      const roll = Math.sin(t * 1.1 + b.id % 3) * 0.028 * (1 + b.vis * 0.15) - heel;
+      const pitch = Math.sin(t * 0.9 + b.id % 5) * 0.018 - lean;
       g.rotation.set(pitch, b.syaw, roll, 'YXZ');
       this.wake.emit(b, dt);
       // the flag streams away from where the boat is heading, a little to the wind side

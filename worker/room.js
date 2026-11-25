@@ -232,7 +232,9 @@ export class Room extends Server {
           if (had && !msg.look) { this.put('boats', id, entry, false); this.boatsDirty.add(id); } // a move: saved later
           else if (!this.put('boats', id, entry)) return;
         } else this.del('boats', id);
-        this.sendAll({ type: 'boat', by: player.id, id, x, z, yaw, on: !!msg.on, ...(msg.on && msg.look ? { look: this.items.boats.get(id)[4] } : {}) }, conn);
+        // t: the driver's clock (ms); h, l: its heel and bow lift. Relayed so others replay the path and tilt smoothly.
+        const ts = num(msg.t, 0, 1e13), heel = num(msg.h, -1, 1), lean = num(msg.l, -1, 1);
+        this.sendAll({ type: 'boat', by: player.id, id, x, z, yaw, on: !!msg.on, ...(ts !== null ? { t: ts } : {}), ...(heel !== null && lean !== null ? { h: heel, l: lean } : {}), ...(msg.on && msg.look ? { look: this.items.boats.get(id)[4] } : {}) }, conn);
         return;
       }
       // a boat was repainted, renamed or upgraded: keep its look and tell everyone else

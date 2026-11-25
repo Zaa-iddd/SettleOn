@@ -872,10 +872,13 @@ function screenDir(keys, yaw) {
 }
 function sendBoat(b, on = true, withLook = false) {
   if (game.mode !== 'multi') return;
-  send({ type: 'boat', id: b.id, x: +b.x.toFixed(2), z: +b.z.toFixed(2), yaw: +b.yaw.toFixed(3), on, ...(withLook ? { look: b.look } : {}) });
+  send({ type: 'boat', id: b.id, x: +b.x.toFixed(2), z: +b.z.toFixed(2), yaw: +b.yaw.toFixed(3), on, t: Math.round(performance.now()), h: +(b.heel ?? 0).toFixed(3), l: +(b.lean ?? 0).toFixed(3), ...(withLook ? { look: b.look } : {}) });
 }
-function onBoat({ id, x, z, yaw, on, look }) {
-  if (on) { if (game.driving !== id) game.boats.set(id, x, z, yaw, false, look); return; }
+function onBoat({ id, x, z, yaw, on, look, t, h, l }) {
+  if (on) {
+    if (game.driving !== id) { game.boats.set(id, x, z, yaw, false, look); if (typeof t === 'number') game.boats.sample(id, x, z, yaw, t, typeof h === 'number' ? h : null, typeof l === 'number' ? l : null); }
+    return;
+  }
   if (game.ride?.id === id) leaveBoat(); // it was taken out of the water under us
   game.boats.remove(id);
 }
