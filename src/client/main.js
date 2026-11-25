@@ -1814,7 +1814,12 @@ function drawMinimap() {
   dot(world.camp.x, world.camp.z, '#ff8c2a', 2);
   for (const ru of game.ruinsFound.values()) dot(ru.x, ru.z, '#7ef0ff', 2);
   for (const b of game.boats.list.values()) dot(b.sx, b.sz, '#c8643a', 4);
-  for (const r of game.remotes.values()) if (r.seen) dot(r.pos.x, r.pos.z, r.color);
+  for (const r of game.remotes.values()) {
+    if (!r.seen) continue;
+    const rx = r.pos.x + WORLD / 2 - ox, rz = r.pos.z + WORLD / 2 - oz;
+    if (rx >= 1 && rx <= WORLD - 1 && rz >= 1 && rz <= WORLD - 1) dot(r.pos.x, r.pos.z, r.color);
+    else edgePointer(ctx, game.ctrl.pos.x + WORLD / 2 - ox, game.ctrl.pos.z + WORLD / 2 - oz, rx, rz, r.color);
+  }
   // which way the camera looks: a short tick from the player
   const px = Math.round(game.ctrl.pos.x + WORLD / 2 - ox), pz = Math.round(game.ctrl.pos.z + WORLD / 2 - oz);
   ctx.strokeStyle = '#ffffff';
@@ -1824,6 +1829,31 @@ function drawMinimap() {
   ctx.lineTo(px - Math.sin(game.cam.yaw) * 7, pz - Math.cos(game.cam.yaw) * 7);
   ctx.stroke();
   dot(game.ctrl.pos.x, game.ctrl.pos.z, '#ffffff', 4);
+}
+
+// A player beyond the minimap's edge: a pixel marker pinned to the edge on the line from you to them,
+// with a tip pixel pointing outward (toward where they are).
+const EDGE_INSET = 3;
+function edgePointer(ctx, fx, fz, tx, tz, color) {
+  const dx = tx - fx, dz = tz - fz;
+  const len = Math.hypot(dx, dz);
+  if (len < 1e-6) return;
+  const lo = EDGE_INSET, hi = WORLD - 1 - EDGE_INSET;
+  let t = 1; // shrink the ray from you until it stays inside the inset box
+  if (fx + dx * t < lo) t = (lo - fx) / dx;
+  if (fx + dx * t > hi) t = (hi - fx) / dx;
+  if (fz + dz * t < lo) t = (lo - fz) / dz;
+  if (fz + dz * t > hi) t = (hi - fz) / dz;
+  const px = Math.round(fx + dx * t), pz = Math.round(fz + dz * t);
+  // tip direction snapped to 8 ways
+  const ux = dx / len, uz = dz / len;
+  const sx = Math.abs(ux) > 0.38 ? Math.sign(ux) : 0, sz = Math.abs(uz) > 0.38 ? Math.sign(uz) : 0;
+  ctx.fillStyle = '#0d1016';
+  ctx.fillRect(px - 2, pz - 2, 5, 5);
+  ctx.fillRect(px + sx * 2 - 1, pz + sz * 2 - 1, 3, 3);
+  ctx.fillStyle = color;
+  ctx.fillRect(px - 1, pz - 1, 3, 3);
+  ctx.fillRect(px + sx * 2, pz + sz * 2, 1, 1);
 }
 
 // ---------- misc ----------

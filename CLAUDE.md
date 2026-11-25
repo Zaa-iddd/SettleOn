@@ -95,7 +95,7 @@ Discord setup (portal, tunnel, URL mapping) is in [README.md](README.md).
 - **World border:** `WORLD_LIMIT` = 30000 cells from the origin are blocked (keeps GPU float precision fine). The server clamps positions to it.
 - **Streaming (`WorldScene`):** chunks within `LOAD_R` = 50 units (more when zoomed out past 34 aboard a boat: + 1.3 per unit, about 68 at 48; still well inside the 256-cell height ring buffer) of the player load (nearest first, up to `LOAD_BUDGET_MS` = 5 ms per frame), and unload past `UNLOAD_R` = 74. `preload()` builds the spawn area before the first frame. About 45–60 chunks are loaded, comparable to one island. Each chunk is a `Group` with its terrain mesh and per-chunk instanced meshes. Fireflies use one global mesh (`MOTE_CAP` = 4096, `setMotes`). `WorldScene.live` lists the loaded flowers/reeds/trees for ambient life.
 - **Terrain height ring buffer** (`HT` = 256, cells indexed mod 256), read by terrain AO and the water shader (depth, shore foam). Each chunk writes itself plus a 1-cell margin. It must be wider than everything loaded at once: up to ~164 cells across (UNLOAD_R on both sides). At 128, chunks on opposite sides overwrote each other, so after walking away and back about 35% of nearby cells read another place's height, drawing shore foam on every tile edge (a white grid over the water) and wrong AO.
-- **Minimap:** a 96×96 window around the player, redrawn when you're 12 cells off its centre. Water is shaded by depth like the water itself: turquoise shallows, reef teal, blue, darker blue, deep navy.
+- **Minimap:** a 96×96 window around the player, redrawn when you're 12 cells off its centre. Water is shaded by depth like the water itself: turquoise shallows, reef teal, blue, darker blue, deep navy. Other players beyond the window's edge show as an edge marker in their colour (`edgePointer` in `main.js`): a 3×3 dot pinned 3 pixels inside the edge, on the line from you to them, with a tip pixel pointing their way (snapped to 8 directions).
 - **Not editable:** the map editor works on islands only. It says so for endless worlds, and "Create & edit" is disabled for them.
 
 ## Islands (mirror of `src/shared/world.js`)
@@ -675,6 +675,7 @@ The character rests on **a tile's centre or its edge** (or corner) and moves **h
 - Not done yet: tested inside real Discord (the user hasn't created the Discord app yet), saved player position, placing blocks back, Discord avatars, rich presence (`setActivity`), sound. Building is archived.
 
 ## Changelog
+- 2026-11-25: **Off-map players on the minimap:** a player too far away for the minimap shows as a small marker at its edge in their colour, pointing the way to them.
 - 2026-11-25: **Boat tilt synced:** other players now see the driver's own heel and bow lift (sent with each boat update) instead of working them out from the replayed motion, which made the tilt twitch.
 - 2026-11-25: **Smooth boats for other players:** a sailing boat no longer twitches on other players' screens. The driver timestamps its updates, and everyone else replays its path a moment behind, interpolating between them (about 29× smoother in a simulated test).
 - 2026-11-25: **Deploy on push:** every push to `main` on GitHub builds the game and deploys it to Cloudflare (GitHub Actions).
