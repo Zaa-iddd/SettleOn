@@ -1,10 +1,13 @@
 // One-shot particle effects. Client-only decoration (not synced; each client spawns its own).
 // Impact: a puff ring of dust plus a few ground chips, when a character lands from a big drop.
+// Splash (water): droplets thrown up in a crown that fall back into the water (each leaving a fleck of foam where it
+// lands), and a ring of foam spreading out on the surface. Boats also throw droplets as bow spray (`drop`).
 
 import * as THREE from 'three';
-import { K } from '../shared/world.js';
+import { K, SEA } from '../shared/world.js';
 
-const MAX_PUFFS = 96, MAX_CHIPS = 48;
+const MAX_PUFFS = 96, MAX_CHIPS = 48, MAX_DROPS = 320, MAX_FOAM = 200;
+const GRAVITY = 11;
 // dust and chip colours per ground kind
 // 'water' is a splash (fish leaping), not a ground kind
 const DUST = { water: 0xd6f0ff, [K.SAND]: 0xf1e2b0, [K.ROCK]: 0xc9c4ba, [K.SNOW]: 0xffffff, [K.PATH]: 0xe2dacb, [K.TRAIL]: 0xdcc69c, [K.DIRT]: 0xcdb38c, [K.SOIL]: 0xc4a47c, [K.WOOD]: 0xd8b48a, [K.WOOD2]: 0xd8b48a, [K.WALL]: 0xd8b48a, wood: 0xd8b48a, leaves: 0x8fcf4a };
@@ -28,10 +31,63 @@ export class Effects {
     this.nextPuff = 0;
     this.nextChip = 0;
     scene.add(this.puffMesh, this.chipMesh);
+    // water: unlit droplets (a few a touch over 1, so they glint in the bloom) and additive foam flecks on the surface
+    this.drops = Array.from({ length: MAX_DROPS }, () => ({ life: 1, dur: 1 }));
+    this.dropMesh = pool(new THREE.BoxGeometry(1, 1, 1), new THREE.MeshBasicMaterial({ color: 0xffffff }), MAX_DROPS);
+    this.foam = Array.from({ length: MAX_FOAM }, () => ({ life: 1, dur: 1 }));
+    this.foamMesh = pool(new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2), new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, blending: THREE.AdditiveBlending, depthWrite: false }), MAX_FOAM);
+    this.foamMesh.renderOrder = 7; // after the water
+    for (let i = 0; i < MAX_FOAM; i++) this.foamMesh.setColorAt(i, tmpC.setRGB(0, 0, 0));
+    this.nextDrop = 0;
+    this.nextFoam = 0;
+    this.dropsLive = this.foamLive = 0;
+    scene.add(this.dropMesh, this.foamMesh);
+  }
+
+  /** One droplet of water from (x, y, z) with velocity (vx, vy, vz); it falls back to the surface at `floor`. */
+  drop(x, y, z, vx, vy, vz, size = 0.06, floor = SEA) {
+    const d = this.drops[this.nextDrop];
+    Object.assign(d, { x, y, z, vx, vy, vz, size, floor, life: 0, dur: 2.5 });
+    const w = Math.random();
+    this.dropMesh.setColorAt(this.nextDrop, w < 0.12 ? tmpC.setRGB(1.25, 1.3, 1.35) : tmpC.set(w < 0.55 ? 0xf2fbff : 0xbfe6fa));
+    this.dropMesh.instanceColor.needsUpdate = true;
+    this.nextDrop = (this.nextDrop + 1) % MAX_DROPS;
+    this.dropsLive = MAX_DROPS;
+  }
+  /** A fleck of foam on the water at (x, z), drifting at (vx, vz) and growing as it fades. */
+  foamAt(x, z, vx, vz, size, dur, bright, y = SEA) {
+    const f = this.foam[this.nextFoam];
+    Object.assign(f, { x, z, y, vx, vz, size, dur, bright, rot: Math.random() * Math.PI / 2, life: 0 });
+    this.nextFoam = (this.nextFoam + 1) % MAX_FOAM;
+    this.foamLive = MAX_FOAM;
+  }
+  /**
+   * A splash on the water at (x, y = surface, z). power 0..1: a fish or a bobber is small, a boat hitting
+   * something is big. (dx, dz) optionally throws the spray more one way (a boat's bow ploughing into a bank).
+   */
+  splash(x, y, z, power = 0.5, dx = 0, dz = 0) {
+    const p = Math.max(0.05, Math.min(1, power));
+    const n = Math.round(8 + p * 34);
+    for (let i = 0; i < n; i++) { // the crown: droplets flung up and out all round
+      const a = (i / n) * Math.PI * 2 + Math.random() * 0.5, out = (0.5 + Math.random() * 1.3) * (0.5 + p * 0.9), r = 0.08 + p * 0.25;
+      this.drop(x + Math.cos(a) * r, y + 0.02, z + Math.sin(a) * r, Math.cos(a) * out + dx * (1 + Math.random()), (1.6 + Math.random() * 2) * (0.55 + p * 0.75), Math.sin(a) * out + dz * (1 + Math.random()), 0.04 + Math.random() * 0.04 + p * 0.03, y);
+    }
+    const m = Math.round(2 + p * 8);
+    for (let i = 0; i < m; i++) { // a column of bigger drops in the middle, up higher
+      const a = Math.random() * Math.PI * 2, out = Math.random() * 0.4;
+      this.drop(x + Math.cos(a) * 0.05, y + 0.05, z + Math.sin(a) * 0.05, Math.cos(a) * out + dx * 0.5, (3 + Math.random() * 1.8) * (0.6 + p * 0.6), Math.sin(a) * out + dz * 0.5, 0.07 + Math.random() * 0.04 + p * 0.04, y);
+    }
+    const f = Math.round(10 + p * 18);
+    for (let i = 0; i < f; i++) { // a ring of foam spreading out on the surface, and churned water in the middle
+      const a = (i / f) * Math.PI * 2 + Math.random() * 0.3, sp = (0.9 + Math.random() * 0.6) * (0.6 + p);
+      this.foamAt(x + Math.cos(a) * 0.12, z + Math.sin(a) * 0.12, Math.cos(a) * sp, Math.sin(a) * sp, 0.1 + p * 0.08, 0.8 + Math.random() * 0.5 + p * 0.5, 0.45 + p * 0.3, y);
+    }
+    for (let i = 0; i < 3 + p * 4; i++) this.foamAt(x + (Math.random() - 0.5) * 0.3 * (1 + p), z + (Math.random() - 0.5) * 0.3 * (1 + p), 0, 0, 0.18 + p * 0.2, 1.4 + p, 0.5, y);
   }
 
   /** Landing impact at a tile-centre point. `drop` = fall height (≥ 1), `kind` = ground kind. */
   impact(x, y, z, drop, kind) {
+    if (kind === 'water') return this.splash(x, y, z, Math.max(0.05, Math.min(1, drop / 2.5)));
     const power = Math.min(1, (drop - 0.5) / 2); // 0.25 at 1.0, 1 at 2.5+
     const n = 10 + Math.round(power * 8);
     const dust = DUST[kind] ?? 0xf3ead2;
@@ -86,5 +142,45 @@ export class Effects {
       this.chipMesh.setMatrixAt(i, tmpM.compose(tmpP.set(c.x, c.y, c.z), tmpQ, tmpS.set(s, s, s)));
     });
     this.puffMesh.instanceMatrix.needsUpdate = this.chipMesh.instanceMatrix.needsUpdate = true;
+    // droplets: fly, fall with gravity (stretched along their fall), and leave a fleck of foam where they land
+    if (this.dropsLive) {
+      let any = false;
+      this.drops.forEach((d, i) => {
+        if (d.life >= d.dur) return;
+        any = true;
+        d.life += dt;
+        d.vy -= GRAVITY * dt;
+        const drag = Math.exp(-dt * 0.8);
+        d.vx *= drag; d.vz *= drag;
+        d.x += d.vx * dt; d.y += d.vy * dt; d.z += d.vz * dt;
+        if (d.y < d.floor && d.vy < 0) {
+          d.life = d.dur;
+          if (Math.random() < 0.6) this.foamAt(d.x, d.z, d.vx * 0.15, d.vz * 0.15, d.size * 1.6, 0.5 + Math.random() * 0.4, 0.35, d.floor);
+        }
+        const s = d.life >= d.dur ? 0 : d.size, st = 1 + Math.min(1.4, Math.abs(d.vy) * 0.18); // a falling drop streaks
+        this.dropMesh.setMatrixAt(i, tmpM.compose(tmpP.set(d.x, d.y, d.z), tmpQ.identity(), tmpS.set(s, s * st, s)));
+      });
+      this.dropMesh.instanceMatrix.needsUpdate = true;
+      if (!any) this.dropsLive = 0;
+    }
+    // foam: flat flecks on the water (snapped to a 1/8 grid like the boat wake, so they stay crisp)
+    if (this.foamLive) {
+      let any = false;
+      this.foam.forEach((f, i) => {
+        if (f.life >= f.dur) return;
+        any = true;
+        f.life = Math.min(f.dur, f.life + dt);
+        const drag = Math.exp(-dt * 3);
+        f.vx *= drag; f.vz *= drag;
+        f.x += f.vx * dt; f.z += f.vz * dt;
+        const k = f.life / f.dur, done = f.life >= f.dur, s = done ? 0 : f.size * (1 + k * 0.8);
+        const v = done ? 0 : f.bright * (k < 0.08 ? k / 0.08 : (1 - k) ** 1.4);
+        tmpQ.setFromEuler(tmpE.set(0, f.rot, 0));
+        this.foamMesh.setMatrixAt(i, tmpM.compose(tmpP.set(Math.round(f.x * 8) / 8, f.y + 0.06, Math.round(f.z * 8) / 8), tmpQ, tmpS.set(s, 1, s)));
+        this.foamMesh.setColorAt(i, tmpC.setRGB(v * 0.92, v * 0.98, v));
+      });
+      this.foamMesh.instanceMatrix.needsUpdate = this.foamMesh.instanceColor.needsUpdate = true;
+      if (!any) this.foamLive = 0;
+    }
   }
 }

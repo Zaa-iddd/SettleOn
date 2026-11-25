@@ -26,7 +26,7 @@ export const isWood = (k) => k === K.WOOD || k === K.WOOD2 || k === K.WALL; // w
 
 // Furniture placed by players: world.benches: Map(cellKey -> [ix, iz, rot 0..3, type]), type = index
 // here (also the item id). Every piece blocks its tile. Old saves without a type are workbenches.
-export const FURNITURE = ['workbench', 'chair', 'table', 'bed', 'lamp', 'shelf'];
+export const FURNITURE = ['workbench', 'chair', 'table', 'bed', 'lamp', 'shelf', 'crate', 'barrel', 'planter', 'flowerbox', 'seat', 'pennant'];
 export const MAX_FURNITURE = 15; // highest type number the server and saves accept (room to grow)
 
 // Things players took from the world, kept as "picks" [ix, iz, t] per cell:

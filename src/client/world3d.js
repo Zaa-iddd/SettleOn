@@ -803,10 +803,11 @@ function workbenchGeometry() {
 // standing on y = 0. Vertex-coloured boxes merged into one geometry, like the workbench.
 function boxModel(build) {
   const parts = [], col = new THREE.Color();
-  const add = (w, h, d, color, x, y, z, rx = 0, rz = 0) => {
+  const add = (w, h, d, color, x, y, z, rx = 0, rz = 0, ry = 0) => {
     const g = new THREE.BoxGeometry(w, h, d).toNonIndexed();
     if (rx) g.rotateX(rx);
     if (rz) g.rotateZ(rz);
+    if (ry) g.rotateY(ry);
     g.translate(x, y, z);
     col.setHex(color);
     const n = g.attributes.position.count, c = new Float32Array(n * 3);
@@ -899,10 +900,63 @@ const shelfGeometry = () => boxModel((add) => {
   add(0.12, 0.06, 0.1, 0xb0aba0, 0.26, 0.855, z0 + 0.04);
 });
 
-const FURN_BUILD = [workbenchGeometry, chairGeometry, tableGeometry, bedGeometry, lampGeometry, shelfGeometry];
+// ---- decorations (also crafted at the workbench; placed on land or on a boat's deck) ----
+const crateGeometry = () => boxModel((add) => {
+  add(0.62, 0.54, 0.62, FW.LIGHT, 0, 0.27, 0);
+  for (const s of [-1, 1]) {
+    for (const y of [0.05, 0.49]) { add(0.64, 0.07, 0.02, FW.DARK, 0, y, s * 0.315); add(0.02, 0.07, 0.64, FW.DARK, s * 0.315, y, 0); }
+    add(0.02, 0.62, 0.07, FW.DARK, s * 0.315, 0.27, 0, 0.72); add(0.07, 0.62, 0.02, FW.DARK, 0, 0.27, s * 0.315, 0, 0.72); // braces
+  }
+  add(0.36, 0.28, 0.36, FW.WOOD, 0.08, 0.68, -0.06); // a smaller crate on top
+  add(0.38, 0.05, 0.38, FW.DARK, 0.08, 0.8, -0.06);
+});
+const barrelGeometry = () => boxModel((add) => {
+  for (const ry of [0, Math.PI / 4]) {
+    add(0.46, 0.64, 0.46, FW.WOOD, 0, 0.32, 0, 0, 0, ry); // an octagonal body
+    add(0.52, 0.28, 0.52, FW.LIGHT, 0, 0.32, 0, 0, 0, ry); // bulging in the middle
+    for (const y of [0.1, 0.54]) add(0.5, 0.05, 0.5, 0x3a3532, 0, y, 0, 0, 0, ry); // iron hoops
+    add(0.4, 0.03, 0.4, FW.MID, 0, 0.655, 0, 0, 0, ry); // lid
+  }
+});
+const planterGeometry = () => boxModel((add) => {
+  add(0.38, 0.32, 0.38, 0xc06a44, 0, 0.16, 0); // a terracotta pot
+  add(0.44, 0.06, 0.44, 0xa8553a, 0, 0.33, 0);
+  add(0.34, 0.03, 0.34, 0x5a3a22, 0, 0.35, 0);
+  add(0.06, 0.25, 0.06, FW.DARK, 0, 0.45, 0); // a little potted tree
+  for (const [x, y, z, s, c] of [[0, 0.72, 0, 0.42, 0x5fa83a], [0.14, 0.62, 0.1, 0.26, 0x4a8f30], [-0.13, 0.64, -0.08, 0.28, 0x6fbe46], [0.04, 0.9, -0.04, 0.26, 0x8fcf5a], [-0.08, 0.58, 0.14, 0.2, 0x4a8f30]]) add(s, s, s, c, x, y, z);
+});
+const flowerboxGeometry = () => boxModel((add) => {
+  add(0.86, 0.22, 0.32, FW.MID, 0, 0.11, 0);
+  add(0.9, 0.04, 0.36, FW.LIGHT, 0, 0.23, 0);
+  add(0.8, 0.03, 0.26, 0x5a3a22, 0, 0.25, 0);
+  const FL = [0xf2c94c, 0xe05a8a, 0xffffff, 0x9fb8ff, 0xe0334a, 0xf2c94c];
+  for (let i = 0; i < 6; i++) {
+    const x = -0.33 + i * 0.13, z = (i % 2 ? 0.05 : -0.05), h = 0.14 + (i % 3) * 0.05;
+    add(0.025, h, 0.025, 0x4a8f30, x, 0.26 + h / 2, z);
+    add(0.09, 0.06, 0.09, FL[i], x, 0.28 + h, z);
+    add(0.08, 0.03, 0.05, 0x6fbe46, x + 0.04, 0.3, z);
+  }
+});
+const seatGeometry = () => boxModel((add) => { // a garden bench
+  for (const x of [-0.38, 0.38]) { add(0.07, 0.38, 0.07, FW.DARK, x, 0.19, 0.12); add(0.07, 0.8, 0.07, FW.DARK, x, 0.4, -0.14); }
+  for (const z of [-0.06, 0.06, 0.18]) add(0.9, 0.04, 0.11, z === 0.06 ? FW.LIGHT : FW.WOOD, 0, 0.4, z);
+  for (const y of [0.56, 0.7]) add(0.86, 0.09, 0.03, FW.LIGHT, 0, y, -0.15);
+  for (const x of [-0.38, 0.38]) add(0.06, 0.04, 0.36, FW.MID, x, 0.55, 0.02); // armrests
+});
+const pennantGeometry = () => boxModel((add) => { // a pennant on a pole
+  add(0.3, 0.08, 0.3, FW.DEEP, 0, 0.04, 0);
+  add(0.06, 1.7, 0.06, FW.MID, 0, 0.9, 0);
+  add(0.09, 0.09, 0.09, 0xe0b040, 0, 1.78, 0); // a brass finial
+  [0.56, 0.44, 0.32, 0.2, 0.09].forEach((l, i) => add(l, 0.07, 0.02, i % 2 ? 0xd8433a : 0xe85a4a, 0.03 + l / 2, 1.62 - i * 0.065, 0)); // the pennant
+  add(0.14, 0.05, 0.022, 0xf4efe4, 0.16, 1.56, 0); // a white stripe
+});
+
+const FURN_BUILD = [workbenchGeometry, chairGeometry, tableGeometry, bedGeometry, lampGeometry, shelfGeometry, crateGeometry, barrelGeometry, planterGeometry, flowerboxGeometry, seatGeometry, pennantGeometry];
 /** The model for a furniture type (index into FURNITURE; shared, never disposed). Also the placement preview. */
 export const furnitureGeometry = (t) => sharedGeo(`furn${t}`, FURN_BUILD[t] ?? workbenchGeometry);
 export const LAMP_TYPE = 4;
+/** The glowing part of a furniture type (the lamp's panes), or null. */
+export const furnitureGlowGeometry = (t) => (t === LAMP_TYPE ? sharedGeo('lampGlow', lampGlowGeometry) : null);
 
 // a stable per-object number from its position (variants, rotation and tint don't depend on list order)
 const posKey = (o) => Math.floor(o.x * 7.31 + o.z * 131.7);

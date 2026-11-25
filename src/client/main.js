@@ -5,10 +5,10 @@ import PartySocket from 'partysocket';
 import { finishWorld, spawnPoint, groundAt, toCell, toWorld, WORLD, SEA, STEP, K, cellKey, keyX, keyZ, PICK, isWood, PILE_MAX, FURNITURE, clockHour } from '../shared/world.js';
 import { createEndlessWorld } from '../shared/endless.js';
 import { decodeMap, isEndlessMap, decodeEndless, endlessMap, encodeMap, cleanEdits, cleanChops, cleanBenches, cleanPicks, cleanPiles, cleanBoats } from '../shared/mapfile.js';
-import { Boats, BOAT, THROTTLE, UPGRADES, CABINS, ROOFS, TOPS, MASTS, PROPS, DECK_SLOTS, layoutOf, propAt, engineFactor, rudderFactor, walkable, nearestWalkable, onDeck, toLocal, toWorldXZ, deckY, hullClear, boatHit, HULLS } from './boat.js';
+import { Boats, BOAT, THROTTLE, UPGRADES, CABINS, ROOFS, TOPS, MASTS, PROPS, DECK_SLOTS, layoutOf, propAt, engineFactor, rudderFactor, walkable, nearestWalkable, onDeck, toLocal, toWorldXZ, deckY, hullClear, boatHit, HULLS, DECO_SCALE, deckReach, decoFits, decoFoot, hullOf, resizeLook, SIZE_LEN, SIZE_H, SPLIT } from './boat.js';
 import { getSave, putSave } from './saves.js';
 import { Inventory, ITEMS, HOTBAR, iconURL } from './inventory.js';
-import { BOAT_PALETTE, PAINT_SLOTS, UPGRADE_MAX, NAME_MAX, PART_KEYS, cleanLook, HULL_ITEMS } from '../shared/boatlook.js';
+import { BOAT_PALETTE, PAINT_SLOTS, UPGRADE_MAX, NAME_MAX, PART_KEYS, cleanLook, HULL_ITEMS, MAX_DECO, SIZE_COUNTS } from '../shared/boatlook.js';
 import { Editor } from './editor.js';
 import { identify, inDiscord } from './discord.js';
 import { Menu } from './menu.js';
@@ -189,6 +189,7 @@ function buildWorld(seed, map = null, roomEdits = [], roomChops = [], roomBenche
   game.scene.setPiles(game.world.piles);
   // boats: saved with the world (endless saves, or an island save's extra field), then the room's
   game.boats = new Boats(game.scene.scene, game.world);
+  game.boats.effects = game.scene.effects; // bow spray
   game.ride = null;
   game.driving = null;
   const savedBoats = endless?.boats ?? (map && !isEndlessMap(map) ? cleanBoats(map.boats) : []);
@@ -455,6 +456,7 @@ function frame() {
   }
   updateMarker(t);
   updateOutline();
+  if (game.ride || game.blueprint?.visible) updateDeckBlueprint(); // placing on a boat's deck
   // walked next to a block we clicked with a tool: dig it (a movement key cancels the walk, and the dig)
   if (game.pendingDig && (keys.x || keys.z)) game.pendingDig = null;
   if (game.pendingCatch != null && (keys.x || keys.z)) game.pendingCatch = null;
@@ -593,8 +595,10 @@ function onTap(px, py, first) {
   game.pendingAct = null;
   if (game.boatEdit) return editClick(px, py); // edit mode: a click picks a part of the boat
   if (TOOLS[game.tool] === 'rod' && game.fishing && game.local && !(game.ride?.steer && wheelAt(px, py))) return game.fishing.press(fishCtx(), groundPoint(px, py)); // fishing.js
-  if (game.ride) { // aboard: a click on the wheel takes (or leaves) the helm; nothing else from the deck yet
-    if (wheelAt(px, py)) toggleHelm();
+  if (game.ride) { // aboard: a click on the wheel takes (or leaves) the helm; furniture goes on the deck, the axe takes it back
+    if (wheelAt(px, py)) return toggleHelm();
+    if (ITEMS[inventory.held?.id]?.furn) return placeOnDeck(px, py);
+    if (TOOLS[game.tool] === 'axe') return takeFromDeck(px, py);
     return;
   }
   const frog = frogAt(px, py);
@@ -916,7 +920,12 @@ function launchBoat(px, py) {
   if (launchAt(toCell(p.x), toCell(p.z)) && game.local) swingTool(game.local.char);
 }
 function launchAt(ix, iz, t = ITEMS[inventory.held?.id]?.hull ?? 0) {
-  const hl = HULLS[t] ?? HULLS[0];
+  // it keeps the look (paint, name, upgrades, size) of the last boat you took out of the water;
+  // the kind of boat is the one you launched
+  let saved;
+  try { saved = JSON.parse(localStorage.getItem(BOAT_LOCKER) ?? 'null') ?? null; } catch {}
+  const look = cleanLook({ ...cleanLook(saved), t });
+  const hl = hullOf(look);
   const c = game.ctrl, w = game.world, x0 = toWorld(ix), z0 = toWorld(iz);
   if (Math.hypot(x0 - c.pos.x, z0 - c.pos.z) > 5) return void toast('Too far: click the water near you');
   if (w.H(ix, iz) >= SEA) return void toast('Boats go in the water');
@@ -925,12 +934,8 @@ function launchAt(ix, iz, t = ITEMS[inventory.held?.id]?.hull ?? 0) {
     const x = x0 + Math.sin(yaw) * k, z = z0 + Math.cos(yaw) * k;
     if (!hullClear(w, x, z, yaw, hl) || boatHit(game.boats, 0, x, z, yaw, hl)) continue; // floating, and clear of other boats
     if (!inventory.takeHeld(1)) return;
-    // it keeps the look (paint, name, upgrades) of the last boat you took out of the water
-    let look;
-    try { look = JSON.parse(localStorage.getItem(BOAT_LOCKER) ?? 'null') ?? undefined; } catch {}
-    // (the locker keeps paint, name and upgrades; the kind of boat is the one you launched)
-    const b = game.boats.set(1 + Math.floor(Math.random() * (2 ** 31 - 2)), x, z, yaw, true, { ...cleanLook(look ?? null), t });
-    game.scene.effects.impact(x, SEA, z, 2, 'water');
+    const b = game.boats.set(1 + Math.floor(Math.random() * (2 ** 31 - 2)), x, z, yaw, true, look);
+    game.scene.effects.splash(x, SEA, z, 0.9); // in it goes
     sendBoat(b, true, true);
     saveDigging();
     toast('Walk aboard, then press F at the wheel to sail');
@@ -954,7 +959,7 @@ function takeBoat(b) {
   if (game.local) swingTool(game.local.char);
   try { localStorage.setItem(BOAT_LOCKER, JSON.stringify(b.look)); } catch {} // your boat's look comes back at the next launch
   game.boats.remove(b.id);
-  game.scene.effects.impact(b.sx, SEA, b.sz, 2, 'water');
+  game.scene.effects.splash(b.sx, SEA, b.sz, 0.8);
   give(HULL_ITEMS[b.look.t] ?? 'boat', 1);
   sendBoat(b, false);
   saveDigging();
@@ -1102,7 +1107,8 @@ function driveBoat(dt, keys, steps = 0) {
     else {
       if (speed > 1.2) {
         toast('Bump! Land ahead');
-        game.scene.effects.impact(b.x + fx * 3.2 * Math.sign(fwd || 1), SEA, b.z + fz * 3.2 * Math.sign(fwd || 1), 1.5, 'water');
+        const end = (fwd || 1) > 0 ? hl.TIP : hl.STERN, k = Math.min(1, speed / hl.MAX_SPEED), d = Math.sign(fwd || 1); // where it hit
+        game.scene.effects.splash(b.x + fx * end, SEA, b.z + fz * end, 0.55 + 0.45 * k, fx * d * (0.4 + k), fz * d * (0.4 + k));
       }
       b.vx *= -0.25; b.vz *= -0.25;
       b.sail *= 0.3;
@@ -1120,7 +1126,7 @@ function driveBoat(dt, keys, steps = 0) {
       b.vx *= 0.8; b.vz *= 0.8; // scraping hulls
       b.sail *= 0.5;
       if (-vn > 1.0) {
-        game.scene.effects.impact(hit.cx, SEA, hit.cz, Math.min(2.5, 0.8 - vn * 0.4), 'water');
+        game.scene.effects.splash(hit.cx, SEA, hit.cz, Math.min(1, 0.35 - vn * 0.15), -hit.nx * 0.5, -hit.nz * 0.5); // spray between the hulls
         const now = performance.now();
         if (now - (game.boatBumpAt ?? 0) > 1500) { game.boatBumpAt = now; toast(hit.other.look?.n ? `Bump! You ran into ${hit.other.look.n}` : 'Bump! Mind the other boat'); }
       }
@@ -1579,6 +1585,103 @@ function takeLog(pl) {
 }
 
 // ---------- furniture: workbenches, chairs, tables, beds, lamps, bookshelves ----------
+// ---------- furniture and decorations on your boat's deck (boat.js b.look.f, synced and saved with the look) ----------
+const DECO_SNAP = 0.125;
+const _dp = new THREE.Vector3(), _dr = new THREE.Raycaster(), _dn = new THREE.Vector2();
+// where a screen point meets the boat's deck, in deck coordinates, or null
+function deckPoint(b, px, py) {
+  _dn.set((px / pixel.cssW) * 2 - 1, -(py / pixel.cssH) * 2 + 1);
+  _dr.setFromCamera(_dn, camera);
+  const o = _dr.ray.origin, d = _dr.ray.direction, y = deckY(b, clock.elapsedTime);
+  if (Math.abs(d.y) < 1e-4) return null;
+  const k = (y - o.y) / d.y;
+  if (k < 0) return null;
+  _dp.copy(o).addScaledVector(d, k);
+  return toLocal(b, _dp.x, _dp.z);
+}
+// Where the held piece would go for a screen point: { b, type, lx, lz, rot, why } (why = the reason it can't, or
+// null), or null when it's not over the deck. Shared by the blueprint preview and the click.
+function decoPlan(px, py) {
+  const r = game.ride, b = r && game.boats.list.get(r.id), type = FURNITURE.indexOf(inventory.held?.id);
+  if (!b || type < 0) return null;
+  const p = deckPoint(b, px, py);
+  if (!p) return null;
+  const [lx, lz] = p.map((v) => Math.round(v / DECO_SNAP) * DECO_SNAP), hl = b.hull;
+  if (!onDeck(lx, lz, hl)) return null;
+  const rot = ((Math.round(Math.atan2(r.lx - lx, r.lz - lz) / (Math.PI / 2)) % 4) + 4 + (game.rot ?? 0)) % 4; // facing you, plus R turns
+  const plan = { b, type, lx, lz, rot, why: null };
+  if (b.look.f.length >= MAX_DECO) plan.why = 'This boat is full of things already';
+  else if (!decoFits(type, rot, lx, lz, b.obs, hl)) plan.why = "There's no room for that there";
+  else if (!walkable(hl.HELM[0], hl.HELM[1], undefined, { rects: [decoFoot(type, rot, lx, lz)], circles: [] }, hl) || !walkable(r.lx, r.lz, 0.15, { rects: [decoFoot(type, rot, lx, lz)], circles: [] }, hl)) plan.why = "You're standing there";
+  else { // it mustn't cut a real part of the deck off from the wheel; closing a small dead-end nook is fine
+    // (cached: the flood fill only reruns when the spot or the deck changes)
+    const key = `${b.id}|${b.decoKey}|${type},${rot},${lx},${lz}`;
+    if (game.decoReachKey !== key) {
+      const after = { rects: [...b.obs.rects, decoFoot(type, rot, lx, lz)], circles: b.obs.circles }, before = deckReach(b.obs, hl);
+      game.decoReachKey = key;
+      game.decoReachOk = deckReach(after, hl) >= before - 80 - before * 0.12; // its own footprint plus a nook
+    }
+    if (!game.decoReachOk) plan.why = 'That would block the way along the deck';
+  }
+  return plan;
+}
+function placeOnDeck(px, py) {
+  const now = clock.elapsedTime, plan = decoPlan(px, py);
+  if (!plan || now < game.nextDig) return;
+  if (plan.why) return toast(plan.why);
+  const { b, type, lx, lz, rot } = plan, L = b.look;
+  inventory.takeHeld(1);
+  game.nextDig = now + SWING_SECS + 0.05;
+  if (game.local) swingTool(game.local.char);
+  setBoatLook(b, { ...L, f: [...L.f, [type, Math.round(lx * 100), Math.round(lz * 100), rot]] });
+  const [wx, wz] = toWorldXZ(b, lx, lz);
+  game.scene.effects.impact(wx, deckY(b, now) + 0.05, wz, 0.8, 'wood');
+}
+// The blueprint: a see-through blue copy of the held piece (with its edges drawn) where a click would put it, on the
+// boat so it bobs along; red where it can't go. Shown while aboard with furniture or a decoration in hand.
+const BLUEPRINT = { ok: 0x3a9cff, okEdge: 0x1f5fb8, bad: 0xff4a3a, badEdge: 0xa82418 };
+const blueprintFill = new THREE.MeshBasicMaterial({ color: BLUEPRINT.ok, transparent: true, opacity: 0.55, depthWrite: false });
+const blueprintEdge = new THREE.LineBasicMaterial({ color: BLUEPRINT.okEdge, transparent: true, opacity: 0.8, depthWrite: false });
+const blueprintEdges = new Map(); // furniture type -> edges geometry
+function updateDeckBlueprint() {
+  let bp = game.blueprint;
+  const plan = !inventory.isOpen && input.hover && ITEMS[inventory.held?.id]?.furn ? decoPlan(...input.hover) : null;
+  if (!plan) { if (bp) bp.visible = false; return; }
+  if (!bp) {
+    bp = game.blueprint = new THREE.Group();
+    bp.add(new THREE.Mesh(furnitureGeometry(0), blueprintFill), new THREE.LineSegments(undefined, blueprintEdge));
+    bp.children.forEach((o) => { o.renderOrder = 8; });
+  }
+  if (bp.userData.type !== plan.type) {
+    bp.userData.type = plan.type;
+    bp.children[0].geometry = furnitureGeometry(plan.type);
+    if (!blueprintEdges.has(plan.type)) blueprintEdges.set(plan.type, new THREE.EdgesGeometry(furnitureGeometry(plan.type), 25));
+    bp.children[1].geometry = blueprintEdges.get(plan.type);
+  }
+  if (bp.parent !== plan.b.group) plan.b.group.add(bp);
+  bp.position.set(plan.lx, plan.b.hull.DECK + 0.03, plan.lz);
+  bp.rotation.y = plan.rot * Math.PI / 2;
+  bp.scale.setScalar(DECO_SCALE);
+  blueprintFill.color.setHex(plan.why ? BLUEPRINT.bad : BLUEPRINT.ok);
+  blueprintEdge.color.setHex(plan.why ? BLUEPRINT.badEdge : BLUEPRINT.okEdge);
+  bp.visible = true;
+}
+
+function takeFromDeck(px, py) {
+  const b = game.boats.list.get(game.ride.id), p = b && deckPoint(b, px, py), now = clock.elapsedTime;
+  if (!p || now < game.nextDig) return;
+  let best = -1, bd = 0.55;
+  b.look.f.forEach(([, x, z], i) => { const d = Math.hypot(x / 100 - p[0], z / 100 - p[1]); if (d < bd) { bd = d; best = i; } });
+  if (best < 0) return;
+  const [t, x, z] = b.look.f[best];
+  game.nextDig = now + SWING_SECS + 0.05;
+  if (game.local) swingTool(game.local.char);
+  setBoatLook(b, { ...b.look, f: b.look.f.filter((_, i) => i !== best) });
+  give(FURNITURE[t] ?? 'crate', 1);
+  const [wx, wz] = toWorldXZ(b, x / 100, z / 100);
+  game.scene.effects.impact(wx, deckY(b, now) + 0.05, wz, 0.8, 'wood');
+}
+
 // world.benches: Map(cellKey -> [ix, iz, rot, type]); type = index in FURNITURE (and the item id).
 // Why a piece of furniture can't go on this tile, or null.
 function benchProblem(ix, iz) {
@@ -2010,6 +2113,8 @@ function toMenu() {
 
 // forget the current world, players and connection
 function resetSession() {
+  game.blueprint?.removeFromParent();
+  game.blueprint = null;
   if (game.fishing && game.local) game.fishing.cancel(fishCtx());
   game.fishing = null;
   if (socket) { game.leaving = true; socket.close(); socket = null; }
@@ -2176,7 +2281,11 @@ function renderPartMenu() {
     styles = PROPS.map((pr, t) => ({ v: t, name: pr.name, ok: pr.r <= sl.maxR })).filter((o) => o.ok)
       .map((o) => ({ ...o, icon: partIcon(pixel.renderer, 'prop', o.v, L), on: propAt(L, pm.slot) === o.v }));
   }
+  // the cabin boat's size: length and height steppers on the hull's menu
+  const sizeRow = (i, label, value) => `<div class="pm-size"><span>${label}</span><button class="pm-step" data-sz="${i}" data-d="-1" tabindex="-1" ${L.s[i] > 0 ? '' : 'disabled'}>−</button><b>${value}</b><button class="pm-step" data-sz="${i}" data-d="1" tabindex="-1" ${L.s[i] < SIZE_COUNTS[i] - 1 ? '' : 'disabled'}>+</button></div>`;
+  const size = pm.part === 'hull' && !L.t ? `<div class="pm-sub">Size</div>${sizeRow(0, 'Length', `${(6.3 + SIZE_LEN[L.s[0]]).toFixed(2).replace(/0$/, '')} tiles`)}${sizeRow(1, 'Height', L.s[1] ? `+${SIZE_H[L.s[1]].toFixed(1)}` : 'Standard')}` : '';
   $('part-menu').innerHTML = `<div class="pm-head"><b>${title}</b><button class="pm-x" tabindex="-1" title="Close">×</button></div>`
+    + size
     + (styles.length ? `<div class="pm-styles">${styles.map((o) => `<button class="pm-style${o.on ? ' on' : ''}" data-v="${o.v}" tabindex="-1" title="${o.name}"><img alt="" src="${o.icon}" /><span>${o.name}</span></button>`).join('')}</div>` : '')
     + (colour !== null ? `<div class="pm-sub">${colourLabel}</div><div class="pm-colours">${BOAT_PALETTE.map((hex, ci) =>
       `<button class="bp-swatch${L.c[colour] === ci ? ' on' : ''}" data-c="${ci}" style="background:#${hex.toString(16).padStart(6, '0')}" tabindex="-1"></button>`).join('')}</div>` : '');
@@ -2186,8 +2295,12 @@ $('part-menu').addEventListener('click', (e) => {
   const b = game.boats?.list.get(game.boatEdit), pm = game.partMenu;
   if (!b || !pm) return;
   if (e.target.closest('.pm-x')) return hidePartMenu();
-  const st = e.target.closest('.pm-style'), sw = e.target.closest('.bp-swatch');
-  if (st) {
+  const st = e.target.closest('.pm-style'), sw = e.target.closest('.bp-swatch'), step = e.target.closest('.pm-step');
+  if (step) {
+    const s = b.look.s.slice(), i = Number(step.dataset.sz);
+    s[i] = Math.max(0, Math.min(SIZE_COUNTS[i] - 1, s[i] + Number(step.dataset.d)));
+    resizeBoat(b, s[0], s[1]);
+  } else if (st) {
     const v = Number(st.dataset.v);
     if (pm.part === 'slot') { const d = b.look.d.slice(); d[pm.slot] = v; setBoatLook(b, { ...b.look, d }); }
     else { const p = b.look.p.slice(); p[{ cabin: 0, roof: 1, top: 2, mast: 3 }[pm.part]] = v; setBoatLook(b, { ...b.look, p }); }
@@ -2198,6 +2311,16 @@ $('part-menu').addEventListener('click', (e) => {
   } else return;
   renderPartMenu();
 });
+// make the boat longer or taller: the bow (and whatever stands on the foredeck) moves forward, the deck rises
+function resizeBoat(b, li, hi) {
+  const nl = resizeLook(b.look, li, hi);
+  if (!nl) return toast('Clear the foredeck first: something there would no longer fit');
+  const hl = hullOf(nl), dE = hl.E ?? 0, longer = (hl.E ?? 0) > (b.hull.E ?? 0);
+  if (longer && (!hullClear(game.world, b.x, b.z, b.yaw, hl) || boatHit(game.boats, b.id, b.x, b.z, b.yaw, hl))) return toast('Not enough open water ahead to make it longer');
+  const r = game.ride;
+  if (r?.id === b.id && !r.steer && r.lz > SPLIT) r.lz += dE - (b.hull.E ?? 0); // you're on the foredeck: it carries you forward
+  setBoatLook(b, nl);
+}
 // the banner's part buttons open a part's menu even when that part is switched off (no cabin, no mast...)
 $('edit-banner').addEventListener('click', (e) => {
   const btn = e.target.closest('button');

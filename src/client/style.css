@@ -183,6 +183,11 @@ body.in-menu #boat-btn, body.editing #boat-btn, body.in-menu #boat-panel, body.e
 .pm-style.on { border-color: var(--accent); background: #3a3420; box-shadow: 0 0 0 1px var(--accent); }
 .pm-sub { margin: 8px 0 4px; font-size: 12px; color: var(--muted); }
 .pm-colours { display: flex; flex-wrap: wrap; gap: 3px; }
+.pm-size { display: grid; grid-template-columns: 1fr 26px 92px 26px; align-items: center; gap: 4px; font-size: 12px; margin-bottom: 4px; }
+.pm-size b { text-align: center; font-weight: normal; }
+.pm-step { width: 26px; height: 24px; padding: 0; background: #2b313c; color: var(--text); border: 2px solid #1b1f27; cursor: pointer; font: inherit; line-height: 1; }
+.pm-step:hover:not(:disabled) { border-color: #fff; }
+.pm-step:disabled { opacity: 0.35; cursor: default; }
 body.in-menu #edit-banner, body.editing #edit-banner, body.in-menu #part-menu, body.editing #part-menu { display: none; }
 /* the boat's throttle gauge, above the clock */
 #throttle {
