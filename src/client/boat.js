@@ -96,6 +96,34 @@ export function hullClear(world, x, z, yaw) {
   return true;
 }
 
+// Boats against boats: each hull is four circles along its keel (local z, radius), narrower toward the bow and stern
+const HULL_CIRCLES = [[-2.2, 1.1], [-0.75, 1.2], [0.75, 1.2], [2.2, 0.95]];
+/**
+ * The deepest overlap between a boat at (x, z, yaw) and any other boat in `boats` (their drawn poses), or null.
+ * Returns { nx, nz } pointing from the other boat toward this one, `depth` (how far they overlap), the contact
+ * point (cx, cz) and the other boat.
+ */
+export function boatHit(boats, selfId, x, z, yaw) {
+  let best = null;
+  const s = Math.sin(yaw), c = Math.cos(yaw);
+  for (const o of boats.list.values()) {
+    if (o.id === selfId || Math.hypot(o.sx - x, o.sz - z) > 7.2) continue;
+    const os = Math.sin(o.syaw), oc = Math.cos(o.syaw);
+    for (const [az, ar] of HULL_CIRCLES) {
+      const ax = x + az * s, azz = z + az * c;
+      for (const [bz, br] of HULL_CIRCLES) {
+        const bx = o.sx + bz * os, bzz = o.sz + bz * oc;
+        const dx = ax - bx, dz = azz - bzz, d = Math.hypot(dx, dz), depth = ar + br - d;
+        if (depth > 0 && (!best || depth > best.depth)) {
+          const nx = d > 1e-4 ? dx / d : s, nz = d > 1e-4 ? dz / d : c;
+          best = { nx, nz, depth, cx: bx + nx * br, cz: bzz + nz * br, other: o };
+        }
+      }
+    }
+  }
+  return best;
+}
+
 // ---------- the model ----------
 // Built once and shared by every boat. Fixed-colour parts merge into `base`; the paintable parts (hull band,
 // cabin walls, roofs) are pale grey vertex colours tinted by a per-boat material colour (the boat's look);

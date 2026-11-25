@@ -5,7 +5,7 @@ import PartySocket from 'partysocket';
 import { finishWorld, spawnPoint, groundAt, toCell, toWorld, WORLD, SEA, STEP, K, cellKey, keyX, keyZ, PICK, isWood, PILE_MAX, FURNITURE, clockHour } from '../shared/world.js';
 import { createEndlessWorld } from '../shared/endless.js';
 import { decodeMap, isEndlessMap, decodeEndless, endlessMap, encodeMap, cleanEdits, cleanChops, cleanBenches, cleanPicks, cleanPiles, cleanBoats } from '../shared/mapfile.js';
-import { Boats, BOAT, THROTTLE, UPGRADES, CABINS, ROOFS, TOPS, MASTS, PROPS, DECK_SLOTS, layoutOf, propAt, engineFactor, rudderFactor, walkable, nearestWalkable, onDeck, toLocal, toWorldXZ, deckY, hullClear } from './boat.js';
+import { Boats, BOAT, THROTTLE, UPGRADES, CABINS, ROOFS, TOPS, MASTS, PROPS, DECK_SLOTS, layoutOf, propAt, engineFactor, rudderFactor, walkable, nearestWalkable, onDeck, toLocal, toWorldXZ, deckY, hullClear, boatHit } from './boat.js';
 import { getSave, putSave } from './saves.js';
 import { Inventory, ITEMS, HOTBAR, iconURL } from './inventory.js';
 import { BOAT_PALETTE, PAINT_SLOTS, UPGRADE_MAX, NAME_MAX, PART_KEYS, cleanLook } from '../shared/boatlook.js';
@@ -896,7 +896,7 @@ function launchAt(ix, iz) {
   const yaw = Math.round(Math.atan2(x0 - c.pos.x, z0 - c.pos.z) / (Math.PI / 4)) * (Math.PI / 4);
   for (const k of [2.5, 3, 2, 3.5, 4, 1.5, 5, 6, 7, 8, 10]) { // move it out (past sandbanks) until the whole hull floats
     const x = x0 + Math.sin(yaw) * k, z = z0 + Math.cos(yaw) * k;
-    if (!hullClear(w, x, z, yaw)) continue;
+    if (!hullClear(w, x, z, yaw) || boatHit(game.boats, 0, x, z, yaw)) continue; // floating, and clear of other boats
     if (!inventory.takeHeld(1)) return;
     // it keeps the look (paint, name, upgrades) of the last boat you took out of the water
     let look;
@@ -1062,7 +1062,9 @@ function driveBoat(dt, keys, steps = 0) {
   const bite = Math.min(1, Math.abs(fwd) / BOAT.FULL_TURN_SPEED);
   b.turn = b.rudder * BOAT.TURN * rudderFactor(b) * Math.max(bite, BOAT.IDLE_TURN); // the rudder upgrade adds 20% a level
   const ny = b.yaw + b.turn * dt;
-  if (hullClear(w, b.x, b.z, ny)) b.yaw = ny; else b.turn = 0;
+  // turning can't swing the hull into land, or deeper into another boat
+  const hitNow = boatHit(game.boats, b.id, b.x, b.z, b.yaw)?.depth ?? 0;
+  if (hullClear(w, b.x, b.z, ny) && (boatHit(game.boats, b.id, b.x, b.z, ny)?.depth ?? 0) <= hitNow + 1e-4) b.yaw = ny; else b.turn = 0;
   // move; against land it bumps back a little and loses its way
   const speed = Math.hypot(b.vx, b.vz);
   if (speed > 0.005) {
@@ -1075,6 +1077,24 @@ function driveBoat(dt, keys, steps = 0) {
       }
       b.vx *= -0.25; b.vz *= -0.25;
       b.sail *= 0.3;
+    }
+  }
+  // other boats: push apart, bounce off a little, and lose some way. Parked and remote boats don't budge here
+  // (whoever sails a boat moves it), so this boat takes the whole push.
+  const hit = boatHit(game.boats, b.id, b.x, b.z, b.yaw);
+  if (hit) {
+    const px = b.x + hit.nx * (hit.depth + 0.01), pz = b.z + hit.nz * (hit.depth + 0.01);
+    if (hullClear(w, px, pz, b.yaw)) { b.x = px; b.z = pz; }
+    const vn = b.vx * hit.nx + b.vz * hit.nz; // speed into the other boat (negative = closing in)
+    if (vn < 0) {
+      b.vx -= 1.3 * vn * hit.nx; b.vz -= 1.3 * vn * hit.nz; // reflect 30% of it
+      b.vx *= 0.8; b.vz *= 0.8; // scraping hulls
+      b.sail *= 0.5;
+      if (-vn > 1.0) {
+        game.scene.effects.impact(hit.cx, SEA, hit.cz, Math.min(2.5, 0.8 - vn * 0.4), 'water');
+        const now = performance.now();
+        if (now - (game.boatBumpAt ?? 0) > 1500) { game.boatBumpAt = now; toast(hit.other.look?.n ? `Bump! You ran into ${hit.other.look.n}` : 'Bump! Mind the other boat'); }
+      }
     }
   }
   b.speed = Math.hypot(b.vx, b.vz);
