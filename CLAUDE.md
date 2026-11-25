@@ -13,9 +13,11 @@ The game design is original. Don't turn it into a copy of an existing commercial
 
 | Command | What it does |
 |---|---|
-| `npm run dev` | Vite client on :5173 + game server on :3001 (with `--watch`). Vite proxies `/api` and `/ws` to :3001 |
-| `npm run build` | Builds the client into `dist/` |
-| `npm start` | Production server: serves `dist/`, `/api/token` and `/ws` on `$PORT` (default 3001) |
+| `npm run dev` | Vite on :5173 with the Cloudflare plugin: the client plus the Worker (`/api/*`, PartyKit rooms at `/parties/room/<id>`) running locally in workerd, one port. Local room storage lives in `.wrangler/state` |
+| `npm run build` | Builds the client into `dist/client` and the Worker into `dist/settleon` |
+| `npm run preview` | Build, then serve the production build locally |
+| `npm run deploy` | Build, then `wrangler deploy` to Cloudflare (needs `npx wrangler login` once and the `DISCORD_CLIENT_SECRET` secret) |
+| *(push to `main`)* | GitHub Actions (`.github/workflows/deploy.yml`) builds and deploys to the Worker `settleon` (https://settleon.kape-dev.workers.dev). Repo secret `CLOUDFLARE_API_TOKEN`, repo variables `CLOUDFLARE_ACCOUNT_ID` and `VITE_DISCORD_CLIENT_ID`. Also runnable by hand ("Run workflow") |
 
 Browser dev mode: open http://localhost:5173 for the main menu. `?room=x&name=y` skips the menu and joins room `x` in multiplayer (each tab is a player).
 Discord setup (portal, tunnel, URL mapping) is in [README.md](README.md).
@@ -46,11 +48,13 @@ Discord setup (portal, tunnel, URL mapping) is in [README.md](README.md).
 | `src/client/input.js` | WASD/arrows (the only movement), Space jump, taps/clicks (for tools), wheel and pinch zoom, Q/E camera turns |
 | `src/client/discord.js` | `identify()`: Discord SDK auth if the URL has `frame_id`, otherwise dev identity (per-tab id in sessionStorage) |
 | `src/client/style.css` | Pixel-style HUD (Pixelify Sans font bundled via `@fontsource`, hard shadows, square borders) |
-| `server/server.js` | Express (`POST /api/token`, `GET /api/health`) + `ws` server at `/ws`. Rooms, roster, position relay |
+| `worker/index.js` | **Cloudflare Worker entry.** `POST /api/token` (Discord code → access token; client id baked in from `VITE_DISCORD_CLIENT_ID`, secret from `env.DISCORD_CLIENT_SECRET`), `GET /api/health`, `routePartykitRequest` for `/parties/room/<id>` (room ids `[\w-]{1,64}`), everything else from static assets (`env.ASSETS`) |
+| `worker/room.js` | `Room`: the PartyKit server (`partyserver`, a SQLite-backed Durable Object, `hibernate: false`), one per room. Roster, position relay (80 ms snapshot timer while anyone is connected), validation of every message, and the room's world written through to SQLite (`meta`, `items` tables). See **Network protocol** |
+| `wrangler.jsonc` | Worker config: entry, static assets (`run_worker_first` for `/api/*`, `/parties/*`), the `Room` Durable Object binding and its `new_sqlite_classes` migration |
 | `index.html` | Page shell: canvas, labels layer, HUD panels, time-of-day slider, map editor UI (`#editor`) |
 | `archive/village/` | Removed village models (`village3d.js`: cottages, fences, well, props, lanterns) and their pixel textures (`textures.js`). Not imported |
 | `archive/settlement-builder/` | The old building/RTS mode, removed "for now". Not imported. See its README |
-| `.env` (not committed) | `VITE_DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET`, optional `PORT`, `ALLOW_DEV_LOGIN` |
+| `.env` (not committed) | `VITE_DISCORD_CLIENT_ID`, `DISCORD_CLIENT_SECRET`, optional `ALLOW_DEV_LOGIN`. Read by Vite and by the local Worker in `npm run dev`. On Cloudflare the secret is a Worker secret instead |
 
 ## Endless worlds (mirror of `src/shared/endless.js`)
 
@@ -613,8 +617,9 @@ The character rests on **a tile's centre or its edge** (or corner) and moves **h
 - **Play this map:** sends `map` to the server, and the whole room switches to it.
   - The editor closes only when that broadcast comes back (`editor.playPending`). If someone else loads a map while you're editing, the game world changes in the background and your edits stay.
 
-## Network protocol (`/ws`)
+## Network protocol (PartyKit room, `/parties/room/<room>`)
 
+- **Transport:** the client connects with `PartySocket` (`partysocket`, in `connect()` in `main.js`) to `/parties/room/<room>` on the same origin, so inside Discord it goes through the activity's `/` URL mapping. PartySocket reconnects on its own with backoff; each `open` sends `hello` again, and the loading screen says "Reconnecting…" meanwhile. The server is `Room` in `worker/room.js`, one Durable Object per room.
 - **Client → server:**
   - `hello {room, accessToken | dev:{id,name}}`
   - `move {x,y,z,ry,a, b?}`, sent about every 80ms, only when something changed. `b` = `[boat id, deck x, deck z]` while riding a boat. `a` = animation + 10 × held tool (the server allows 0–299)
@@ -633,10 +638,11 @@ The character rests on **a tile's centre or its edge** (or corner) and moves **h
   - `roster {players:[{id,name,color}]}`: sent on join and leave.
   - `snap {p:[[id,x,y,z,ry,a, rb?],…]}`: every 80ms when anything moved. `rb` (only while riding) = `[boat id, deck x, deck z]`.
   - `error {message}`
-- `maxPayload` is 600 KB + 4 KB (endless saves with many digs can be large). Messages over 4 KB are dropped unless they're `map` messages.
-- The server only relays positions (and stores each room's current custom map in memory). It clamps x/z to ±(`WORLD_LIMIT` + `WORLD`) and y to −10…50, and allows 60 messages per second per socket. Movement is client-authoritative, so there is no anti-cheat.
-- **Rooms:** `discordSdk.instanceId`, or `?room=` (default `dev`). Each room picks a random seed. Rooms are deleted after 30 minutes with no connections. Everything is in memory.
-- **Players:** a player is removed when their last connection closes. Ids are `d:<discordId>` (verified via `GET /users/@me`) or `dev:<id>`. Dev logins are off when `NODE_ENV=production`, unless `ALLOW_DEV_LOGIN` is set.
+- Messages over 4 KB are dropped unless they're `map` messages (endless saves with many digs can be large; Cloudflare's own WebSocket message limit applies to those).
+- The server relays positions and validates world changes. It clamps x/z to ±(`WORLD_LIMIT` + `WORLD`) and y to −10…50, and allows 60 messages per second per socket. Movement is client-authoritative, so there is no anti-cheat. Only sockets that have said `hello` get broadcasts.
+- **Rooms:** `discordSdk.instanceId`, or `?room=` (default `dev`), cleaned to `[\w-]`, max 64. Each room picks a random seed.
+- **Room storage (`worker/room.js`):** the seed, map and clock (`meta` table) and the edits, chops, benches, picks, piles and boats (`items` table, rowid order = insertion order, so the oldest is dropped first past 50k) are written through to the Durable Object's SQLite storage, so a deploy or a Cloudflare restart keeps the room's world. Boat moves are kept in memory and saved at most every 5 s (`BOAT_FLUSH_MS`) and when the room empties. Player positions are memory only. When the last socket leaves, an alarm 30 minutes out wipes the room's storage (`deleteAll`); anyone connecting cancels it.
+- **Players:** a player is removed when their last connection closes. Ids are `d:<discordId>` (verified via `GET /users/@me`) or `dev:<id>`. Dev logins: `ALLOW_DEV_LOGIN` "true"/"false" if set (Worker var), otherwise allowed only when the socket's URL host is `localhost` / `127.0.0.1` (so on for `npm run dev`, off when deployed).
 
 ## Testing tips
 
@@ -647,7 +653,7 @@ The character rests on **a tile's centre or its edge** (or corner) and moves **h
 - **`?spawn=trail`** spawns on the mountain trail nearest the camp (endless worlds).
 - **`?spawn=deep`** spawns in the middle of the biggest deep forest near the camp. **`?spawn=shore`** spawns on the shore nearest the camp with shallow water beside it. **`?time=N`** sets the hour and stops the day/night clock.
 - **Headless screenshots:** use Edge with `--use-angle=swiftshader --enable-unsafe-swiftshader --virtual-time-budget=10000`. Windows enforces about 500px minimum width, so test narrow layouts at about 540px.
-- **Bot player:** a Node `ws` client that sends `hello` with a `dev` identity, generates the world from the `welcome` seed, and sends `move` messages.
+- **Bot player:** a Node `ws` client (devDependency) on `ws://localhost:5173/parties/room/<room>` that sends `hello` with a `dev` identity, generates the world from the `welcome` seed, and sends `move` messages. The PartyKit port was checked this way: 17 relay/late-join/validation checks, a room keeping its seed and edits across a dev-server restart, and a headless Edge client joining the room alongside a bot.
 - **Movement:** `GridController` and `PathFinder` import cleanly in Node.
   - A headless test can route to random tiles, `setPath`, and step with `update(1/60, keys)` until `!moving`, then check that the position is exactly on the tile center.
   - The last run: island 40/40 targets, all exactly centered (0.7 ms average route); endless 60/60 (5 ms, including chunk generation), plus a 2000-tile trek east with no blocked legs.
@@ -663,6 +669,8 @@ The character rests on **a tile's centre or its edge** (or corner) and moves **h
 - Not done yet: tested inside real Discord (the user hasn't created the Discord app yet), saved player position, placing blocks back, Discord avatars, rich presence (`setActivity`), sound. Building is archived.
 
 ## Changelog
+- 2026-11-25: **Deploy on push:** every push to `main` on GitHub builds the game and deploys it to Cloudflare (GitHub Actions).
+- 2026-11-25: **Runs on Cloudflare Workers with PartyKit:** the Node/Express server is gone. A Worker serves the game, swaps Discord sign-in codes, and hosts each room as a PartyKit server (a Durable Object). Rooms now keep their world (seed, digging, trees, furniture, boats, clock) across deploys and restarts, and are forgotten 30 minutes after everyone leaves. `npm run dev` is one port; `npm run deploy` publishes it.
 - 2026-11-25: **Sea pickles fade with depth and distance:** deep ones glow faintly and far ones fade out, so only the shallow pickles near you stand out.
 - 2026-11-25: **Sea pickles light up the water:** at night the glowing sea pickles nearest you cast soft green light on the seabed, seagrass and water around them.
 - 2026-11-25: **Seagrass meadows and glowing sea pickles:** patches of short swaying seagrass carpet the seabed, there's more seaweed, and little clusters of sea pickles glow soft green at night. Rivers were also widened (5.6–7 tiles) so boats fit through them.

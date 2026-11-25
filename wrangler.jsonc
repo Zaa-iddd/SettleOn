@@ -1,0 +1,20 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "settleon",
+  "main": "./worker/index.js",
+  "compatibility_date": "2026-11-01",
+  // The built client (dist/client) is served as static assets. Only these paths run the Worker first.
+  "assets": {
+    "not_found_handling": "none",
+    "run_worker_first": ["/api/*", "/parties/*"]
+  },
+  // One PartyKit room per Discord activity instance (class Room in worker/room.js).
+  // SQLite-backed so rooms keep their world across deploys, and so it works on the free plan.
+  "durable_objects": {
+    "bindings": [{ "name": "Room", "class_name": "Room" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Room"] }],
+  "observability": { "enabled": true }
+  // Secrets (not in this file): npx wrangler secret put DISCORD_CLIENT_SECRET
+  // Optional var: ALLOW_DEV_LOGIN = "true" lets plain browsers join without Discord.
+}

@@ -1,6 +1,7 @@
 import '@fontsource/pixelify-sans/400.css';
 import '@fontsource/pixelify-sans/700.css';
 import * as THREE from 'three';
+import PartySocket from 'partysocket';
 import { finishWorld, spawnPoint, groundAt, toCell, toWorld, WORLD, SEA, STEP, K, cellKey, keyX, keyZ, PICK, isWood, PILE_MAX, FURNITURE, clockHour } from '../shared/world.js';
 import { createEndlessWorld } from '../shared/endless.js';
 import { decodeMap, isEndlessMap, decodeEndless, endlessMap, encodeMap, cleanEdits, cleanChops, cleanBenches, cleanPicks, cleanPiles, cleanBoats } from '../shared/mapfile.js';
@@ -62,11 +63,13 @@ let identity;
 
 // ---------- networking ----------
 
+// The room is a PartyKit server on the same origin (/parties/room/<room>). PartySocket reconnects
+// on its own with backoff, and onopen sends hello again each time.
 function connect() {
   game.leaving = false;
-  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
-  socket = new WebSocket(`${proto}://${location.host}/ws`);
-  socket.onopen = () => socket.send(JSON.stringify({ type: 'hello', room: identity.room, ...identity.hello }));
+  const room = String(identity.room).replace(/[^\w-]/g, '').slice(0, 64) || 'dev';
+  socket = new PartySocket({ host: location.host, protocol: location.protocol === 'https:' ? 'wss' : 'ws', party: 'room', room });
+  socket.onopen = () => socket.send(JSON.stringify({ type: 'hello', room, ...identity.hello }));
   socket.onmessage = (e) => {
     const msg = JSON.parse(e.data);
     if (msg.type === 'welcome') onWelcome(msg);
@@ -87,7 +90,6 @@ function connect() {
     if (game.mode !== 'multi' || game.leaving) return;
     $('loading').hidden = false;
     $('loading').textContent = 'Reconnecting…';
-    setTimeout(() => { if (game.mode === 'multi' && !game.leaving) connect(); }, 1500);
   };
 }
 

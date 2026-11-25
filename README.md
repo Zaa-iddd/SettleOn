@@ -24,12 +24,14 @@ src/client/pathfind.js     tap-to-go pathfinding (A*)
 src/client/input.js        keyboard, mouse and touch input
 src/client/pixelfx.js      pixel-art filter (low-res render, outlines, dithering)
 src/client/discord.js      Discord sign-in (or browser dev mode)
-server/server.js           Express (/api/token) + WebSocket server (/ws)
+worker/index.js            Cloudflare Worker: static files, /api/token, routes rooms to PartyKit
+worker/room.js             PartyKit room (Durable Object): roster, position relay, the room's saved world
+wrangler.jsonc             Cloudflare config (assets, Durable Object binding)
 archive/                   the old settlement-builder mode, kept for later
 ```
 
 Each Discord activity instance (everyone who joins the activity in the same voice channel) gets its own room and island.
-The server relays player positions. Every client generates the island from the room's seed.
+Each room is a PartyKit server (a Cloudflare Durable Object) that relays player positions and remembers the room's world changes. Every client generates the world from the room's seed.
 
 ## 1. Run it locally in a browser (no Discord needed)
 
@@ -70,19 +72,33 @@ cloudflared tunnel --url http://localhost:5173
 > Quick tunnels get a new URL every time you start them, so update the URL mapping each time.
 > Until your app is verified, only you and members of your app's team can launch it.
 
-## 4. Deploy
+## 4. Deploy to Cloudflare
 
-```bash
-npm run build      # builds the client into dist/
-npm start          # serves dist/, /api/token and /ws on $PORT (default 3001)
-```
+The game deploys as one Cloudflare Worker: it serves the built client, swaps Discord sign-in codes at `/api/token`,
+and hosts each multiplayer room as a PartyKit server (a Durable Object) at `/parties/room/<instanceId>`.
+The free Workers plan is enough to start (SQLite-backed Durable Objects are included).
 
-Deploy it to any Node host that supports WebSockets, such as Render, Railway, Fly.io or a VPS.
-Set `VITE_DISCORD_CLIENT_ID` **before** you run `npm run build`, and set `DISCORD_CLIENT_SECRET` and `NODE_ENV=production` at runtime.
-Then point the Activity's `/` URL mapping at your server's domain.
-In production, browser dev-mode logins are turned off, so only real Discord users can join.
+1. Sign in once: `npx wrangler login`.
+2. Make sure `.env` has your `VITE_DISCORD_CLIENT_ID`. It's baked into the build.
+3. Store the client secret on Cloudflare (it never goes in a file):
+   ```bash
+   npx wrangler secret put DISCORD_CLIENT_SECRET
+   ```
+4. Deploy:
+   ```bash
+   npm run deploy
+   ```
+   Wrangler prints the Worker's URL, e.g. `https://settleon.<your-subdomain>.workers.dev`.
+5. In the Developer Portal, go to **Activities → URL Mappings** and set prefix `/` to target `settleon.<your-subdomain>.workers.dev` (without `https://`).
+   The game page, `/api/token` and the room WebSockets all go through that one mapping.
+6. Launch the activity from a voice channel as in step 3.
+
+Run `npm run deploy` again after each change. Rooms keep their world across deploys; players reconnect automatically.
+Logs: `npx wrangler tail`, or the Worker's **Observability** tab in the Cloudflare dashboard.
+On the deployed Worker, browser dev-mode logins are off, so only real Discord users can join.
+To allow plain-browser testers anyway, add `"vars": { "ALLOW_DEV_LOGIN": "true" }` to `wrangler.jsonc`.
 
 ## Notes
 
-- Rooms live in memory. If you restart the server, everyone gets a new island.
+- Each room saves its world (seed, digging, chopped trees, furniture, boats, time of day) in its Durable Object, so deploys don't reset it. A room is forgotten 30 minutes after the last player leaves.
 - Anyone who knows a room's instance ID could join it. That's fine for a casual game.
