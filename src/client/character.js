@@ -7,11 +7,11 @@
 
 import * as THREE from 'three';
 
-export const ANIM = { IDLE: 0, WALK: 1, RUN: 2, AIR: 3, SWIM: 4 };
+export const ANIM = { IDLE: 0, WALK: 1, RUN: 2, AIR: 3, SWIM: 4, ROW: 5 }; // ROW: at a rowboat's oars (ch.rowPhase)
 // what the hand can hold (index 0 = empty): the two tools, then blocks (the network sends this index)
 // held-item index → id. Sent to others as the tens of the `a` code (the server allows up to 29).
 export const TOOLS = [null, 'shovel', 'pickaxe', 'dirt', 'stone', 'sand', 'snow', 'frog', 'axe', 'wood', 'log', 'workbench', 'stick', 'pebble', 'berries',
-  'leaves', 'wall', 'chair', 'table', 'bed', 'lamp', 'shelf', 'boat'];
+  'leaves', 'wall', 'chair', 'table', 'bed', 'lamp', 'shelf', 'boat', 'rod'];
 const BLOCK_COLORS = { wood: [0xa87444, 0x8a5a30], wall: [0x8a5730, 0xc08a56], dirt: [0x8d5c3a, 0x6fb33a], stone: [0x8e8c88, 0x8e8c88], sand: [0xe2cf92, 0xe2cf92], snow: [0xeef3f8, 0xeef3f8] };
 export const SWING_SECS = 0.38; // one tool swing: wind up over the head, then chop down
 
@@ -275,6 +275,23 @@ export function animateCharacter(ch, anim, speed, dt, t) {
     headTilt = Math.sin(t * 9) * 0.1;
     headYaw = 0;
     stretch = 1;
+  } else if (anim === ANIM.ROW) {
+    // rowing, facing the stern, in step with the oars (ch.rowPhase is the boat's stroke clock, boat.js row()):
+    // at the catch (0) reach forward with the arms out and lean in; through the drive lean back and pull the
+    // handles in to the chest; through the recovery swing forward again
+    const p = ch.rowPhase ?? 0, c = Math.cos(p), sn = Math.sin(p);
+    leanTarget = 0.1 + 0.3 * c;
+    armL = armR = -1.15 - 0.55 * c;
+    armOut = 0.38 - 0.12 * c;
+    legL = legR = 0.45 + 0.2 * c; // braced feet, knees working with the stroke
+    bob = -0.03 * (1 + c) / 2;
+    stretch = 1 - 0.03 * (1 + c) / 2;
+    waddle = 0; twist = 0;
+    headTilt = 0; headYaw = 0;
+    // a little effort squash as the blades bite
+    const bite = Math.floor((p + 0.3) / (Math.PI * 2));
+    if (ch.lastBite !== undefined && bite !== ch.lastBite && sn >= 0) ch.sqV -= 2.2;
+    ch.lastBite = bite;
   } else if (anim === ANIM.SWIM) {
     // big doggy paddle with a rolling body
     armL = -1.4 + Math.sin(ch.phase) * 1.0;
@@ -293,6 +310,11 @@ export function animateCharacter(ch, anim, speed, dt, t) {
 
   // tool: hold it out a little, and play the swing on top of everything else
   if (ch.tool && anim === ANIM.IDLE) armR = -0.45;
+  // fishing (fishing.js sets ch.rodPose): rod drawn back over the shoulder while charging a cast, held out while
+  // the bobber's out, and cranking the reel during the fight
+  if (ch.rodPose === 'charge') { armR = -2.6; leanTarget = -0.12; }
+  else if (ch.rodPose === 'hold') armR = -0.85;
+  else if (ch.rodPose === 'reel') { armR = -0.7 + Math.sin(t * 16) * 0.12; leanTarget = -0.18; }
   if (ch.lanternOn && anim === ANIM.IDLE) armL = -0.4; // hold the lantern out a little
   let swingArm = null;
   if (ch.swingT > 0) {
@@ -384,6 +406,13 @@ export function setTool(ch, tool) {
   } else if (TOOLS[tool] === 'leaves') { // a little bundle of leaves
     ch.toolGrip.add(box(0.12, 0.05, 0.1, 0x5fa83a, 0, 0, 0.07));
     ch.toolGrip.add(box(0.08, 0.04, 0.08, 0x8fcf5a, 0.02, 0.035, 0.09));
+  } else if (TOOLS[tool] === 'rod') { // a fishing rod: a long tapering pole with a reel; the line is fishing.js's
+    ch.toolGrip.add(box(0.035, 0.035, 0.42, HANDLE, 0, 0, 0.17));
+    ch.toolGrip.add(box(0.025, 0.025, 0.4, 0xc79a62, 0, 0.01, 0.57));
+    ch.toolGrip.add(box(0.016, 0.016, 0.2, 0xe3c08a, 0, 0.02, 0.86));
+    ch.toolGrip.add(box(0.05, 0.07, 0.07, DARK, 0, -0.04, 0.05)); // the reel
+    ch.toolGrip.add(box(0.06, 0.012, 0.012, METAL, 0.03, -0.04, 0.05));
+    ch.toolGrip.add(box(0.03, 0.03, 0.03, METAL, 0, 0.03, 0.98)); // tip ring
   } else if (TOOLS[tool] === 'boat') { // a toy-sized boat
     ch.toolGrip.add(box(0.1, 0.06, 0.22, 0x8a5530, 0, -0.02, 0.09));
     ch.toolGrip.add(box(0.07, 0.06, 0.08, 0xc8643a, 0, 0.04, 0.06));

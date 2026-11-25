@@ -84,10 +84,20 @@
           <dt>F</dt><dd>board a boat / take the helm</dd>
           <dt>B</dt><dd>your boat: name, upgrades, customize</dd>
           <dt>At the helm</dt><dd>W/S throttle · A/D steer</dd>
+          <dt>Fishing Rod</dt><dd>hold on water, let go to cast · click when it bites · hold to reel, keep the needle in the green</dd>
           <dt>H</dt><dd>show / hide this</dd>
           <dt>Esc</dt><dd>menu</dd>
         </dl>
       </div>
+      <!-- fishing (see src/client/fishing.js): the cast power meter, the bite "!", the reel bars and the catch -->
+      <div id="fish-power" class="panel" hidden><div class="fp-label">CAST POWER</div><div class="fp-track"><div id="fp-fill"></div><div class="fp-sweet"></div></div></div>
+      <div id="fish-bang" hidden>!</div>
+      <div id="fish-reel" class="panel" hidden>
+        <div class="fr-title">Reel it in! <span>hold to reel · keep the needle in the green</span></div>
+        <div class="fr-catch"><div id="fr-catch-fill"></div><div id="fr-fish"></div></div>
+        <div class="fr-tension"><div id="fr-zone"></div><div id="fr-needle"></div></div>
+      </div>
+      <div id="fish-get" hidden><div class="fg-title">FISH GET!</div><img alt="" /><div class="fg-name"></div></div>
       <!-- inventory (see src/client/inventory.js): hotbar, held item name, and the inventory screen -->
       <div id="held-name"></div>
       <div id="hotbar" class="panel"></div>

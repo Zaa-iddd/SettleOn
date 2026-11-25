@@ -1222,7 +1222,7 @@ export class WorldScene {
       o.updateWorldMatrix(true, false);
       mats.push(o.matrixWorld.clone());
     } else if (h.kind === 'boat') { // a boat object from boat.js: its hull, where it's drawn right now
-      geo = boatGeometry();
+      geo = boatGeometry(o); // that boat's kind
       o.group.updateMatrixWorld();
       mats.push(o.group.matrixWorld.clone());
     } else if (h.kind === 'pile') { // [ix, iz, r, n], as in setPiles

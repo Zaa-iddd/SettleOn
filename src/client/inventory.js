@@ -1,3 +1,5 @@
+import { FISH, fishArt } from './fishing.js';
+
 // Minecraft-style inventory: an 8-slot hotbar (keys 1-8). The 24-slot bag only exists once you've
 // crafted a Backpack (sticks and leaves). I or Tab opens the inventory screen with hand crafting;
 // clicking a placed workbench opens it with the workbench recipes (tools, walls, furniture).
@@ -305,6 +307,42 @@ const TOOL_ART = {
     'oRRRRRRRRRRRRRRo',
     'oooooooooooooooo',
   ],
+  rowboat: [ // a little rowboat with an oar
+    '................',
+    '................',
+    '................',
+    '................',
+    '..........o.....',
+    '.........oLo....',
+    '........oLo.....',
+    '.......oLo......',
+    'oo....oLo.....oo',
+    'oHooooooooooooHo',
+    'oRHLLLLLLLLLLHRo',
+    '.oRRRRRRRRRRRRo.',
+    '..oHhHhHhHhHHo..',
+    '...oooooooooo...',
+    '................',
+    '................',
+  ],
+  rod: [ // a fishing rod with its line and a red-and-white bobber
+    '..............oo',
+    '.............oLo',
+    '............oLo.',
+    '...........oLo.m',
+    '..........oLo..m',
+    '.........olo...m',
+    '........olo....m',
+    '.......oHo.....m',
+    '......oHo......m',
+    '.....oHo......oo',
+    '...ooHo.......oe',
+    '..oddo........ow',
+    '..oddo.........o',
+    '.oHo............',
+    'oHo.............',
+    'oo..............',
+  ],
   boat: [ // a little ship: plank hull, orange-roofed cabin, flag
     '................',
     '.........OO.....',
@@ -401,7 +439,10 @@ export const ITEMS = {
   bed: { name: 'Bed', stack: 4, place: true, furn: true, art: TOOL_ART.bed },
   lamp: { name: 'Lamp', stack: 16, place: true, furn: true, art: TOOL_ART.lamp },
   shelf: { name: 'Bookshelf', stack: 16, place: true, furn: true, art: TOOL_ART.shelf },
-  boat: { name: 'Boat', stack: 1, boat: true, art: TOOL_ART.boat }, // launched on open water (main.js), then walked on and sailed
+  boat: { name: 'Cabin Boat', stack: 1, boat: true, hull: 0, art: TOOL_ART.boat }, // launched on open water (main.js), then walked on and sailed
+  rod: { name: 'Fishing Rod', stack: 1, tool: 'rod', art: TOOL_ART.rod }, // cast, wait for the bite, reel in (fishing.js)
+  ...Object.fromEntries(FISH.map((f) => [f.id, { name: f.name, stack: 16, fish: true, art: fishArt(f) }])), // what you catch
+  rowboat: { name: 'Rowboat', stack: 1, boat: true, hull: 1, tool: 'boat', art: TOOL_ART.rowboat }, // the other kinds of boat (boat.js HULLS)
   pickaxe: { name: 'Pickaxe', stack: 1, tool: 'pickaxe', art: TOOL_ART.pickaxe },
   dirt: { name: 'Dirt', stack: 64, block: true, art: blockArt({ base: '#8d5c3a', light: '#a8724c', dark: '#6a4329', speck: '#6f472c', speck2: '#a97a52', top: ['#8fd04f', '#5fa32f'] }) },
   stone: { name: 'Stone', stack: 64, block: true, art: blockArt({ base: '#8e8c88', light: '#aaa8a3', dark: '#696763', speck: '#74726e', speck2: '#a3a19c' }) },
@@ -428,6 +469,8 @@ export const RECIPES = [
   { out: 'bed', n: 1, at: 'bench', cost: { wood: 4, leaves: 8 } },
   { out: 'lamp', n: 1, at: 'bench', cost: { wood: 1, stick: 2, pebble: 1 } },
   { out: 'shelf', n: 1, at: 'bench', cost: { wood: 5 } },
+  { out: 'rod', n: 1, at: 'bench', cost: { stick: 3, leaves: 2, pebble: 1 } },
+  { out: 'rowboat', n: 1, at: 'bench', cost: { wood: 6, stick: 4 } },
   { out: 'boat', n: 1, at: 'bench', cost: { wood: 12, log: 4, leaves: 4 } },
 ];
 

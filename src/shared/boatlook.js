@@ -2,7 +2,8 @@
 // the server (it keeps each room's boats) and saves, so everyone validates it the same way.
 //
 //   { n: name, c: [hull, cabin, roof, canvas] palette indices, u: upgrade levels (UPGRADE_KEYS order),
-//     p: chosen parts (PART_KEYS order: which cabin, roof, top and mast), d: the prop on each deck spot (0 = none) }
+//     p: chosen parts (PART_KEYS order: which cabin, roof, top and mast), d: the prop on each deck spot (0 = none),
+//     t: the kind of boat (HULL_ITEMS order; 0 = the cabin boat) }
 
 export const BOAT_PALETTE = [
   0xc8643a, // terracotta
@@ -28,12 +29,15 @@ export const PART_KEYS = ['cabin', 'roof', 'top', 'mast'];
 export const PART_COUNTS = [3, 3, 3, 3];
 export const PROP_COUNT = 7; // including 0 = nothing
 export const DECK_SLOT_COUNT = 6;
+// The kinds of boat, by the item that launches each (boat.js HULLS has their shapes and handling). Swappable parts,
+// deck props and the decorative upgrades are for the cabin boat (0); the others have fixed models you can paint.
+export const HULL_ITEMS = ['boat', 'rowboat'];
 
 /** A new boat is plain wood (rustic, at the user's request): a dark oak hull, a varnished cabin, a driftwood
  * shingle roof and cream canvas; no upgrades, no name. */
 // The default parts and props are the original layout: plank cabin, shingles, wheelhouse, pennant mast; crates,
 // a barrel, a chest and a rope coil.
-export const defaultLook = () => ({ n: '', c: [12, 10, 11, 4], u: UPGRADE_KEYS.map(() => 0), p: [0, 0, 0, 0], d: [1, 2, 0, 0, 3, 4] });
+export const defaultLook = (t = 0) => ({ n: '', c: [12, 10, 11, 4], u: UPGRADE_KEYS.map(() => 0), p: [0, 0, 0, 0], d: [1, 2, 0, 0, 3, 4], t });
 
 /** Validate a look from the network or a save; anything odd falls back to the default. */
 export function cleanLook(o) {
@@ -47,5 +51,6 @@ export function cleanLook(o) {
   });
   const p = Array.isArray(o.p) && o.p.length === PART_KEYS.length && o.p.every((v, i) => Number.isInteger(v) && v >= 0 && v < PART_COUNTS[i]) ? o.p.slice() : d.p;
   const dk = Array.isArray(o.d) && o.d.length === DECK_SLOT_COUNT && o.d.every((v) => Number.isInteger(v) && v >= 0 && v < PROP_COUNT) ? o.d.slice() : d.d;
-  return { n, c, u, p, d: dk };
+  const t = Number.isInteger(o.t) && o.t >= 0 && o.t < HULL_ITEMS.length ? o.t : 0; // older looks are cabin boats
+  return { n, c, u, p, d: dk, t };
 }

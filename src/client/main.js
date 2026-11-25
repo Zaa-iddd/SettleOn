@@ -5,10 +5,10 @@ import PartySocket from 'partysocket';
 import { finishWorld, spawnPoint, groundAt, toCell, toWorld, WORLD, SEA, STEP, K, cellKey, keyX, keyZ, PICK, isWood, PILE_MAX, FURNITURE, clockHour } from '../shared/world.js';
 import { createEndlessWorld } from '../shared/endless.js';
 import { decodeMap, isEndlessMap, decodeEndless, endlessMap, encodeMap, cleanEdits, cleanChops, cleanBenches, cleanPicks, cleanPiles, cleanBoats } from '../shared/mapfile.js';
-import { Boats, BOAT, THROTTLE, UPGRADES, CABINS, ROOFS, TOPS, MASTS, PROPS, DECK_SLOTS, layoutOf, propAt, engineFactor, rudderFactor, walkable, nearestWalkable, onDeck, toLocal, toWorldXZ, deckY, hullClear, boatHit } from './boat.js';
+import { Boats, BOAT, THROTTLE, UPGRADES, CABINS, ROOFS, TOPS, MASTS, PROPS, DECK_SLOTS, layoutOf, propAt, engineFactor, rudderFactor, walkable, nearestWalkable, onDeck, toLocal, toWorldXZ, deckY, hullClear, boatHit, HULLS } from './boat.js';
 import { getSave, putSave } from './saves.js';
 import { Inventory, ITEMS, HOTBAR, iconURL } from './inventory.js';
-import { BOAT_PALETTE, PAINT_SLOTS, UPGRADE_MAX, NAME_MAX, PART_KEYS, cleanLook } from '../shared/boatlook.js';
+import { BOAT_PALETTE, PAINT_SLOTS, UPGRADE_MAX, NAME_MAX, PART_KEYS, cleanLook, HULL_ITEMS } from '../shared/boatlook.js';
 import { Editor } from './editor.js';
 import { identify, inDiscord } from './discord.js';
 import { Menu } from './menu.js';
@@ -18,6 +18,7 @@ import { partIcon } from './boaticons.js';
 import { WorldScene, DEFAULT_TIME, furnitureGeometry, logGeo, logOffset } from './world3d.js';
 import { makeCharacter, animateCharacter, ANIM, TOOLS, setTool, swingTool, SWING_SECS, setLantern } from './character.js';
 import { GridController, IMPACT_DROP } from './controller.js';
+import { Fishing } from './fishing.js';
 import { Input } from './input.js';
 import { PathFinder } from './pathfind.js';
 
@@ -445,7 +446,12 @@ function frame() {
     const root = game.local.char.root;
     root.position.set(c.pos.x, c.pos.y, c.pos.z);
     root.rotation.y = c.ry;
+    game.local.char.rowPhase = game.boats.list.get(game.ride?.id)?.rowPhase ?? 0; // in step with the oars
     animateCharacter(game.local.char, c.anim, c.speed, dt, t);
+    // fishing: one per world scene; moving or putting the rod away reels the line in
+    if (game.fishing?.scene !== game.scene.scene) { game.fishing?.cancel(fishCtx()); game.fishing = new Fishing(game.scene.scene); }
+    if (game.fishing.active && ((keys.x || keys.z) && !game.ride?.steer || TOOLS[game.tool] !== 'rod')) game.fishing.cancel(fishCtx());
+    game.fishing.update(dt, t, fishCtx(), input.pressed);
   }
   updateMarker(t);
   updateOutline();
@@ -494,6 +500,7 @@ function frame() {
     r.ry += d * k;
     r.char.root.position.copy(r.pos);
     r.char.root.rotation.y = r.ry;
+    r.char.rowPhase = rb?.rowPhase ?? 0;
     animateCharacter(r.char, r.a, r.speed, dt, t);
   }
 
@@ -585,6 +592,7 @@ function onTap(px, py, first) {
   hideCtx();
   game.pendingAct = null;
   if (game.boatEdit) return editClick(px, py); // edit mode: a click picks a part of the boat
+  if (TOOLS[game.tool] === 'rod' && game.fishing && game.local && !(game.ride?.steer && wheelAt(px, py))) return game.fishing.press(fishCtx(), groundPoint(px, py)); // fishing.js
   if (game.ride) { // aboard: a click on the wheel takes (or leaves) the helm; nothing else from the deck yet
     if (wheelAt(px, py)) toggleHelm();
     return;
@@ -730,6 +738,24 @@ function onRight(px, py) {
   btn.onclick = (e) => { e.currentTarget.blur(); hideCtx(); if (boat) takeBoat(boat); else searchBush(b); };
 }
 input.onRight = onRight;
+input.onUp = () => { if (game.fishing && game.local) game.fishing.release(fishCtx()); }; // let go: the cast goes out
+// what fishing.js needs from the game each call
+const _fp = new THREE.Vector3();
+function fishCtx() {
+  const c = game.ctrl;
+  return {
+    world: game.world, pos: c.pos, facing: c.ry, char: game.local.char, effects: game.scene.effects, night: game.scene.night ?? 0,
+    toast, give, icon: iconURL,
+    swing: () => swingTool(game.local.char),
+    faceTo: (dx, dz) => { c.ry = Math.atan2(dx, dz); },
+    project: (x, y, z) => {
+      _fp.set(x, y, z).project(camera);
+      if (_fp.z > 1) return null;
+      const r = $('view').getBoundingClientRect();
+      return [r.left + (_fp.x + 1) / 2 * r.width, r.top + (1 - _fp.y) / 2 * r.height];
+    },
+  };
+}
 
 // ---------- chopping trees with the axe ----------
 const CHOP_REACH = 1.95;
@@ -889,19 +915,21 @@ function launchBoat(px, py) {
   if (!p) return;
   if (launchAt(toCell(p.x), toCell(p.z)) && game.local) swingTool(game.local.char);
 }
-function launchAt(ix, iz) {
+function launchAt(ix, iz, t = ITEMS[inventory.held?.id]?.hull ?? 0) {
+  const hl = HULLS[t] ?? HULLS[0];
   const c = game.ctrl, w = game.world, x0 = toWorld(ix), z0 = toWorld(iz);
   if (Math.hypot(x0 - c.pos.x, z0 - c.pos.z) > 5) return void toast('Too far: click the water near you');
   if (w.H(ix, iz) >= SEA) return void toast('Boats go in the water');
   const yaw = Math.round(Math.atan2(x0 - c.pos.x, z0 - c.pos.z) / (Math.PI / 4)) * (Math.PI / 4);
-  for (const k of [2.5, 3, 2, 3.5, 4, 1.5, 5, 6, 7, 8, 10]) { // move it out (past sandbanks) until the whole hull floats
+  for (const k of [2.5, 3, 2, 3.5, 4, 1.5, 5, 6, 7, 8, 10].map((k) => k * Math.max(1, hl.reach / 4.5))) { // further out for a big boat // move it out (past sandbanks) until the whole hull floats
     const x = x0 + Math.sin(yaw) * k, z = z0 + Math.cos(yaw) * k;
-    if (!hullClear(w, x, z, yaw) || boatHit(game.boats, 0, x, z, yaw)) continue; // floating, and clear of other boats
+    if (!hullClear(w, x, z, yaw, hl) || boatHit(game.boats, 0, x, z, yaw, hl)) continue; // floating, and clear of other boats
     if (!inventory.takeHeld(1)) return;
     // it keeps the look (paint, name, upgrades) of the last boat you took out of the water
     let look;
     try { look = JSON.parse(localStorage.getItem(BOAT_LOCKER) ?? 'null') ?? undefined; } catch {}
-    const b = game.boats.set(1 + Math.floor(Math.random() * (2 ** 31 - 2)), x, z, yaw, true, look && cleanLook(look));
+    // (the locker keeps paint, name and upgrades; the kind of boat is the one you launched)
+    const b = game.boats.set(1 + Math.floor(Math.random() * (2 ** 31 - 2)), x, z, yaw, true, { ...cleanLook(look ?? null), t });
     game.scene.effects.impact(x, SEA, z, 2, 'water');
     sendBoat(b, true, true);
     saveDigging();
@@ -927,7 +955,7 @@ function takeBoat(b) {
   try { localStorage.setItem(BOAT_LOCKER, JSON.stringify(b.look)); } catch {} // your boat's look comes back at the next launch
   game.boats.remove(b.id);
   game.scene.effects.impact(b.sx, SEA, b.sz, 2, 'water');
-  give('boat', 1);
+  give(HULL_ITEMS[b.look.t] ?? 'boat', 1);
   sendBoat(b, false);
   saveDigging();
 }
@@ -941,8 +969,8 @@ function tryBoard(keys, yaw, t) {
   for (const b of game.boats.list.values()) {
     if (Math.hypot(b.sx - c.pos.x, b.sz - c.pos.z) > 5) continue;
     const [lx, lz] = toLocal(b, c.pos.x + d[0] * 1.25, c.pos.z + d[1] * 1.25); // far enough to reach the deck from the nearest half tile beside the hull
-    if (!onDeck(lx, lz)) continue;
-    const spot = nearestWalkable(lx, lz, b.obs);
+    if (!onDeck(lx, lz, b.hull)) continue;
+    const spot = nearestWalkable(lx, lz, b.obs, b.hull);
     if (!spot) continue;
     const up = deckY(b, t) - c.pos.y;
     if (!c.swimming && (up > 1.4 || up < -3)) continue; // too high a climb from here (from the water you just climb aboard)
@@ -977,12 +1005,12 @@ function boatKey() {
   let best = null, bd = 4.5;
   for (const b of game.boats.list.values()) {
     const [lx, lz] = toLocal(b, c.pos.x, c.pos.z);
-    const d = Math.hypot(Math.max(0, Math.abs(lx) - BOAT.W), Math.max(0, lz - BOAT.TIP, BOAT.STERN - lz));
+    const hl = b.hull, d = Math.hypot(Math.max(0, Math.abs(lx) - hl.W), Math.max(0, lz - hl.TIP, hl.STERN - lz));
     if (d < bd) { bd = d; best = b; }
   }
   if (!best) return toast('No boat nearby');
   if (!c.swimming && deckY(best, 0) - c.pos.y > 1.4) return toast("Can't climb aboard from here");
-  board(best, BOAT.HELM[0], BOAT.HELM[1]);
+  board(best, best.hull.HELM[0], best.hull.HELM[1]);
   toggleHelm();
 }
 function toggleHelm() {
@@ -990,7 +1018,7 @@ function toggleHelm() {
   if (!r) return;
   r.steer = !r.steer;
   const b = game.boats.list.get(r.id);
-  if (r.steer) { [r.lx, r.lz] = BOAT.HELM; game.driving = r.id; r.repeat = 0.4; }
+  if (r.steer) { [r.lx, r.lz] = b.hull.HELM; game.driving = r.id; r.repeat = 0.4; }
   else if (b) setThrottle(b, 0); // letting go of the wheel rings Stop: it glides to a halt
   toast(r.steer ? 'At the helm: W / S throttle up and down, A / D steer, F to let go' : 'You let go of the wheel: throttle to Stop');
 }
@@ -998,8 +1026,8 @@ function toggleHelm() {
 function wheelAt(px, py) {
   const b = game.boats.list.get(game.ride?.id);
   if (!b) return false;
-  const [x, z] = toWorldXZ(b, 0, -1.95);
-  const v = new THREE.Vector3(x, SEA + BOAT.DECK + 0.66, z).project(camera);
+  const [wx, wz, wy] = b.hull.WHEEL, [x, z] = toWorldXZ(b, wx, wz);
+  const v = new THREE.Vector3(x, SEA + b.hull.DECK + wy, z).project(camera);
   return Math.hypot((v.x + 1) / 2 * pixel.cssW - px, (1 - v.y) / 2 * pixel.cssH - py) < Math.max(18, 300 / game.cam.dist);
 }
 
@@ -1049,9 +1077,10 @@ function driveBoat(dt, keys, steps = 0) {
   // over shallow sand (how far it has ridden up, see Boats.update) the hull drags: top speed falls by up to
   // SHALLOW_SLOW, and it sheds speed quickly on running onto a sandbank
   const shallow = Math.min(1, (b.lift ?? 0) / BOAT.SHALLOW_LIFT);
-  const want = b.sail * BOAT.MAX_SPEED * engineFactor(b) * (1 - BOAT.SHALLOW_SLOW * shallow); // the engine upgrade adds 15% a level
+  const hl = b.hull;
+  const want = b.sail * hl.MAX_SPEED * engineFactor(b) * (1 - BOAT.SHALLOW_SLOW * shallow); // the engine upgrade adds 15% a level
   // filling the sail builds speed (ACCEL); backing it against your way brakes a bit harder; no sail glides (GLIDE)
-  let rate = !want ? BOAT.GLIDE : fwd && Math.sign(want) !== Math.sign(fwd) ? BOAT.ACCEL * 1.4 : Math.abs(want) > Math.abs(fwd) ? BOAT.ACCEL : BOAT.GLIDE;
+  let rate = !want ? hl.GLIDE : fwd && Math.sign(want) !== Math.sign(fwd) ? hl.ACCEL * 1.4 : Math.abs(want) > Math.abs(fwd) ? hl.ACCEL : hl.GLIDE;
   if (Math.abs(fwd) > Math.abs(want)) rate = Math.max(rate, BOAT.SAND_DRAG * shallow); // the sand drags it down
   fwd += (want - fwd) * (1 - Math.exp(-dt * rate));
   side *= Math.exp(-dt * BOAT.KEEL);
@@ -1060,16 +1089,16 @@ function driveBoat(dt, keys, steps = 0) {
   // the rudder only bites with water flowing past it: barely any turning at a standstill. It turns the same
   // way going astern (not reversed like a real rudder), so the keys always mean the same thing
   const bite = Math.min(1, Math.abs(fwd) / BOAT.FULL_TURN_SPEED);
-  b.turn = b.rudder * BOAT.TURN * rudderFactor(b) * Math.max(bite, BOAT.IDLE_TURN); // the rudder upgrade adds 20% a level
+  b.turn = b.rudder * hl.TURN * rudderFactor(b) * Math.max(bite, BOAT.IDLE_TURN); // the rudder upgrade adds 20% a level
   const ny = b.yaw + b.turn * dt;
   // turning can't swing the hull into land, or deeper into another boat
-  const hitNow = boatHit(game.boats, b.id, b.x, b.z, b.yaw)?.depth ?? 0;
-  if (hullClear(w, b.x, b.z, ny) && (boatHit(game.boats, b.id, b.x, b.z, ny)?.depth ?? 0) <= hitNow + 1e-4) b.yaw = ny; else b.turn = 0;
+  const hitNow = boatHit(game.boats, b.id, b.x, b.z, b.yaw, hl)?.depth ?? 0;
+  if (hullClear(w, b.x, b.z, ny, hl) && (boatHit(game.boats, b.id, b.x, b.z, ny, hl)?.depth ?? 0) <= hitNow + 1e-4) b.yaw = ny; else b.turn = 0;
   // move; against land it bumps back a little and loses its way
   const speed = Math.hypot(b.vx, b.vz);
   if (speed > 0.005) {
     const nx = b.x + b.vx * dt, nz = b.z + b.vz * dt;
-    if (hullClear(w, nx, nz, b.yaw)) { b.x = nx; b.z = nz; }
+    if (hullClear(w, nx, nz, b.yaw, hl)) { b.x = nx; b.z = nz; }
     else {
       if (speed > 1.2) {
         toast('Bump! Land ahead');
@@ -1081,10 +1110,10 @@ function driveBoat(dt, keys, steps = 0) {
   }
   // other boats: push apart, bounce off a little, and lose some way. Parked and remote boats don't budge here
   // (whoever sails a boat moves it), so this boat takes the whole push.
-  const hit = boatHit(game.boats, b.id, b.x, b.z, b.yaw);
+  const hit = boatHit(game.boats, b.id, b.x, b.z, b.yaw, hl);
   if (hit) {
     const px = b.x + hit.nx * (hit.depth + 0.01), pz = b.z + hit.nz * (hit.depth + 0.01);
-    if (hullClear(w, px, pz, b.yaw)) { b.x = px; b.z = pz; }
+    if (hullClear(w, px, pz, b.yaw, hl)) { b.x = px; b.z = pz; }
     const vn = b.vx * hit.nx + b.vz * hit.nz; // speed into the other boat (negative = closing in)
     if (vn < 0) {
       b.vx -= 1.3 * vn * hit.nx; b.vz -= 1.3 * vn * hit.nz; // reflect 30% of it
@@ -1126,15 +1155,15 @@ function walkOnDeck(dt, t, keys, yaw) {
     speed = keys.run ? 5.6 : 3.2;
     const nlx = r.lx + dlx * speed * dt, nlz = r.lz + dlz * speed * dt;
     let moved = true;
-    if (walkable(nlx, nlz, undefined, b.obs)) { r.lx = nlx; r.lz = nlz; }
-    else if (walkable(nlx, r.lz, undefined, b.obs) && Math.abs(dlx) > 0.2) r.lx = nlx;
-    else if (walkable(r.lx, nlz, undefined, b.obs) && Math.abs(dlz) > 0.2) r.lz = nlz;
+    if (walkable(nlx, nlz, undefined, b.obs, b.hull)) { r.lx = nlx; r.lz = nlz; }
+    else if (walkable(nlx, r.lz, undefined, b.obs, b.hull) && Math.abs(dlx) > 0.2) r.lx = nlx;
+    else if (walkable(r.lx, nlz, undefined, b.obs, b.hull) && Math.abs(dlz) > 0.2) r.lz = nlz;
     else moved = false;
     c.ry = Math.atan2(dx, dz);
     anim = keys.run ? ANIM.RUN : ANIM.WALK;
     // against the rail (the spot ahead is off the deck): after a moment, step off there
     const [ax, az] = [r.lx + dlx * 0.75, r.lz + dlz * 0.75];
-    if (!moved && !onDeck(ax, az)) {
+    if (!moved && !onDeck(ax, az, b.hull)) {
       r.push += dt;
       const [wx, wz] = toWorldXZ(b, r.lx + dlx * 1.1, r.lz + dlz * 1.1);
       const ix = toCell(wx), iz = toCell(wz), dy = deckY(b, t);
@@ -1144,7 +1173,11 @@ function walkOnDeck(dt, t, keys, yaw) {
       if (!moved) { anim = ANIM.IDLE; speed = 0; }
     } else { r.push = 0; r.warned = false; if (!moved) { anim = ANIM.IDLE; speed = 0; } }
   } else r.push = 0;
-  if (r.steer) { [r.lx, r.lz] = BOAT.HELM; c.ry = b.syaw; }
+  if (r.steer) {
+    [r.lx, r.lz] = b.hull.HELM;
+    c.ry = b.syaw;
+    if (b.look.t === 1) { anim = ANIM.ROW; c.ry = b.syaw + Math.PI; } // at the oars, facing the stern like a real rower
+  }
   const [wx, wz] = toWorldXZ(b, r.lx, r.lz);
   c.pos.x = wx; c.pos.z = wz; c.pos.y = deckY(b, t);
   c.ix = toCell(wx); c.iz = toCell(wz);
@@ -1977,6 +2010,8 @@ function toMenu() {
 
 // forget the current world, players and connection
 function resetSession() {
+  if (game.fishing && game.local) game.fishing.cancel(fishCtx());
+  game.fishing = null;
   if (socket) { game.leaving = true; socket.close(); socket = null; }
   game.saveName = null;
   if (inventory.isOpen) inventory.close();
@@ -2008,8 +2043,8 @@ function toggleBoatPanel(open = $('boat-panel').hidden) {
 // a new cabin or prop may now stand where you are: step to the nearest free spot on deck
 function unstickRider(b) {
   const r = game.ride;
-  if (!r || r.id !== b.id || r.steer || walkable(r.lx, r.lz, undefined, b.obs)) return;
-  const spot = nearestWalkable(r.lx, r.lz, b.obs) ?? BOAT.HELM;
+  if (!r || r.id !== b.id || r.steer || walkable(r.lx, r.lz, undefined, b.obs, b.hull)) return;
+  const spot = nearestWalkable(r.lx, r.lz, b.obs, b.hull) ?? b.hull.HELM;
   [r.lx, r.lz] = spot;
 }
 function setBoatLook(b, look) {
@@ -2027,6 +2062,7 @@ function renderBoatPanel() {
   if (document.activeElement !== $('bp-name')) $('bp-name').value = L.n;
   // upgrades: level pips, the next level's cost, and a Build button
   $('bp-ups').innerHTML = UPGRADES.map((u, i) => {
+    if (b.look.t && !u.all) return ''; // decorations are built for the cabin boat
     const lvl = L.u[i], max = UPGRADE_MAX[i], cost = u.cost[lvl];
     const pips = Array.from({ length: max }, (_, k) => `<i class="${k < lvl ? 'on' : ''}"></i>`).join('');
     const items = cost ? Object.entries(cost).map(([id, n]) => `<span class="craft-item${inventory.count(id) >= n || inventory.creative ? '' : ' short'}"><img alt="" src="${iconURL(id)}" /><b>${n}</b></span>`).join('') : '';
@@ -2072,6 +2108,10 @@ function setBoatEdit(on) {
     game.boats.setEditing(b.id, true);
   }
   $('edit-banner').hidden = !on;
+  if (on) for (const btn of $('edit-banner').querySelectorAll('button[data-part]')) { // only parts this kind of boat has
+    const part = btn.dataset.part;
+    btn.hidden = !!b.look.t && (part === 'top' || part === 'mast' || ((part === 'cabin' || part === 'roof') && !b.tm[part].visible));
+  }
   hidePartMenu();
   game.scene?.setHighlight(null, 0, 0);
 }
@@ -2116,7 +2156,11 @@ function renderPartMenu() {
   let title = PART_TITLES[pm.part], styles = [], colour = null, colourLabel = 'Colour';
   const opt = (kind, names, cur) => names.map((n, v) => ({ v, name: n, icon: partIcon(pixel.renderer, kind, v, L), on: cur === v }));
   if (pm.part === 'hull') colour = 0;
-  else if (pm.part === 'cabin') { styles = opt('cabin', CABINS.map((c) => c.name), L.p[0]); colour = lay.cab ? 1 : null; }
+  else if (L.t) { // a fixed model: just its colours
+    title = `${HULLS[L.t].name}: ${PART_TITLES[pm.part].toLowerCase()}`;
+    colour = pm.part === 'cabin' && b.tm.cabin.visible ? 1 : pm.part === 'roof' && b.tm.roof.visible ? 2 : null;
+    if (colour === null) title += ' (not on this boat)';
+  } else if (pm.part === 'cabin') { styles = opt('cabin', CABINS.map((c) => c.name), L.p[0]); colour = lay.cab ? 1 : null; }
   else if (pm.part === 'roof') {
     styles = lay.cab ? opt('roof', ROOFS, L.p[1]) : [];
     if (!lay.cab) title += ' (needs a cabin)';

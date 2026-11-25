@@ -38,9 +38,21 @@ export const THROTTLE = [
   { name: 'Full', sail: 1 },
 ];
 
+// The kinds of boat (look.t; boatlook.js HULL_ITEMS has the item that launches each). Each has its own outline
+// (half width W, bow curve from BOW0 to TIP, flat stern at STERN), deck height, where the helmsman stands and the
+// wheel or oars are, and handling: top speed, turn rate, how fast it picks up speed and how long it glides.
+// The cabin boat (0) is the original and keeps every swappable part and upgrade; the others are fixed models.
+export const HULLS = [
+  { key: 'cabin', name: 'Cabin boat', W: BOAT.W, BOW0: BOAT.BOW0, TIP: BOAT.TIP, STERN: BOAT.STERN, DECK: BOAT.DECK, HELM: BOAT.HELM, WHEEL: [0, -1.95, 0.66],
+    MAX_SPEED: BOAT.MAX_SPEED, TURN: BOAT.TURN, ACCEL: BOAT.ACCEL, GLIDE: BOAT.GLIDE, KEEL_DEPTH: 0.62 },
+  // small and cheap: you stand at the oars in the middle; slow, but it spins on the spot
+  { key: 'rowboat', name: 'Rowboat', W: 0.52, BOW0: 0.15, TIP: 1.3, STERN: -1.1, DECK: 0.18, HELM: [0, -0.12], WHEEL: [0, 0.14, 0.28],
+    MAX_SPEED: 3.4, TURN: 1.5, ACCEL: 1.4, GLIDE: 0.8, KEEL_DEPTH: 0.3,
+    obs: { rects: [], circles: [] } },
+];
 /** Half width of the hull at local z (negative outside the hull). The bow is an elliptical curve. */
-export function halfW(z) {
-  const { W, BOW0, TIP, STERN } = BOAT;
+export function halfW(z, hl = HULLS[0]) {
+  const { W, BOW0, TIP, STERN } = hl;
   if (z < STERN || z > TIP) return -1;
   if (z <= BOW0) return W;
   const t = (z - BOW0) / (TIP - BOW0);
@@ -50,22 +62,22 @@ export function halfW(z) {
 // What blocks walking on a boat's deck depends on its look (the cabin, a mast stepped on deck, props): `obs` =
 // { rects: [x0, x1, z0, z1][], circles: [x, z, r][] } from layoutOf(look).obs (b.obs for a boat).
 /** Can a rider stand at deck position (lx, lz) on a boat whose obstacles are `obs`? */
-export function walkable(lx, lz, r = BOAT.RIDER_R, obs = layoutOf(null).obs) {
-  if (lz < BOAT.STERN + 0.32 || Math.abs(lx) > halfW(lz) - 0.22 - r) return false;
+export function walkable(lx, lz, r = BOAT.RIDER_R, obs = layoutOf(null).obs, hl = HULLS[0]) {
+  if (lz < hl.STERN + 0.32 || Math.abs(lx) > halfW(lz, hl) - 0.22 - r) return false;
   for (const [x0, x1, z0, z1] of obs.rects) if (lx > x0 - r && lx < x1 + r && lz > z0 - r && lz < z1 + r) return false;
   for (const [x, z, cr] of obs.circles) if ((lx - x) ** 2 + (lz - z) ** 2 < (cr + r) ** 2) return false;
   return true;
 }
 /** Is (lx, lz) over the deck at all (inside the rail)? */
-export const onDeck = (lx, lz) => lz >= BOAT.STERN + 0.15 && Math.abs(lx) <= halfW(lz) - 0.12;
+export const onDeck = (lx, lz, hl = HULLS[0]) => lz >= hl.STERN + 0.15 && Math.abs(lx) <= halfW(lz, hl) - 0.12;
 
 /** The nearest walkable deck spot to (lx, lz), searching outward a little, or null. */
-export function nearestWalkable(lx, lz, obs = layoutOf(null).obs) {
-  if (walkable(lx, lz, undefined, obs)) return [lx, lz];
+export function nearestWalkable(lx, lz, obs = layoutOf(null).obs, hl = HULLS[0]) {
+  if (walkable(lx, lz, undefined, obs, hl)) return [lx, lz];
   for (let r = 0.1; r <= 1.2; r += 0.1) {
     for (let a = 0; a < 16; a++) {
       const x = lx + Math.cos(a * Math.PI / 8) * r, z = lz + Math.sin(a * Math.PI / 8) * r;
-      if (walkable(x, z, undefined, obs)) return [x, z];
+      if (walkable(x, z, undefined, obs, hl)) return [x, z];
     }
   }
   return null;
@@ -82,36 +94,52 @@ export function toWorldXZ(b, lx, lz) {
 /** Gentle bobbing on the waves (shared by the hull and everyone on deck). */
 export const bobY = (b, t) => Math.sin(t * 1.25 + b.id % 7) * 0.045;
 // `lift`: how far the boat rides up over shallow sand so its keel clears the seabed (Boats.update)
-export const deckY = (b, t) => SEA + BOAT.DECK + bobY(b, t) + (b.lift ?? 0);
+export const deckY = (b, t) => SEA + (b.hull ?? HULLS[0]).DECK + bobY(b, t) + (b.lift ?? 0);
 
 // points around the hull that must all be over water (bow tip, sides, stern corners)
-const HULL_PTS = [[0, 3.3], [0.75, 2.6], [-0.75, 2.6], [1.2, 1.0], [-1.2, 1.0], [1.2, -1.0], [-1.2, -1.0], [1.2, -3.0], [-1.2, -3.0], [0, -3.0]];
+HULLS[0].pts = [[0, 3.3], [0.75, 2.6], [-0.75, 2.6], [1.2, 1.0], [-1.2, 1.0], [1.2, -1.0], [-1.2, -1.0], [1.2, -3.0], [-1.2, -3.0], [0, -3.0]];
+// Boats against boats: each hull is circles along its keel ([local z, radius]), narrower toward the bow and stern
+HULLS[0].circles = [[-2.2, 1.1], [-0.75, 1.2], [0.75, 1.2], [2.2, 0.95]];
+// the other hulls get theirs from their outline: points every ≤ 2 tiles down both sides plus the bow and stern,
+// and overlapping circles along the keel
+for (const hl of HULLS.slice(1)) {
+  const { W, BOW0, TIP, STERN } = hl, pts = [[0, TIP], [0, STERN]];
+  const zb = BOW0 + (TIP - BOW0) * 0.7;
+  pts.push([halfW(zb, hl), zb], [-halfW(zb, hl), zb]);
+  const n = Math.max(1, Math.ceil((BOW0 - STERN) / 2));
+  for (let i = 0; i <= n; i++) { const z = STERN + (BOW0 - STERN) * (i / n); pts.push([W, z], [-W, z]); }
+  hl.pts = pts;
+  const m = Math.max(2, Math.ceil((TIP - STERN) / (1.3 * W))), circles = [];
+  for (let i = 0; i < m; i++) { const z = STERN + W * 0.8 + (TIP - STERN - W * 1.55) * (i / (m - 1)); circles.push([z, Math.max(halfW(z, hl), W * 0.7)]); }
+  hl.circles = circles;
+}
+for (const hl of HULLS) hl.reach = Math.max(hl.TIP, -hl.STERN) + hl.W; // nothing of the boat is further than this from its middle
+export const hullOf = (look) => HULLS[look?.t ?? 0] ?? HULLS[0];
 /** Does a boat at (x, z, yaw) float clear of land? Any water will do, sandy shallows included (it rides up over them). */
-export function hullClear(world, x, z, yaw) {
+export function hullClear(world, x, z, yaw, hl = HULLS[0]) {
   const c = Math.cos(yaw), s = Math.sin(yaw);
-  for (const [lx, lz] of HULL_PTS) {
+  for (const [lx, lz] of hl.pts) {
     const wx = x + lx * c + lz * s, wz = z - lx * s + lz * c;
     if (world.H(toCell(wx), toCell(wz)) >= SEA) return false;
   }
   return true;
 }
 
-// Boats against boats: each hull is four circles along its keel (local z, radius), narrower toward the bow and stern
-const HULL_CIRCLES = [[-2.2, 1.1], [-0.75, 1.2], [0.75, 1.2], [2.2, 0.95]];
 /**
  * The deepest overlap between a boat at (x, z, yaw) and any other boat in `boats` (their drawn poses), or null.
  * Returns { nx, nz } pointing from the other boat toward this one, `depth` (how far they overlap), the contact
  * point (cx, cz) and the other boat.
  */
-export function boatHit(boats, selfId, x, z, yaw) {
+export function boatHit(boats, selfId, x, z, yaw, hl = HULLS[0]) {
   let best = null;
   const s = Math.sin(yaw), c = Math.cos(yaw);
   for (const o of boats.list.values()) {
-    if (o.id === selfId || Math.hypot(o.sx - x, o.sz - z) > 7.2) continue;
+    const oh = o.hull ?? HULLS[0];
+    if (o.id === selfId || Math.hypot(o.sx - x, o.sz - z) > hl.reach + oh.reach) continue;
     const os = Math.sin(o.syaw), oc = Math.cos(o.syaw);
-    for (const [az, ar] of HULL_CIRCLES) {
+    for (const [az, ar] of hl.circles) {
       const ax = x + az * s, azz = z + az * c;
-      for (const [bz, br] of HULL_CIRCLES) {
+      for (const [bz, br] of oh.circles) {
         const bx = o.sx + bz * os, bzz = o.sz + bz * oc;
         const dx = ax - bx, dz = azz - bzz, d = Math.hypot(dx, dz), depth = ar + br - d;
         if (depth > 0 && (!best || depth > best.depth)) {
@@ -151,21 +179,21 @@ function paint(g, color) {
   return g;
 }
 // the hull outline (inset by `inset`) as a 2D shape; shape y = −local z (see extrudeY)
-function outline(inset) {
+function outline(inset, hl = HULLS[0]) {
   // a negative inset grows the outline outward. The ends stay inside the hull's length (out there halfW is −1,
   // which would collapse to duplicate points and break the triangulation of a ring's hole).
-  const pts = [], { STERN, TIP } = BOAT, ins = Math.max(0, inset);
+  const pts = [], { STERN, TIP } = hl, ins = Math.max(0, inset);
   const z0 = STERN + ins, z1 = TIP - ins * 1.4 - (inset < 0 ? 0.02 : 0);
   const N = 16;
-  for (let i = 0; i <= N; i++) { const z = z0 + (z1 - z0) * (i / N); pts.push(new THREE.Vector2(Math.max(0.01, halfW(z) - inset), -z)); }
-  for (let i = N; i >= 0; i--) { const z = z0 + (z1 - z0) * (i / N); pts.push(new THREE.Vector2(-Math.max(0.01, halfW(z) - inset), -z)); }
+  for (let i = 0; i <= N; i++) { const z = z0 + (z1 - z0) * (i / N); pts.push(new THREE.Vector2(Math.max(0.01, halfW(z, hl) - inset), -z)); }
+  for (let i = N; i >= 0; i--) { const z = z0 + (z1 - z0) * (i / N); pts.push(new THREE.Vector2(-Math.max(0.01, halfW(z, hl) - inset), -z)); }
   return pts;
 }
 // extrude a shape upward from y0 by h (shape x → x, shape y → −z)
 function extrudeY(shape, y0, h) {
   return new THREE.ExtrudeGeometry(shape, { depth: h, bevelEnabled: false, curveSegments: 4 }).rotateX(-Math.PI / 2).translate(0, y0, 0);
 }
-const ring = (outer, inner) => { const s = new THREE.Shape(outline(outer)); s.holes.push(new THREE.Path(outline(inner))); return s; };
+const ring = (outer, inner, hl = HULLS[0]) => { const s = new THREE.Shape(outline(outer, hl)); s.holes.push(new THREE.Path(outline(inner, hl))); return s; };
 // collect painted pieces and merge them into one geometry
 function parts(build) {
   const list = [];
@@ -191,8 +219,9 @@ const KEEL_DEPTH = 0.62; // how far the keel reaches under the waterline
 // The sheer: the hull's top line sweeps up toward the bow (and a little at the stern), like a real boat's.
 // Only the hull sides, rail and what's fixed to them follow it (sheerGeo); the deck stays flat to walk on.
 const sstep = (a, b, x) => { const t = Math.min(1, Math.max(0, (x - a) / (b - a))); return t * t * (3 - 2 * t); };
-export const sheerAt = (z) => 0.3 * Math.pow(sstep(0.3, BOAT.TIP, z), 1.3) + 0.12 * sstep(-1.3, BOAT.STERN, z);
-const sheerW = (y) => Math.min(1, Math.max(0, (y + 0.12) / (D + 0.15))); // waterline 0 → rail 1, so the planks stretch smoothly
+let SH = HULLS[0]; // the hull whose geometry is being built (the sheer scales with it)
+export const sheerAt = (z, hl = SH) => (hl.W / BOAT.W) * (0.3 * Math.pow(sstep(hl.BOW0 * 0.3, hl.TIP, z), 1.3) + 0.12 * sstep(hl.STERN * 0.43, hl.STERN, z));
+const sheerW = (y) => Math.min(1, Math.max(0, (y + 0.12) / (SH.DECK + 0.15))); // waterline 0 → rail 1, so the planks stretch smoothly
 function sheerGeo(g) {
   const p = g.attributes.position;
   for (let i = 0; i < p.count; i++) p.setY(i, p.getY(i) + sheerAt(p.getZ(i)) * sheerW(p.getY(i)));
@@ -236,6 +265,7 @@ const WHEEL_POST = [-0.14, 0.14, -2.12, -1.92];
 const layoutCache = new Map();
 export function layoutOf(look) {
   const L = look ?? defaultLook();
+  if (L.t) return { key: 't' + L.t, cab: null, roof: -1, top: 2, wh: null, mast: null, mastV: 2, obs: HULLS[L.t].obs }; // fixed models
   const key = `${L.p.join()}|${L.d.join()}`;
   let lay = layoutCache.get(key);
   if (lay) return lay;
@@ -577,6 +607,84 @@ const chimneyGeometry = (lvl, cab) => parts(({ add, box }) => {
   if (lvl >= 3) box(0.16, 0.03, 0.16, C.BRASS, x, y + h + 0.06, z);
 });
 
+// ---- the other kinds of boat (HULLS 1: the rowboat): fixed models, painted with the hull colour ----
+// A clinker hull for any outline: keel, lower planks tapering in, a waterline stripe, a rail with a cap and posts,
+// a stem and sternpost, and a flat plank deck. The tinted band of planks along the top is built by hullBand.
+function hullShell(hl, { add, box, sheer }) {
+  const dk = hl.DECK, kd = hl.KEEL_DEPTH, s = hl.W / BOAT.W;
+  add(extrudeY(new THREE.Shape(outline(0.3 * s, hl)), -kd, 0.2), C.KEEL);
+  sheer(true);
+  const lowTop = dk - 0.24, bands = 3, WEATHER = [0x8a7a66, 0x9b8b76, 0x7f6f5c];
+  for (let k = 0; k < bands; k++) {
+    const y0 = -kd + 0.18 + (lowTop + kd - 0.18) * (k / bands), y1 = -kd + 0.18 + (lowTop + kd - 0.18) * ((k + 1) / bands) + 0.02;
+    const col = k === 0 ? C.GRIME : WEATHER[k];
+    add(extrudeY(new THREE.Shape(outline([0.14, 0.06, 0.015][k] * s, hl)), y0, y1 - y0), (x, y) => (y < y0 + 0.01 ? new THREE.Color(col).multiplyScalar(0.8).getHex() : col));
+  }
+  add(extrudeY(ring(-0.02, 0.05, hl), lowTop - 0.04, 0.04), 0xe6d8b8); // cream waterline stripe
+  add(extrudeY(ring(0, 0.1, hl), dk, 0.12), C.RAIL);
+  add(extrudeY(ring(0, 0.1, hl), dk + 0.12, 0.035), C.CAP);
+  const step = hl.W < 0.8 ? 0.5 : 0.55;
+  for (let z = hl.STERN + 0.3; z <= hl.TIP - 0.4; z += step) for (const sx of [-1, 1]) box(0.06, 0.2, 0.06, C.POST, sx * (halfW(z, hl) - 0.05), dk + 0.08, z);
+  for (let k = 0; k < 5; k++) { const t = k / 4; box(0.08, 0.18, 0.09, C.RAIL, 0, -kd * 0.6 + t * (dk + 0.45 + kd * 0.6), hl.TIP - 0.02 + Math.sin(t * 1.4) * 0.08, 0, -0.25 * t); } // stem
+  box(0.09, dk + kd * 0.5 + 0.3, 0.07, C.RAIL, 0, (dk + 0.3 - kd * 0.5) / 2, hl.STERN - 0.02); // sternpost
+  sheer(false);
+  // deck planks, clipped to the hull
+  const DECKS = [0x9a6a3c, 0x8a5c33, 0xa47446, 0x7f5530, 0x936336], pw = hl.W < 0.8 ? 0.2 : 0.24;
+  for (let x = -(hl.W - 0.2), n = 0; x <= hl.W - 0.2 + 1e-6; x += pw + 0.01, n++) {
+    let zEnd = hl.STERN + 0.1;
+    for (let z = hl.STERN + 0.1; z < hl.TIP; z += 0.02) { if (halfW(z, hl) - 0.08 >= Math.abs(x) + pw / 2) zEnd = z; else if (z > 0) break; }
+    const z0 = hl.STERN + 0.1;
+    if (zEnd - z0 > 0.1) box(pw, 0.04, zEnd - z0, DECKS[Math.floor(hrand(n + 7 + hl.W * 10) * DECKS.length)], x, dk + 0.005, (z0 + zEnd) / 2);
+  }
+}
+// the tinted band of planks along the top of the hull (hull colour)
+const hullBand = (hl) => parts(({ add, sheer }) => {
+  SH = hl;
+  sheer(true);
+  const dk = hl.DECK, y0 = dk - 0.22;
+  [[y0, dk - 0.1], [dk - 0.1, dk + 0.03]].forEach(([a, b], k) => add(extrudeY(ring(-0.012 - k * 0.008, 0.08, hl), a, b - a), (x, y) => (y < a + 0.01 ? 0.78 : y > dk ? 1.1 : tone(k + 11, 0.86, 1.02))));
+  SH = HULLS[0];
+});
+const TYPE_BUILD = {
+  // Rowboat: two thwarts, oars in their rowlocks resting out over the water, a coiled bow line and a little crate
+  1: (hl) => ({
+    base: parts((p) => {
+      SH = hl; hullShell(hl, p); SH = HULLS[0];
+      const { add, box } = p, dk = hl.DECK;
+      for (const z of [0.5, -0.58]) box(2 * halfW(z, hl) - 0.14, 0.05, 0.22, C.CAP, 0, dk + 0.18, z); // thwarts (you walk over them)
+      for (const z of [0.5, -0.58]) for (const sx of [-1, 1]) box(0.045, 0.16, 0.045, C.POST, sx * (halfW(z, hl) - 0.17), dk + 0.09, z);
+      for (const sx of [-1, 1]) { // oars from the rowlocks, blades in the water
+        box(0.035, 0.07, 0.035, C.IRON, sx * (hl.W - 0.02), dk + 0.19, 0.15); // rowlocks (the oars are animated: OAR)
+      }
+      add(new THREE.TorusGeometry(0.09, 0.025, 4, 10).rotateX(Math.PI / 2).translate(-0.1, dk + 0.035, 0.85), C.ROPE);
+      box(0.16, 0.14, 0.13, C.CRATE, 0.12, dk + 0.07, -0.85);
+    }),
+    paint: hullBand(hl),
+  }),
+};
+// A rowboat oar, pivoting at its rowlock (the origin): the handle inboard (−x), the loom out along +x, and the blade.
+// Boats.update sweeps it fore and aft and dips the blade through a stroke (b.rowPhase).
+const OAR = { PIVOT_Z: 0.15, PIVOT_Y: 0.19, SWEEP: 0.55, DIP: 0.42, LIFT: 0.18 };
+const oarGeometry = () => shared('oar', () => parts(({ box }) => {
+  box(1.2, 0.04, 0.04, C.CAP, 0.4, 0, 0); // the loom, from the handle to the blade
+  box(0.13, 0.05, 0.05, C.POST, -0.33, 0, 0); // the grip
+  box(0.3, 0.12, 0.022, C.POST, 1.12, 0, 0); // the blade
+  box(0.05, 0.06, 0.06, C.DARK, 0.02, 0, 0); // the collar at the rowlock
+}));
+
+/** The geometries of a fixed-model boat kind (the rowboat): { base, paint, cabin?, roof?, glow? }, built once. */
+function typeGeometry(t) {
+  return (geoCache['type' + t] ??= (() => {
+    const g = TYPE_BUILD[t](HULLS[t]);
+    if (g.glow) {
+      const m = mergeGeometries(g.glow.map(([x, y, z]) => { const b = new THREE.BoxGeometry(0.1, 0.12, 0.1).translate(x, y, z); b.deleteAttribute('uv'); return b; }));
+      m.userData.shared = true;
+      g.glow = m;
+    }
+    return g;
+  })());
+}
+
 const shared = (key, build) => (geoCache[key] ??= build());
 /**
  * The shapes that make up one variant of a part, for drawing its icon: [{ geo, tint, pos? }], tint = which look colour
@@ -609,7 +717,9 @@ export function partPieces(kind, v, look) {
   return [];
 }
 /** The boat's hull as one geometry (shared): the hover highlight's outline. */
-export function boatGeometry() {
+export function boatGeometry(b = null) {
+  const t = b?.look?.t ?? 0;
+  if (t) return shared('outline' + t, () => { const tg = typeGeometry(t), g = mergeGeometries([tg.base, tg.paint]); g.userData.shared = true; return g; });
   return shared('outline', () => {
     const g = mergeGeometries([shared('base', baseGeometry), shared('hullPaint', hullPaintGeometry)]);
     g.userData.shared = true;
@@ -681,15 +791,15 @@ class Wake {
     b.wakeAcc = (b.wakeAcc ?? 0) + v * dt * 8; // foam per tile travelled
     while (b.wakeAcc >= 1) {
       b.wakeAcc -= 1;
-      const k = Math.min(1, v / BOAT.MAX_SPEED);
+      const hl = b.hull ?? HULLS[0], k = Math.min(1, v / hl.MAX_SPEED), bowZ = hl.BOW0 + (hl.TIP - hl.BOW0) * 0.35;
       // bow waves: from both sides of the bow, pushed outward and falling behind
       for (const side of [-1, 1]) {
-        const [x, z] = at(side * (0.75 + Math.random() * 0.2), dir > 0 ? 1.9 + Math.random() * 0.5 : -2.8);
+        const [x, z] = at(side * (hl.W * 0.62 + Math.random() * 0.2), dir > 0 ? bowZ + Math.random() * 0.5 : hl.STERN + 0.2);
         const out = 0.5 + 1.1 * k;
         this.spawn(x, z, (side * cs) * out - sn * v * 0.15 * dir, (-side * sn) * out - cs * v * 0.15 * dir, 0.08 + Math.random() * 0.07, 0.22, 1.3 + Math.random() * 0.6, 0.22 + 0.2 * k, b.syaw + (Math.random() - 0.5) * 0.6);
       }
       // stern trail: churned water left behind, spreading slowly
-      const [x, z] = at((Math.random() - 0.5) * 1.1, dir > 0 ? BOAT.STERN - 0.15 : BOAT.TIP);
+      const [x, z] = at((Math.random() - 0.5) * hl.W * 0.9, dir > 0 ? hl.STERN - 0.15 : hl.TIP);
       this.spawn(x, z, (Math.random() - 0.5) * 0.3, (Math.random() - 0.5) * 0.3, 0.1 + Math.random() * 0.1, 0.3, 2 + Math.random() * 1.2, 0.18 + 0.22 * k, b.syaw + (Math.random() - 0.5) * 0.8);
     }
   }
@@ -739,8 +849,8 @@ function flagMaterial(color) {
 
 /** What each upgrade does and costs (levels 1..max). Effects: see engineFactor / rudderFactor and applyLook. */
 export const UPGRADES = [
-  { key: 'engine', name: 'Engine', desc: 'Top speed +15% per level, and a taller chimney', cost: [{ wood: 6, stone: 4 }, { wood: 10, log: 4, stone: 8 }, { wood: 16, log: 8, stone: 14 }] },
-  { key: 'rudder', name: 'Rudder', desc: 'Turns 20% quicker per level', cost: [{ wood: 4, pebble: 4 }, { wood: 8, stone: 4 }] },
+  { key: 'engine', all: true, name: 'Engine', desc: 'Top speed +15% per level, and a taller chimney', cost: [{ wood: 6, stone: 4 }, { wood: 10, log: 4, stone: 8 }, { wood: 16, log: 8, stone: 14 }] },
+  { key: 'rudder', all: true, name: 'Rudder', desc: 'Turns 20% quicker per level', cost: [{ wood: 4, pebble: 4 }, { wood: 8, stone: 4 }] },
   { key: 'awning', name: 'Canvas awning', desc: 'Shade over the foredeck, in your canvas colour', cost: [{ stick: 6, leaves: 12 }] },
   { key: 'lights', name: 'String lights', desc: 'Warm little lights strung around the deck', cost: [{ stick: 6, wood: 2, berries: 4 }] },
   { key: 'bunting', name: 'Bunting', desc: 'Pennants from the masthead to bow and stern', cost: [{ stick: 4, leaves: 8, berries: 4 }] },
@@ -780,7 +890,7 @@ export class Boats {
         mast: mesh(null, m.base), sail: mesh(null, tint.canvas), chimney: mesh(null, m.base),
         buntLine: mesh(null, m.base, false), buntA: mesh(null, tint.canvas, false), buntB: mesh(null, m.base, false),
       };
-      mesh(glowGeometry(), m.glow, false);
+      const sloopGlow = mesh(glowGeometry(), m.glow, false);
       const flag = mesh(flagGeometry(), tint.flag);
       const parts = {
         awning: [mesh(shared('awningPoles', awningPolesGeometry), m.base), mesh(shared('awningCanvas', awningCanvasGeometry), tint.canvas)],
@@ -810,12 +920,23 @@ export class Boats {
       const plateMat = new THREE.MeshLambertMaterial();
       const plates = [1, -1].map((sx) => {
         const p = mesh(plateGeo, plateMat, false);
-        p.position.set(sx * (BOAT.W + 0.03), 0.3, -1.75);
         p.rotation.y = sx * Math.PI / 2;
         return p;
       });
+      // the fixed-model kinds of boat (HULLS 1: the rowboat): their geometry is chosen in setLook
+      const tm = { base: mesh(null, m.base), paint: mesh(null, tint.hull), cabin: mesh(null, tint.cabin), roof: mesh(null, tint.roof), glow: mesh(null, m.glow, false) };
+      // a rowboat's oars: each on a pivot at its rowlock (sx +1 = starboard), posed every frame in update()
+      const oars = [1, -1].map((sx) => {
+        const pivot = new THREE.Group(), o = new THREE.Mesh(oarGeometry(), m.base);
+        o.castShadow = true; o.receiveShadow = true; o.userData.part = 'hull';
+        pivot.add(o); pivot.visible = false; group.add(pivot);
+        return { pivot, o, sx };
+      });
+      tag(tm.base, 'hull'); tag(tm.paint, 'hull'); tag(tm.cabin, 'cabin'); tag(tm.roof, 'roof');
+      // everything that belongs to the cabin boat only (hidden on the other kinds)
+      const sloopMeshes = [hullM, paintM, sloopGlow, flag, ...Object.values(sw), ...Object.values(parts).flat(), ...props.flat(), ...markers];
       this.scene.add(group);
-      b = { id, x, z, yaw, sx: x, sz: z, syaw: yaw, speed: 0, group, flag, tint, sw, parts, props, markers, hullM, plates, plateMat, look: null, obs: layoutOf(null).obs, editing: false };
+      b = { id, x, z, yaw, sx: x, sz: z, syaw: yaw, speed: 0, group, flag, tint, sw, parts, props, markers, hullM, paintM, sloopGlow, sloopMeshes, tm, oars, plates, plateMat, look: null, hull: HULLS[0], obs: layoutOf(null).obs, editing: false };
       this.list.set(id, b);
       instant = true;
       if (look === undefined) look = defaultLook();
@@ -847,6 +968,23 @@ export class Boats {
     b.tint.roof.color.setHex(col(2));
     b.tint.canvas.color.setHex(col(3));
     b.tint.flag.color.setHex(col(3));
+    const hl = (b.hull = HULLS[L.t] ?? HULLS[0]), tg = L.t ? typeGeometry(L.t) : null;
+    for (const [k, o] of Object.entries(b.tm)) { const g = tg?.[k]; if (g) o.geometry = g; o.visible = !!g; }
+    for (const oar of b.oars) { oar.pivot.visible = L.t === 1; oar.pivot.position.set(oar.sx * (hl.W - 0.02), hl.DECK + OAR.PIVOT_Y, OAR.PIVOT_Z); }
+    // name plates on both quarters, on the hull band
+    b.plates.forEach((p, i) => { const sx = i ? -1 : 1; p.position.set(sx * (hl.W + 0.03), L.t ? hl.DECK - 0.11 : 0.3, L.t ? hl.STERN * 0.55 : -1.75); p.scale.setScalar(L.t === 1 ? 0.6 : 1); });
+    if (!old || old.n !== L.n) {
+      b.plateMat.map?.dispose();
+      b.plateMat.map = L.n ? nameTexture(L.n) : null;
+      b.plateMat.needsUpdate = true;
+      for (const p of b.plates) p.visible = !!L.n;
+    }
+    if (L.t) { // a fixed model: none of the cabin boat's parts, props or decorations
+      for (const o of b.sloopMeshes) o.visible = false;
+      b.obs = hl.obs;
+      return;
+    }
+    b.hullM.visible = b.paintM.visible = b.sloopGlow.visible = true;
     UPGRADE_KEYS.forEach((key, i) => { if (b.parts[key]) for (const o of b.parts[key]) o.visible = L.u[i] > 0; });
     // the parts and props this look chooses (each shape built once, shared by every boat using it)
     const lay = layoutOf(L), { cab, wh, mast } = lay, sw = b.sw;
@@ -872,12 +1010,6 @@ export class Boats {
     put(sw.chimney, lvl > 0 && cab && lay.roof !== 2 && shared(`chimney${ci}.${lvl}`, () => chimneyGeometry(lvl, cab)));
     b.props.forEach(([o, g], i) => { const t = propAt(L, i); put(o, propGeometry(t)); put(g, t === 6 && propGlowGeometry()); b.markers[i].visible = b.editing && !t; });
     b.obs = lay.obs; // what riders walk around
-    if (!old || old.n !== L.n) {
-      b.plateMat.map?.dispose();
-      b.plateMat.map = L.n ? nameTexture(L.n) : null;
-      b.plateMat.needsUpdate = true;
-      for (const p of b.plates) p.visible = !!L.n;
-    }
   }
   /**
    * A timestamped pose from the boat's driver (t = the driver's clock in ms). Other players' screens replay the
@@ -917,11 +1049,12 @@ export class Boats {
     const b = this.list.get(id);
     if (!b) return;
     b.editing = on;
-    b.markers.forEach((o, i) => { o.visible = on && !propAt(b.look, i); });
+    b.markers.forEach((o, i) => { o.visible = on && !b.look.t && !propAt(b.look, i); });
   }
   /** The mesh that stands for a part when it's outlined (hovered in edit mode). */
   partMesh(b, part, slot) {
     const sw = b.sw;
+    if (b.look?.t) return part === 'hull' ? b.tm.base : part === 'cabin' || part === 'roof' ? (b.tm[part].visible ? b.tm[part] : null) : null;
     if (part === 'hull') return b.hullM;
     if (part === 'cabin') return sw.cabinWalls.visible ? sw.cabinWalls : null;
     if (part === 'roof') return sw.roof.visible ? sw.roof : null;
@@ -984,8 +1117,9 @@ export class Boats {
       if (this.world) {
         const sn = Math.sin(b.syaw), cs = Math.cos(b.syaw);
         let bed = -Infinity;
-        for (const lz of [2.6, 0, -2.6]) bed = Math.max(bed, this.world.H(toCell(b.sx + lz * sn), toCell(b.sz + lz * cs)));
-        const want = Math.min(KEEL_DEPTH, Math.max(0, bed + KEEL_DEPTH + 0.04 - SEA));
+        const hl = b.hull ?? HULLS[0], kd = hl.KEEL_DEPTH;
+        for (const lz of [hl.TIP * 0.8, 0, hl.STERN * 0.85]) bed = Math.max(bed, this.world.H(toCell(b.sx + lz * sn), toCell(b.sz + lz * cs)));
+        const want = Math.min(kd, Math.max(0, bed + kd + 0.04 - SEA));
         b.lift = (b.lift ?? want) + (want - (b.lift ?? want)) * (1 - Math.exp(-dt * 3));
       }
       g.position.set(b.sx, SEA + bobY(b, t) + (b.lift ?? 0), b.sz);
@@ -999,11 +1133,30 @@ export class Boats {
       const roll = Math.sin(t * 1.1 + b.id % 3) * 0.028 * (1 + b.vis * 0.15) - heel;
       const pitch = Math.sin(t * 0.9 + b.id % 5) * 0.018 - lean;
       g.rotation.set(pitch, b.syaw, roll, 'YXZ');
+      if (b.look?.t === 1) this.row(b, dt);
       this.wake.emit(b, dt);
       // the flag streams away from where the boat is heading, a little to the wind side
       b.flag.rotation.y = Math.PI / 2 + Math.sin(t * 0.7 + b.id) * 0.25;
     }
     this.wake.update(dt, t);
+  }
+  /**
+   * Rowing: a stroke clock (b.rowPhase) that runs while the boat moves or turns (backwards going astern), and the
+   * oars posed from it. Catch (phase 0): blades forward and in the water; drive (0–π): they sweep aft through the
+   * water; recovery (π–2π): lifted clear and swung forward again. The rower's pose (character.js ANIM.ROW) reads the
+   * same clock, so they stay in step on every screen.
+   */
+  row(b, dt) {
+    const hl = b.hull, effort = Math.min(1, (Math.abs(b.visFwd ?? 0) + Math.abs(b.visTurn ?? 0) * 1.2) / (hl.MAX_SPEED * 0.6));
+    const dir = (b.visFwd ?? 0) < -0.05 ? -1 : 1;
+    b.rowPhase = ((b.rowPhase ?? 0) + dt * Math.PI * 2 * (0.25 + 0.55 * effort) * dir * (effort > 0.04 ? 1 : 0) + Math.PI * 2) % (Math.PI * 2);
+    const c = Math.cos(b.rowPhase), sweep = OAR.SWEEP * c;
+    // the blade dips through the drive and lifts through the recovery (a smooth curve, deepest mid-drive)
+    const tilt = -((OAR.DIP + OAR.LIFT) / 2 + ((OAR.DIP - OAR.LIFT) / 2) * Math.sin(b.rowPhase));
+    for (const { pivot, o, sx } of b.oars) {
+      pivot.rotation.y = sx > 0 ? -sweep : Math.PI + sweep; // both blades forward at the catch
+      o.rotation.z = tilt;
+    }
   }
   /** The boat whose deck covers world (x, z), or null. */
   at(x, z) {

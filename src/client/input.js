@@ -14,6 +14,8 @@ export class Input {
     this.rotSteps = 0; // Q/E presses: +-1 per 45 degree step
     this.throttleSteps = 0; // W / S (and up / down arrow) presses, for a boat's throttle: +1 / -1 each
     this.hover = null; // [x, y] of the mouse over the canvas (CSS px), or null (for the tool outline)
+    this.pressed = false; // the primary button (or a finger) is down: held to charge a cast and to reel (fishing)
+    this.onUp = null; // called when it comes up again
 
     window.addEventListener('keydown', (e) => {
       if (e.target.closest?.('input, select, textarea')) return;
@@ -40,6 +42,7 @@ export class Input {
       canvas.setPointerCapture(e.pointerId);
       pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       if (pointers.size === 1) {
+        this.pressed = true;
         onPoint(...local(e), true);
         holdTimer = performance.now();
       } else if (pointers.size === 2) {
@@ -64,7 +67,10 @@ export class Input {
         onPoint(...local(e), false);
       }
     });
-    const end = (e) => { pointers.delete(e.pointerId); pinchDist = 0; };
+    const end = (e) => {
+      pointers.delete(e.pointerId); pinchDist = 0;
+      if (!pointers.size && this.pressed) { this.pressed = false; this.onUp?.(); }
+    };
     canvas.addEventListener('pointerup', end);
     canvas.addEventListener('pointercancel', end);
     canvas.addEventListener('pointerleave', () => { this.hover = null; });

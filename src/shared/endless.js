@@ -36,7 +36,7 @@ const ISLE_SCALE = 55, ISLE_LO = 0.62, ISLE_HI = 0.74;
 const RIVER_SCALE = 95, RIVER_WARP = 34;
 // Seabed: about level 3 (depth 0.3) at the coast, falling SEABED_SLOPE levels per unit of eRaw across the
 // shelf, then DROP_SLOPE more past SHELF_EDGE (the drop-off), down to SEABED_MIN
-const SEABED_SLOPE = 6, SHELF_EDGE = 0.35, DROP_SLOPE = 10, SEABED_MIN = -6;
+const COAST_STEEP = 2.2, SHORE_RISE = 0.7, BED_NOISE = 1.4, SEABED_TOP = 2.0, SEABED_SLOPE = 5, SHELF_EDGE = 0.35, DROP_SLOPE = 10, SEABED_MIN = -6;
 const VR = VILLAGE_RADIUS;
 const FLOWER_COLORS = [0xf2e15c, 0xf28cc0, 0xffffff, 0x9fb8ff, 0xff7a59];
 const TERRAIN_CACHE = 2500; // chunks of heights/kinds kept (cheap)
@@ -96,11 +96,17 @@ function rawCell(seed, ix, iz) {
   // A little noise makes banks, holes and shelves instead of smooth rings.
   if (h < SEA) {
     // a gentle shelf around the islands (reef flats), then a drop-off past SHELF_EDGE into deep water
-    const bed = 3.4 + eRaw * SEABED_SLOPE - Math.max(0, -eRaw - SHELF_EDGE) * DROP_SLOPE + (fbm(ix / 9, iz / 9, seed + 61, 2) - 0.5) * 1.8;
+    // Seaward (eRaw < 0) it falls from SEABED_TOP with distance from land. Landward of that, in the "almost land"
+    // band around every island (eRaw > 0 but too low to break the surface), it rises with the land's level lv, so
+    // only the last stretch before the beach is ankle-deep; it used to be ankle-deep across that whole band.
+    const rise = eRaw > 0 ? lv * SHORE_RISE : eRaw * SEABED_SLOPE;
+    const bed = SEABED_TOP + rise - Math.max(0, -eRaw - SHELF_EDGE) * DROP_SLOPE + (fbm(ix / 9, iz / 9, seed + 61, 2) - 0.5) * BED_NOISE;
     const bedLv = Math.max(SEABED_MIN, Math.min(3, Math.round(bed)));
-    // where the land formula only gives its floor (level 1, no land rising here) the shelf decides; right
-    // at the coast, where the land is already rising out of the water, keep the higher of the two
-    h = (Math.round(lv) <= 1 ? bedLv : Math.max(bedLv, Math.round(lv))) * STEP;
+    // where the land formula only gives its floor (level 1, no land rising here) the shelf decides; right at the
+    // coast, where the land is already rising out of the water, keep the higher of the two. The coast shelves off
+    // COAST_STEEP× steeper under the water than the land formula gives, so the shallows are a beach band.
+    const coastLv = Math.min(3, Math.round(3 - (3 - lv) * COAST_STEEP));
+    h = (Math.round(lv) <= 1 ? bedLv : Math.max(bedLv, coastLv)) * STEP;
   }
   if (chan !== null) h = Math.min(h, chan * STEP); // river water
   let k;
