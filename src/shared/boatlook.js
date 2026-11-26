@@ -33,7 +33,7 @@ export const NAME_MAX = 16;
 // Swappable parts (their models and names are in boat.js: CABINS, ROOFS, TOPS, MASTS) and deck props (PROPS on DECK_SLOTS)
 export const PART_KEYS = ['cabin', 'roof', 'top', 'mast'];
 export const PART_COUNTS = [3, 3, 3, 3];
-export const PROP_COUNT = 7; // including 0 = nothing
+export const PROP_COUNT = 8; // including 0 = nothing (7 = the cannon)
 export const DECK_SLOT_COUNT = 6;
 // The kinds of boat, by the item that launches each (boat.js HULLS has their shapes and handling). Swappable parts,
 // deck props and the decorative upgrades are for the cabin boat (0); the others have fixed models you can paint.

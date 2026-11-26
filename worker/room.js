@@ -234,7 +234,9 @@ export class Room extends Server {
         } else this.del('boats', id);
         // t: the driver's clock (ms); h, l: its heel and bow lift. Relayed so others replay the path and tilt smoothly.
         const ts = num(msg.t, 0, 1e13), heel = num(msg.h, -1, 1), lean = num(msg.l, -1, 1);
-        this.sendAll({ type: 'boat', by: player.id, id, x, z, yaw, on: !!msg.on, ...(ts !== null ? { t: ts } : {}), ...(heel !== null && lean !== null ? { h: heel, l: lean } : {}), ...(msg.on && msg.look ? { look: this.items.boats.get(id)[4] } : {}) }, conn);
+        // g, r: the driver's throttle notch (−1…3) and rudder (−1…1), so the pirate ship's sails furl, fill and swing alike
+        const gear = num(msg.g, -1, 3), rud = num(msg.r, -1, 1);
+        this.sendAll({ type: 'boat', by: player.id, id, x, z, yaw, on: !!msg.on, ...(ts !== null ? { t: ts } : {}), ...(heel !== null && lean !== null ? { h: heel, l: lean } : {}), ...(gear !== null ? { g: Math.round(gear), r: rud ?? 0 } : {}), ...(msg.on && msg.look ? { look: this.items.boats.get(id)[4] } : {}) }, conn);
         return;
       }
       // a boat was repainted, renamed or upgraded: keep its look and tell everyone else

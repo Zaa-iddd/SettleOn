@@ -9,7 +9,7 @@ import { WAVE_DIR, waveAt } from './waves.js';
 // how the swell handles a boat you sail (scaled by how rough the sea is there): top speed lost heading straight into
 // it / gained running with it, the push down a wave's slope (tiles/s² per unit of slope), and the drift (tiles/s)
 const WAVE_HEAD_SLOW = 0.15, WAVE_FOLLOW = 0.06, WAVE_PUSH = 9, WAVE_DRIFT = 0.22;
-import { Boats, BOAT, canStep, hullContact, THROTTLE, UPGRADES, upgradeFor, CABINS, ROOFS, TOPS, MASTS, PROPS, DECK_SLOTS, layoutOf, propAt, engineFactor, rudderFactor, walkable, nearestWalkable, onDeck, toLocal, toWorldXZ, deckY, hullClear, boatHit, HULLS, DECO_SCALE, deckReach, decoFits, decoFoot, hullOf, blueprintGeometry, blueprintLines, resizeLook, SIZE_LEN, SIZE_H, SPLIT } from './boat.js';
+import { Boats, BOAT, canStep, PIRATE_PARTS, PIRATE_PART_INDEX, slotsOf, upgradeOffered, hullContact, THROTTLE, UPGRADES, upgradeFor, CABINS, ROOFS, TOPS, MASTS, PROPS, DECK_SLOTS, layoutOf, propAt, engineFactor, rudderFactor, walkable, nearestWalkable, onDeck, toLocal, toWorldXZ, deckY, hullClear, boatHit, HULLS, DECO_SCALE, deckReach, decoFits, decoFoot, hullOf, blueprintGeometry, blueprintLines, resizeLook, SIZE_LEN, SIZE_H, SPLIT } from './boat.js';
 import { getSave, putSave, setMeta, getMeta } from './saves.js';
 import { Settings } from './settings.js';
 import { Inventory, ITEMS, HOTBAR, iconURL } from './inventory.js';
@@ -1086,11 +1086,15 @@ function screenDir(keys, yaw) {
 }
 function sendBoat(b, on = true, withLook = false) {
   if (game.mode !== 'multi') return;
-  send({ type: 'boat', id: b.id, x: +b.x.toFixed(2), z: +b.z.toFixed(2), yaw: +b.yaw.toFixed(3), on, t: Math.round(performance.now()), h: +(b.heel ?? 0).toFixed(3), l: +(b.lean ?? 0).toFixed(3), ...(withLook ? { look: b.look } : {}) });
+  send({ type: 'boat', id: b.id, x: +b.x.toFixed(2), z: +b.z.toFixed(2), yaw: +b.yaw.toFixed(3), on, t: Math.round(performance.now()), h: +(b.heel ?? 0).toFixed(3), l: +(b.lean ?? 0).toFixed(3), g: b.throttle ?? 0, r: +(b.rudder ?? 0).toFixed(2), ...(withLook ? { look: b.look } : {}) });
 }
-function onBoat({ id, x, z, yaw, on, look, t, h, l }) {
+function onBoat({ id, x, z, yaw, on, look, t, h, l, g, r }) {
   if (on) {
-    if (game.driving !== id) { game.boats.set(id, x, z, yaw, false, look); if (typeof t === 'number') game.boats.sample(id, x, z, yaw, t, typeof h === 'number' ? h : null, typeof l === 'number' ? l : null); }
+    if (game.driving !== id) {
+      const b = game.boats.set(id, x, z, yaw, false, look);
+      if (typeof t === 'number') game.boats.sample(id, x, z, yaw, t, typeof h === 'number' ? h : null, typeof l === 'number' ? l : null);
+      if (typeof g === 'number') { b.netThrottle = g; b.netRudder = typeof r === 'number' ? r : 0; } // (the pirate ship's sails follow them)
+    }
     return;
   }
   if (game.ride?.id === id) leaveBoat(); // it was taken out of the water under us
@@ -2532,7 +2536,7 @@ function renderBoatPanel() {
   if (document.activeElement !== $('bp-name')) $('bp-name').value = L.n;
   // upgrades: level pips, the next level's cost, and a Build button
   $('bp-ups').innerHTML = UPGRADES.map((u0, i) => {
-    if (b.look.t && !u0.all) return ''; // decorations are built for the cabin boat
+    if (!upgradeOffered(i, b.look.t)) return ''; // decorations are built for the cabin boat (the pirate ship has its own)
     const u = upgradeFor(i, b.look.t); // the rowboat's Engine is its Sail
     const lvl = L.u[i], max = UPGRADE_MAX[i], cost = u.cost[lvl];
     const pips = Array.from({ length: max }, (_, k) => `<i class="${k < lvl ? 'on' : ''}"></i>`).join('');
@@ -2617,7 +2621,9 @@ $('key-prompt').addEventListener('click', (e) => { e.currentTarget.blur(); boatK
 // with userData.part / slot). The part menu (#part-menu) shows the part's variants as little pictures (boaticons.js)
 // and, where the part takes one, a row of colours. Parts that are switched off (no cabin, no mast...) are reached
 // from the buttons in the edit banner.
-const PART_TITLES = { hull: 'Hull', cabin: 'Cabin', roof: 'Roof', top: 'On the roof', mast: 'Mast' };
+const PART_TITLES = { hull: 'Hull', cabin: 'Cabin', roof: 'Roof', top: 'On the roof', mast: 'Mast', figure: 'Figurehead', flag: 'Flag', lanterns: 'Stern lanterns' };
+const PIRATE_LABELS = { cabin: 'Castle', roof: 'Castle top', mast: 'Sails' }; // the edit banner's buttons on the pirate ship
+const PIRATE_ONLY = ['figure', 'flag', 'lanterns'];
 function setBoatEdit(on) {
   const b = boatPanelBoat();
   if (on && !b) return toast('Board your boat first');
@@ -2630,8 +2636,11 @@ function setBoatEdit(on) {
   }
   $('edit-banner').hidden = !on;
   if (on) for (const btn of $('edit-banner').querySelectorAll('button[data-part]')) { // only parts this kind of boat has
-    const part = btn.dataset.part;
-    btn.hidden = !!b.look.t && (part === 'top' || ((part === 'cabin' || part === 'roof' || part === 'mast') && !b.tm[part === 'mast' ? 'sail' : part].visible));
+    const part = btn.dataset.part, t = b.look.t;
+    btn.dataset.label ??= btn.textContent;
+    btn.textContent = (t === 2 && PIRATE_LABELS[part]) || btn.dataset.label; // the pirate ship's castle, castle top and sails
+    if (t === 2) btn.hidden = part === 'top';
+    else btn.hidden = PIRATE_ONLY.includes(part) || (!!t && (part === 'top' || ((part === 'cabin' || part === 'roof' || part === 'mast') && !b.tm[part === 'mast' ? 'sail' : part].visible)));
   }
   hidePartMenu();
   game.scene?.setHighlight(null, 0, 0);
@@ -2677,7 +2686,17 @@ function renderPartMenu() {
   let title = PART_TITLES[pm.part], styles = [], colour = null, colourLabel = 'Colour';
   const opt = (kind, names, cur) => names.map((n, v) => ({ v, name: n, icon: partIcon(pixel.renderer, kind, v, L), on: cur === v }));
   if (pm.part === 'hull') colour = 0;
-  else if (L.t) { // a fixed model: just its colours
+  else if (pm.part === 'slot') { // a deck spot: the props that fit there (the cabin boat's or the pirate ship's spots)
+    const sl = slotsOf(L)[pm.slot];
+    title = sl.name;
+    styles = PROPS.map((pr, t) => ({ v: t, name: pr.name, ok: pr.r <= sl.maxR })).filter((o) => o.ok)
+      .map((o) => ({ ...o, icon: partIcon(pixel.renderer, 'prop', o.v, L), on: propAt(L, pm.slot) === o.v }));
+  } else if (L.t === 2) { // the pirate ship: castle and castle-top colours, and its swappable parts
+    if (pm.part === 'cabin') { title = 'Castle'; colour = 1; }
+    else if (pm.part === 'roof') { title = 'Castle top'; colour = 2; }
+    else if (pm.part === 'mast') { title = 'Sails'; styles = opt('sails', PIRATE_PARTS.sails, L.p[1]); colour = 3; colourLabel = 'Sail colour'; }
+    else if (PIRATE_ONLY.includes(pm.part)) styles = opt(pm.part, PIRATE_PARTS[pm.part], L.p[PIRATE_PART_INDEX[pm.part]]);
+  } else if (L.t) { // a fixed model: just its colours
     title = `${HULLS[L.t].name}: ${PART_TITLES[pm.part].toLowerCase()}`;
     colour = pm.part === 'cabin' && b.tm.cabin.visible ? 1 : pm.part === 'roof' && b.tm.roof.visible ? 2 : pm.part === 'mast' && b.tm.sail.visible ? 3 : null;
     if (colour === 3) { title = `${HULLS[L.t].name}: sails`; colourLabel = 'Sail colour'; }
@@ -2692,12 +2711,6 @@ function renderPartMenu() {
     styles = lay.cab && lay.roof !== 2 ? opt('top', TOPS, L.p[2]) : [];
     if (!lay.cab) title += ' (needs a cabin)'; else if (lay.roof === 2) title += ' (not on a canvas roof)';
   } else if (pm.part === 'mast') { styles = opt('mast', MASTS, L.p[3]); colour = 3; colourLabel = 'Flag & sail colour'; }
-  else if (pm.part === 'slot') {
-    const sl = DECK_SLOTS[pm.slot];
-    title = sl.name;
-    styles = PROPS.map((pr, t) => ({ v: t, name: pr.name, ok: pr.r <= sl.maxR })).filter((o) => o.ok)
-      .map((o) => ({ ...o, icon: partIcon(pixel.renderer, 'prop', o.v, L), on: propAt(L, pm.slot) === o.v }));
-  }
   // the cabin boat's size: length and height steppers on the hull's menu
   const sizeRow = (i, label, value) => `<div class="pm-size"><span>${label}</span><button class="pm-step" data-sz="${i}" data-d="-1" tabindex="-1" ${L.s[i] > 0 ? '' : 'disabled'}>−</button><b>${value}</b><button class="pm-step" data-sz="${i}" data-d="1" tabindex="-1" ${L.s[i] < SIZE_COUNTS[i] - 1 ? '' : 'disabled'}>+</button></div>`;
   const size = pm.part === 'hull' && !L.t ? `<div class="pm-sub">Size</div>${sizeRow(0, 'Length', `${(6.3 + SIZE_LEN[L.s[0]]).toFixed(2).replace(/0$/, '')} tiles`)}${sizeRow(1, 'Height', L.s[1] ? `+${SIZE_H[L.s[1]].toFixed(1)}` : 'Standard')}` : '';
@@ -2720,7 +2733,11 @@ $('part-menu').addEventListener('click', (e) => {
   } else if (st) {
     const v = Number(st.dataset.v);
     if (pm.part === 'slot') { const d = b.look.d.slice(); d[pm.slot] = v; setBoatLook(b, { ...b.look, d }); }
-    else { const p = b.look.p.slice(); p[{ cabin: 0, roof: 1, top: 2, mast: 3 }[pm.part]] = v; setBoatLook(b, { ...b.look, p }); }
+    else {
+      const k = b.look.t === 2 ? PIRATE_PART_INDEX[pm.part] : { cabin: 0, roof: 1, top: 2, mast: 3 }[pm.part];
+      if (k === undefined) return;
+      const p = b.look.p.slice(); p[k] = v; setBoatLook(b, { ...b.look, p });
+    }
   } else if (sw) {
     const c = b.look.c.slice();
     c[Number($('part-menu').dataset.colour)] = Number(sw.dataset.c);
