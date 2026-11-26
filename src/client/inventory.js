@@ -343,6 +343,24 @@ const TOOL_ART = {
     '................',
     '................',
   ],
+  pirate: [ // a pirate ship: black flag, two masts of cream sails, a raised stern castle, gold trim and gunports
+    '.....hpwpp......',
+    '.....hpppp..h...',
+    '..ooooooo.ooooo.',
+    '..occccco.occco.',
+    '..occccco.occco.',
+    '..occccco.occco.',
+    '..ooooooo.ooooo.',
+    'oooo.h......h...',
+    'oRuo.h......h.oo',
+    'oRRooooooooooooo',
+    'oYYYYYYYYYYYYYo.',
+    '.oBpBBpBBpBBpBo.',
+    '.obbbbbbbbbbbo..',
+    '..ooooooooooo...',
+    '................',
+    '................',
+  ],
   rod: [ // a fishing rod with its line and a red-and-white bobber
     '..............oo',
     '.............oLo',
@@ -576,6 +594,7 @@ export const ITEMS = {
   rod: { name: 'Fishing Rod', stack: 1, tool: 'rod', art: TOOL_ART.rod }, // cast, wait for the bite, reel in (fishing.js)
   ...Object.fromEntries(FISH.map((f) => [f.id, { name: f.name, stack: 16, fish: true, food: f.food, art: fishArt(f) }])), // what you catch
   rowboat: { name: 'Rowboat', stack: 1, boat: true, hull: 1, tool: 'boat', art: TOOL_ART.rowboat }, // the other kinds of boat (boat.js HULLS)
+  pirate: { name: 'Pirate Ship', stack: 1, boat: true, hull: 2, tool: 'boat', art: TOOL_ART.pirate },
   pickaxe: { name: 'Pickaxe', stack: 1, tool: 'pickaxe', art: TOOL_ART.pickaxe },
   dirt: { name: 'Dirt', stack: 64, block: true, art: blockArt({ base: '#8d5c3a', light: '#a8724c', dark: '#6a4329', speck: '#6f472c', speck2: '#a97a52', top: ['#8fd04f', '#5fa32f'] }) },
   stone: { name: 'Stone', stack: 64, block: true, art: blockArt({ base: '#8e8c88', light: '#aaa8a3', dark: '#696763', speck: '#74726e', speck2: '#a3a19c' }) },
@@ -611,6 +630,7 @@ export const RECIPES = [
   { out: 'rod', n: 1, at: 'bench', cost: { stick: 3, leaves: 2, pebble: 1 } },
   { out: 'rowboat', n: 1, at: 'bench', cost: { wood: 6, stick: 4 } },
   { out: 'boat', n: 1, at: 'bench', cost: { wood: 12, log: 4, leaves: 4 } },
+  { out: 'pirate', n: 1, at: 'bench', cost: { wood: 24, log: 8, leaves: 16, stone: 6 } }, // stone for the cannons
 ];
 
 // draw each icon once into a data URL

@@ -12,7 +12,7 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { SEA, toCell } from '../shared/world.js';
 import { waveAt, waveEnv, waveClock } from './waves.js';
-import { seeThroughMaterial, furnitureGeometry, furnitureGlowGeometry } from './world3d.js'; // (a circular import, used only lazily)
+import { furnitureGeometry, furnitureGlowGeometry } from './world3d.js'; // (a circular import, used only lazily)
 import { BOAT_PALETTE, UPGRADE_KEYS, cleanLook, defaultLook } from '../shared/boatlook.js';
 
 export const BOAT = {
@@ -50,7 +50,44 @@ export const HULLS = [
   { key: 'rowboat', name: 'Rowboat', W: 0.52, BOW0: 0.15, TIP: 1.3, STERN: -1.1, DECK: 0.18, HELM: [0, -0.12], WHEEL: [0, 0.14, 0.28],
     MAX_SPEED: 3.4, TURN: 1.5, ACCEL: 1.4, GLIDE: 0.8, KEEL_DEPTH: 0.3,
     obs: { rects: [], circles: [] } },
+  // big and fast under full canvas, slow to turn and to get going, and it carries its way a long time. The wheel stands
+  // on top of the raised stern castle (the quarterdeck), up a flight of stairs; two masts, a hatch grating and a few
+  // barrels on the main deck. WHEEL's height is above the main deck (so it includes the castle).
+  { key: 'pirate', name: 'Pirate ship', W: 1.45, BOW0: 1.3, TIP: 4.7, STERN: -3.6, DECK: 0.6, HELM: [0, -2.85], WHEEL: [0, -2.42, 0.92 + 0.68],
+    MAX_SPEED: 7.4, TURN: 0.42, ACCEL: 0.6, GLIDE: 0.3, KEEL_DEPTH: 0.85 },
 ];
+// The pirate ship's layout (HULLS 2): the stern castle (from the stern to CASTLE, CASTLE_H tall; its top deck TOP above the
+// main deck), the stairs up to it (starboard, STAIR_X0..STAIR_X1 across, rising from CASTLE + STAIR_LEN aft to CASTLE),
+// the gunports along both sides, the masts ([bottom, top, width] of each square sail above the deck; nest = the crow's
+// nest) and barrels.
+const PIRATE = { CASTLE: -2.2, CASTLE_H: 0.85, TOP: 0.92, STAIR_X0: 0.55, STAIR_X1: 1.32, STAIR_LEN: 1.0, STEPS: 5, PORTS: [-1.2, -0.2, 0.8],
+  // courses wider than the hull (as on a real square-rigger), topsails, and topgallants up top
+  MASTS: [{ z: -0.25, top: 6.2, sails: [[1.15, 2.65, 3.5], [2.9, 4.25, 2.85], [4.45, 5.35, 2.0]], nest: 5.65 },
+    { z: 2.1, top: 5.4, sails: [[1.15, 2.45, 3.05], [2.7, 3.85, 2.5], [4.05, 4.85, 1.8]] }],
+  BARRELS: [[0.7, 2.75], [-0.62, 3.05]] };
+HULLS[2].obs = {
+  rects: [[-0.14, 0.14, -2.6, -2.4]], // the wheel post (on the quarterdeck)
+  circles: [...PIRATE.MASTS.map((m) => [0, m.z, 0.12]), ...PIRATE.BARRELS.map(([x, z]) => [x, z, 0.2])],
+};
+// Deck levels: how far above the main deck the floor is at (lx, lz). The quarterdeck is TOP up; the stairs ramp up to it.
+// A hull with a floor() has more than one level: riders can only walk where it changes gently (canStep), so the castle's
+// front wall blocks and the stairs are the way up. deckY adds it.
+HULLS[2].floor = (lx, lz) => {
+  const P = PIRATE;
+  if (lz <= P.CASTLE) return P.TOP;
+  if (lx >= P.STAIR_X0 && lz < P.CASTLE + P.STAIR_LEN) return P.TOP * (1 - (lz - P.CASTLE) / P.STAIR_LEN);
+  return 0;
+};
+/**
+ * Can a rider walk from (ox, oz) to (nx, nz) on hull hl's levels? The floor there (and a body's width further on, so you
+ * stop at a wall instead of leaning into it) must be within a step of the floor you're on.
+ */
+export function canStep(hl, ox, oz, nx, nz) {
+  if (!hl.floor) return true;
+  const f0 = hl.floor(ox, oz), d = Math.hypot(nx - ox, nz - oz) || 1;
+  const ax = nx + (nx - ox) / d * BOAT.RIDER_R, az = nz + (nz - oz) / d * BOAT.RIDER_R;
+  return Math.abs(hl.floor(nx, nz) - f0) < 0.3 && Math.abs(hl.floor(ax, az) - f0) < 0.3;
+}
 /** Half width of the hull at local z (negative outside the hull). The bow is an elliptical curve. */
 export function halfW(z, hl = HULLS[0]) {
   const { W, BOW0, TIP, STERN } = hl;
@@ -97,7 +134,7 @@ export const bobY = (b, t) => Math.sin(t * 1.25 + b.id % 7) * 0.045;
 // `lift`: how far the boat rides up over shallow sand so its keel clears the seabed (Boats.update); `wH`: how far
 // the swell lifts it (waves.js). (lx, lz): a spot on deck, which rises and falls as the boat pitches and rolls
 // (`dyx`, `dyz`: height change per unit across and along the deck, set in Boats.update).
-export const deckY = (b, t, lx = 0, lz = 0) => SEA + (b.hull ?? HULLS[0]).DECK + bobY(b, t) + (b.lift ?? 0) + (b.wH ?? 0) + lx * (b.dyx ?? 0) + lz * (b.dyz ?? 0);
+export const deckY = (b, t, lx = 0, lz = 0) => SEA + (b.hull ?? HULLS[0]).DECK + (b.hull?.floor?.(lx, lz) ?? 0) + bobY(b, t) + (b.lift ?? 0) + (b.wH ?? 0) + lx * (b.dyx ?? 0) + lz * (b.dyz ?? 0);
 
 // points around the hull that must all be over water (bow tip, sides, stern corners)
 HULLS[0].pts = [[0, 3.3], [0.75, 2.6], [-0.75, 2.6], [1.2, 1.0], [-1.2, 1.0], [1.2, -1.0], [-1.2, -1.0], [1.2, -3.0], [-1.2, -3.0], [0, -3.0]];
@@ -171,7 +208,7 @@ export function decoFoot(t, r, lx, lz) {
  */
 export function decoFits(t, r, lx, lz, obs, hl = HULLS[0]) {
   const [x0, x1, z0, z1] = decoFoot(t, r, lx, lz);
-  for (const x of [x0, x1]) for (const z of [z0, z1]) if (z < hl.STERN + 0.12 || Math.abs(x) > halfW(z, hl) - 0.12) return false;
+  for (const x of [x0, x1]) for (const z of [z0, z1]) if (z < hl.STERN + 0.12 || Math.abs(x) > halfW(z, hl) - 0.12 || (hl.floor && hl.floor(x, z) !== 0)) return false; // (main deck only)
   for (const [a0, a1, b0, b1] of obs.rects) if (x0 < a1 - 0.01 && x1 > a0 + 0.01 && z0 < b1 - 0.01 && z1 > b0 + 0.01) return false;
   for (const [cx, cz, cr] of obs.circles) { const dx = Math.max(x0 - cx, 0, cx - x1), dz = Math.max(z0 - cz, 0, cz - z1); if (dx * dx + dz * dz < (cr - 0.02) ** 2) return false; }
   return true;
@@ -805,7 +842,212 @@ const TYPE_BUILD = {
     }),
     paint: hullBand(hl),
   }),
+  // Pirate ship (after the user's galleon reference; original model): tall bulwarks, gold mouldings and a scroll vine
+  // along the hull band, gunports with red lids and cannon muzzles, a raised stern castle (cabin colour walls, roof colour
+  // top deck) with a gallery of gold-framed stern windows, a balustrade and two lanterns, two masts with square courses and
+  // topsails and a jib to the bowsprit (canvas colour), a crow's nest, rigging, a gold figurehead and a black flag.
+  2: (hl) => {
+    const P = PIRATE, dk = hl.DECK, W = hl.W, ST = hl.STERN, CZ = P.CASTLE, CH = P.CASTLE_H;
+    const cw = W - 0.03, zm = (CZ + ST) / 2, cd = CZ - ST, RIG = 0x4a3a2a, RED = 0x8a2a22;
+    const main = P.MASTS[0], BOOM_END = [0, dk + 1.18, hl.TIP + 1.85];
+    const nearPort = (z) => P.PORTS.some((p) => Math.abs(z - p) < 0.22) || Math.abs(z - ST * 0.55) < 0.4; // (and the name plate)
+    const cyl = (add, r0, r1, h, n, x, y, z, col) => add(new THREE.CylinderGeometry(r0, r1, h, n).translate(x, y, z), col);
+    const base = parts((p) => {
+      const { add, box, sheer } = p;
+      SH = hl;
+      hullShell(hl, p);
+      sheer(true);
+      add(extrudeY(ring(0, 0.08, hl), dk + 0.15, 0.17), C.PLANK2); // tall bulwarks above the rail
+      add(extrudeY(ring(0.005, 0.1, hl), dk + 0.32, 0.04), C.CAP);
+      add(extrudeY(ring(-0.03, 0.02, hl), dk - 0.25, 0.03), C.GOLD); // gold mouldings above and below the hull band
+      add(extrudeY(ring(-0.03, 0.02, hl), dk + 0.03, 0.025), C.GOLD);
+      for (let z = ST + 0.25; z < hl.BOW0; z += 0.17) { // a carved gold scroll vine along the band
+        if (nearPort(z)) continue;
+        for (const sx of [-1, 1]) box(0.014, 0.03, 0.15, C.GOLD, sx * (W + 0.024), dk - 0.1 + 0.035 * Math.sin(z * 11), z, 0, 0.5 * Math.cos(z * 11));
+      }
+      for (const z of P.PORTS) for (const sx of [-1, 1]) { // gunports: a gold frame, the dark port, a cannon muzzle and the lid propped open
+        const y = dk - 0.1;
+        box(0.02, 0.21, 0.25, C.GOLD, sx * (W + 0.03), y, z);
+        box(0.02, 0.15, 0.19, C.DARK, sx * (W + 0.04), y, z);
+        add(new THREE.CylinderGeometry(0.045, 0.055, 0.22, 8).rotateZ(Math.PI / 2).translate(sx * (W + 0.1), y - 0.01, z), C.IRON);
+        add(new THREE.TorusGeometry(0.05, 0.016, 4, 8).rotateY(Math.PI / 2).translate(sx * (W + 0.2), y - 0.01, z), C.IRON);
+        const a = sx * 1.1;
+        box(0.025, 0.18, 0.24, RED, sx * (W + 0.04) + 0.09 * Math.sin(a), y + 0.11 - 0.09 * Math.cos(a), z, 0, 0, a);
+      }
+      sheer(false);
+      SH = HULLS[0];
+      // the ship's wheel on its post, up on the quarterdeck (the castle's top)
+      const WZ = hl.WHEEL[1], wy = dk + hl.WHEEL[2], qd = dk + P.TOP;
+      box(0.12, wy - qd, 0.12, C.RAIL, 0, (qd + wy) / 2, WZ - 0.08);
+      box(0.2, 0.06, 0.2, C.DARK, 0, qd + 0.03, WZ - 0.08);
+      add(new THREE.TorusGeometry(0.3, 0.035, 4, 12).translate(0, wy, WZ), C.WHEEL);
+      for (let a = 0; a < 4; a++) box(0.74, 0.035, 0.035, C.WHEEL, 0, wy, WZ, 0, 0, a * Math.PI / 4);
+      box(0.08, 0.08, 0.08, C.GOLD, 0, wy, WZ + 0.02);
+      // the hatch grating amidships (you walk over it)
+      box(0.86, 0.06, 0.8, C.DARK, 0, dk + 0.03, 0.95);
+      for (let k = 0; k < 5; k++) { box(0.76, 0.03, 0.04, C.CAP, 0, dk + 0.075, 0.63 + k * 0.16); box(0.04, 0.03, 0.72, C.CAP, -0.32 + k * 0.16, dk + 0.075, 0.95); }
+      for (const [x, z] of P.BARRELS) { cyl(add, 0.2, 0.2, 0.42, 8, x, dk + 0.21, z, C.BARREL); for (const y of [0.08, 0.34]) cyl(add, 0.205, 0.205, 0.035, 8, x, dk + y, z, C.IRON); }
+      // masts: poles, yards, the top between course and topsail, shrouds down to the bulwarks, a crow's nest
+      for (const m of P.MASTS) {
+        cyl(add, 0.06, 0.095, m.top, 8, 0, dk + m.top / 2, m.z, C.POST);
+        box(0.16, 0.1, 0.16, C.GOLD, 0, dk + m.top + 0.03, m.z);
+        box(0.26, 0.12, 0.26, C.DARK, 0, dk + 0.06, m.z);
+        for (const [, y1, w] of m.sails) {
+          box(w + 0.22, 0.06, 0.06, C.POST, 0, dk + y1, m.z + 0.07);
+          for (const sx of [-1, 1]) box(0.05, 0.05, 0.05, C.IRON, sx * (w / 2 + 0.1), dk + y1, m.z + 0.07);
+        }
+        const t0 = m.sails[0][1];
+        box(0.6, 0.05, 0.46, C.DARK, 0, dk + t0 + 0.12, m.z);
+        for (const sx of [-1, 1]) for (const dz of [-0.42, -0.2, 0.02]) line3(add, [sx * 0.27, dk + t0 + 0.1, m.z], [sx * (halfW(m.z + dz, hl) - 0.05), dk + 0.35 + sheerAt(m.z + dz, hl), m.z + dz], 0.018, RIG);
+        if (m.nest) { cyl(add, 0.22, 0.17, 0.24, 10, 0, dk + m.nest, m.z, C.BARREL); cyl(add, 0.235, 0.235, 0.04, 10, 0, dk + m.nest + 0.12, m.z, C.IRON); }
+      }
+      box(0.03, 0.6, 0.03, C.POST, 0, dk + main.top + 0.3, main.z); // the flagpole on the main topmast
+      // bowsprit and jib boom, a gold figurehead under them, and the stays
+      line3(add, [0, dk + 0.3, hl.TIP - 0.4], [0, dk + 1.0, hl.TIP + 1.35], 0.11, C.POST);
+      line3(add, [0, dk + 1.0, hl.TIP + 1.35], BOOM_END, 0.06, C.POST);
+      box(0.1, 0.24, 0.2, C.GOLD, 0, dk + 0.16, hl.TIP + 0.1, 0, 0.45);
+      box(0.12, 0.1, 0.12, C.GOLD, 0, dk + 0.32, hl.TIP + 0.2);
+      const fore = P.MASTS[1];
+      line3(add, [0, dk + fore.top - 0.05, fore.z], BOOM_END, 0.018, RIG);
+      line3(add, [0, dk + main.top - 0.05, main.z], [0, dk + fore.sails[1][1] + 0.05, fore.z], 0.018, RIG);
+      for (const sx of [-1, 1]) line3(add, [0, dk + main.top - 0.15, main.z], [sx * (cw - 0.08), dk + CH + 0.28, ST + 0.2], 0.018, RIG);
+      // the stern castle's fixed trim: corner posts, gold-framed windows, the door, the stairs, a balustrade and lanterns
+      for (const sx of [-1, 1]) for (const z of [CZ - 0.03, ST + 0.03]) box(0.1, CH + 0.04, 0.1, C.RAIL, sx * cw, dk + CH / 2, z);
+      const win = (x, y, z, w, h, nz) => { box(w + 0.08, h + 0.08, 0.03, C.GOLD, x, y, z + nz * 0.015); box(w, h, 0.03, C.GLASS, x, y, z + nz * 0.025); box(0.02, h, 0.035, C.FRAME, x, y, z + nz * 0.03); box(w, 0.02, 0.035, C.FRAME, x, y, z + nz * 0.03); };
+      for (const x of [-1.05, 0.08]) win(x, dk + 0.5, CZ, 0.24, 0.24, 1); // (the stairs cover the starboard end)
+      const DX = -0.5;
+      box(0.46, 0.7, 0.03, C.GOLD, DX, dk + 0.35, CZ + 0.012);
+      box(0.38, 0.64, 0.03, C.DOOR, DX, dk + 0.32, CZ + 0.024);
+      box(0.05, 0.05, 0.03, C.GOLD, DX + 0.12, dk + 0.32, CZ + 0.045);
+      // the stairs: solid wooden steps up the starboard side to the quarterdeck, with a handrail on the open side
+      const sw = P.STAIR_X1 - P.STAIR_X0, sx0 = (P.STAIR_X0 + P.STAIR_X1) / 2, run = P.STAIR_LEN / P.STEPS, rise = P.TOP / P.STEPS;
+      for (let k = 0; k < P.STEPS; k++) {
+        const h = (k + 1) * rise, zc = CZ + P.STAIR_LEN - (k + 0.5) * run;
+        box(sw, h - 0.03, run, tone(k + 140, 0.78, 0.92) < 0.85 ? C.DECK2 : C.DECK, sx0, dk + (h - 0.03) / 2, zc);
+        box(sw + 0.02, 0.035, run + 0.03, C.CAP, sx0, dk + h - 0.017, zc + 0.015); // the tread's nosing
+      }
+      const rx = P.STAIR_X0 - 0.03, zBot = CZ + P.STAIR_LEN - 0.06;
+      for (const [z, y] of [[zBot, dk], [CZ + P.STAIR_LEN / 2, dk + P.TOP / 2], [CZ + 0.03, dk + P.TOP]]) box(0.05, 0.42, 0.05, C.RAIL, rx, y + 0.21, z);
+      box(0.08, 0.06, 0.08, C.GOLD, rx, dk + 0.45, zBot);
+      line3(add, [rx, dk + 0.43, zBot], [rx, dk + P.TOP + 0.43, CZ + 0.03], 0.045, C.RAIL);
+      for (const x of [-0.93, -0.31, 0.31, 0.93]) win(x, dk + 0.48, ST, 0.24, 0.28, -1); // the stern gallery
+      box(2 * cw, 0.06, 0.03, C.GOLD, 0, dk + CH - 0.12, ST - 0.015);
+      for (const sx of [-1, 1]) { box(0.03, 0.22, 0.22, C.GOLD, sx * (cw + 0.015), dk + 0.5, zm); box(0.035, 0.16, 0.16, C.GLASS, sx * (cw + 0.02), dk + 0.5, zm); }
+      const ty = dk + CH + 0.07, gap = P.STAIR_X0 - 0.05; // the front railing stops at the head of the stairs
+      for (let x = -cw + 0.05; x <= cw - 0.05 + 1e-6; x += (2 * cw - 0.1) / 10) for (const z of [CZ - 0.04, ST + 0.04]) if (z === ST + 0.04 || x < gap) box(0.04, 0.18, 0.04, C.CAP, x, ty + 0.09, z);
+      for (let z = ST + 0.04; z <= CZ - 0.04 + 1e-6; z += (cd - 0.08) / 4) for (const sx of [-1, 1]) box(0.04, 0.18, 0.04, C.CAP, sx * (cw - 0.04), ty + 0.09, z);
+      box(2 * cw, 0.04, 0.06, C.RAIL, 0, ty + 0.2, ST + 0.04);
+      box(gap + cw, 0.04, 0.06, C.RAIL, (gap - cw) / 2, ty + 0.2, CZ - 0.04);
+      box(0.07, 0.3, 0.07, C.RAIL, gap, ty + 0.13, CZ - 0.04); // a newel post with a gold cap at the stairhead
+      box(0.09, 0.06, 0.09, C.GOLD, gap, ty + 0.3, CZ - 0.04);
+      for (const sx of [-1, 1]) box(0.06, 0.04, cd, C.RAIL, sx * (cw - 0.04), ty + 0.2, zm);
+      for (const sx of [-1, 1]) {
+        const x = sx * (cw - 0.1), z = ST + 0.12, ly = ty + 0.5;
+        box(0.06, 0.45, 0.06, C.POST, x, ty + 0.22, z);
+        box(0.16, 0.03, 0.16, C.IRON, x, ly - 0.075, z);
+        box(0.14, 0.04, 0.14, C.IRON, x, ly + 0.08, z);
+        box(0.06, 0.04, 0.06, C.IRON, x, ly + 0.12, z);
+      }
+    });
+    // the castle's board walls (cabin colour) and its top deck with a cornice (roof colour)
+    const cabin = parts(({ box }) => {
+      const y = dk + CH / 2;
+      let n = 0;
+      for (let x = -cw; x < cw - 1e-6; x += 0.24, n++) { const w = Math.min(0.24, cw - x); box(w, CH, 0.06, tone(n + 40), x + w / 2, y, CZ - 0.03); box(w, CH, 0.06, tone(n + 70), x + w / 2, y, ST + 0.03); }
+      for (let z = ST; z < CZ - 1e-6; z += 0.24, n++) { const d = Math.min(0.24, CZ - z); for (const sx of [-1, 1]) box(0.06, CH, d, tone(n * 2 + sx + 90), sx * (cw - 0.03), y, z + d / 2); }
+    });
+    const roof = parts(({ box }) => {
+      box(2 * cw + 0.14, 0.07, cd + 0.12, 1.0, 0, dk + CH + 0.035, zm);
+      box(2 * cw + 0.2, 0.05, cd + 0.18, 0.76, 0, dk + CH - 0.02, zm);
+      for (let x = -cw + 0.24; x < cw - 0.1; x += 0.24) box(0.015, 0.006, cd + 0.1, 0.7, x, dk + CH + 0.072, zm);
+    });
+    const sail = pirateSailGeometry(hl);
+    // the black flag with a white skull and crossbones (hoist at x = 0, flying toward +x, so it ripples like the pennant)
+    const flag = parts(({ add, box }) => {
+      add(new THREE.BoxGeometry(0.72, 0.46, 0.02, 6, 1, 1).translate(0.36, 0, 0), 0x1e1e24); // subdivided so it ripples smoothly
+      box(0.17, 0.13, 0.034, C.WHITE, 0.38, 0.06, 0);
+      box(0.11, 0.05, 0.034, C.WHITE, 0.38, -0.025, 0);
+      for (const x of [0.34, 0.42]) box(0.045, 0.04, 0.04, 0x1e1e24, x, 0.065, 0);
+      for (const a of [-0.55, 0.55]) box(0.34, 0.04, 0.03, C.WHITE, 0.38, -0.13, 0, 0, 0, a);
+    });
+    return { base, paint: hullBand(hl), cabin, roof, sail, flag, flagAt: [0, dk + main.top + 0.36, main.z],
+      glow: [-1, 1].map((sx) => [sx * (cw - 0.1), dk + CH + 0.57, ST + 0.12]) };
+  },
 };
+// ---- the pirate ship's sails: one curved cloth per sail, billowing and rippling in the vertex shader ----
+// Each sail is a grid of triangles (flat-shaded, so the curve reads in pixel-art bands) built at full belly. Every vertex
+// carries aOff (how far the wind has pushed it out from the flat sail) and aW (how free it is: 0 where it's bent to the
+// yard, stay or clew, 1 in the middle of the cloth). sailMaterial() eases the belly with the boat's uFill and adds a
+// travelling ripple, stronger when the sail is slack.
+function pirateSailGeometry(hl) {
+  const P = PIRATE, dk = hl.DECK, pos = [], col = [], off = [], wgt = [];
+  const put = (vs, shade) => { for (const v of vs) { pos.push(v.p[0] + v.o[0], v.p[1] + v.o[1], v.p[2] + v.o[2]); off.push(...v.o); wgt.push(v.w); col.push(shade, shade, shade); } };
+  // square sails: courses and topsails, sewn from vertical cloths, bellying forward (+z), fullest low in the middle
+  for (const m of P.MASTS) for (const [y0, y1, w] of m.sails) {
+    const n = Math.round(w / 0.38), NX = n * 2, NY = 6, top = dk + y1 - 0.04, bot = dk + y0 + 0.03, full = 0.1 + 0.06 * w;
+    const V = (i, j) => {
+      const u = i / NX, v = j / NY, W = Math.pow(Math.sin(Math.PI * u), 0.8) * (v * (1.6 - v)) / 0.64;
+      return { p: [-w / 2 + u * w, top - v * (top - bot), m.z + 0.1], o: [0, 0.02 * W, full * W], w: W };
+    };
+    for (let i = 0; i < NX; i++) for (let j = 0; j < NY; j++) {
+      let s = Math.floor(i / 2) % 2 ? 0.91 : 1.0; // alternate cloths
+      if (j === NY - 1) s *= 0.88; // the foot band
+      else if (j === 1) s *= 0.96; // a reef band
+      if (i === 0 || i === NX - 1) s *= 0.93; // the leeches
+      const a = V(i, j), b = V(i + 1, j), c = V(i, j + 1), d = V(i + 1, j + 1);
+      put([a, c, b], s); put([b, c, d], s);
+    }
+  }
+  // the jib: a triangle from the fore mast (head) to the jib boom (tack) and the clew, bellying to starboard
+  const fore = P.MASTS[1], A = [0, dk + 3.7, fore.z + 0.12], T = [0, dk + 1.16, hl.TIP + 1.6], K = [0, dk + 1.0, fore.z + 1.0], N = 7;
+  const J = (i, j) => {
+    const b = i / N, c = j / N, a = Math.max(0, 1 - b - c), W = Math.min(1, 27 * a * b * c * 1.6) ** 0.7;
+    return { p: [0, 1, 2].map((k) => A[k] * a + T[k] * b + K[k] * c), o: [0.2 * W, 0, 0], w: W };
+  };
+  for (let i = 0; i < N; i++) for (let j = 0; j < N - i; j++) {
+    const s = Math.floor((i + j) / 2) % 2 ? 0.92 : 1.0;
+    put([J(i, j), J(i + 1, j), J(i, j + 1)], s);
+    if (i + j < N - 1) put([J(i + 1, j), J(i + 1, j + 1), J(i, j + 1)], s);
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+  g.setAttribute('aOff', new THREE.Float32BufferAttribute(off, 3));
+  g.setAttribute('aW', new THREE.Float32BufferAttribute(wgt, 1));
+  g.computeVertexNormals(); // non-indexed: one normal per triangle
+  g.userData.shared = true;
+  return g;
+}
+// The same cloth without the animation attributes, so it merges with plain geometry (the launch blueprint)
+const plainSail = (g) => shared('plainSail', () => { const p = new THREE.BufferGeometry(); for (const k of ['position', 'normal', 'color']) p.setAttribute(k, g.attributes[k]); p.userData.shared = true; return p; });
+const SAIL_GLSL = /* glsl */ `
+uniform float uTime, uFill;
+attribute vec3 aOff;
+attribute float aW;
+float sailPhase(vec3 p) { return uTime * 4.2 + p.y * 3.1 - p.x * 1.7 + p.z * 0.6; }
+float sailFlap(vec3 p) { float ph = sailPhase(p); return (sin(ph) * 0.6 + sin(ph * 1.9 + 1.3) * 0.4) * aW * (0.022 + 0.07 * (1.0 - clamp(uFill, 0.0, 1.0))); }
+vec3 sailDir() { return dot(aOff, aOff) > 1e-8 ? normalize(aOff) : vec3(0.0); }
+`;
+// patch a material's vertex shader: ease the belly to uFill and add the ripple (the normal tilts with it, so it shimmers)
+function sailPatch(m, uni) {
+  m.onBeforeCompile = (sh) => {
+    sh.uniforms.uTime = materials().flagTime;
+    sh.uniforms.uFill = uni;
+    sh.vertexShader = sh.vertexShader.replace('#include <common>', '#include <common>\n' + SAIL_GLSL)
+      .replace('#include <begin_vertex>', '#include <begin_vertex>\ntransformed += aOff * (uFill - 1.0) + sailDir() * sailFlap(position);');
+    if (sh.vertexShader.includes('#include <beginnormal_vertex>')) sh.vertexShader = sh.vertexShader.replace('#include <beginnormal_vertex>', '#include <beginnormal_vertex>\nobjectNormal = normalize(objectNormal + sailDir() * cos(sailPhase(position)) * 0.35 * aW);');
+  };
+  m.customProgramCacheKey = () => 'pirateSail' + m.type;
+  return m;
+}
+/** A boat's own sail material (its uFill is per boat), with a matching shadow so the shadow billows too. */
+function sailMaterial() {
+  const uFill = { value: 0.6 };
+  const m = sailPatch(new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide, flatShading: true }), uFill);
+  m.userData.fill = uFill;
+  m.userData.depth = sailPatch(new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking, side: THREE.DoubleSide }), uFill);
+  return m;
+}
 // A rowboat oar, pivoting at its rowlock (the origin): the handle inboard (−x), the loom out along +x, and the blade.
 // Boats.update sweeps it fore and aft and dips the blade through a stroke (b.rowPhase).
 const OAR = { PIVOT_Z: 0.15, PIVOT_Y: 0.19, SWEEP: 0.55, DIP: 0.42, LIFT: 0.18 };
@@ -925,7 +1167,8 @@ const iconBulbs = () => shared('icon.bulbs', () => {
 /** The picture of upgrade i at level lvl on a boat with look L. */
 function upgradePieces(i, L, lvl) {
   const key = UPGRADE_KEYS[i];
-  if (key === 'engine' && L.t === 1) { const rs = rowSailParts(Math.min(lvl, 3)); return [{ geo: rs.mast }, { geo: rs.sail, tint: 'canvas' }]; }
+  // the rowboat's Sail and the pirate ship's Rigging: a mast and sail
+  if (key === 'engine' && (L.t === 1 || L.t === 2)) { const rs = rowSailParts(Math.min(lvl, 3)); return [{ geo: rs.mast }, { geo: rs.sail, tint: 'canvas' }]; }
   if (key === 'engine' || key === 'rudder') return [{ geo: iconGeo(key, lvl) }];
   if (key === 'awning') return [{ geo: shared('awningPoles', awningPolesGeometry) }, { geo: shared('awningCanvas', awningCanvasGeometry), tint: 'canvas' }];
   if (key === 'lights') return [{ geo: iconGeo('lights') }, { geo: iconBulbs(), glow: true }];
@@ -985,7 +1228,7 @@ export function blueprintGeometry(look) {
   useDims(L);
   if (L.t) {
     const rs = L.t === 1 ? rowSailParts(L.u[0]) : null;
-    return shared(`bp${L.t}.${rs ? L.u[0] : 0}`, () => { const tg = typeGeometry(L.t), g = mergeGeometries([tg.base, tg.paint, tg.cabin, tg.roof, rs?.mast, rs?.sail].filter(Boolean)); g.userData.shared = true; return g; });
+    return shared(`bp${L.t}.${rs ? L.u[0] : 0}`, () => { const tg = typeGeometry(L.t), g = mergeGeometries([tg.base, tg.paint, tg.cabin, tg.roof, tg.sail && plainSail(tg.sail), rs?.mast, rs?.sail].filter(Boolean)); g.userData.shared = true; return g; });
   }
   const lay = layoutOf(L), { cab, wh, mast } = lay, ci = L.p[0];
   return shared(`bp0|${lay.key}|${lay.roof}|${lay.top}`, () => {
@@ -1136,17 +1379,17 @@ class Wake {
 
 // ---------- boats in a scene ----------
 const MAT = {};
-// the cabin, roof and cargo open up around you (like tree canopies) when they'd hide you; the deck and rail never do
-// (a program per deck height: a taller boat's deck is higher, and must stay solid)
-const see = (H = 0) => ({ minY: SEA + BOAT.DECK + H + 0.32 });
-const SEE = see();
-const baseMat = (H) => (MAT['base' + H] ??= H ? seeThroughMaterial({ vertexColors: true }, see(H)) : materials().base);
-const tintMats = (H) => ({ hull: seeThroughMaterial({ vertexColors: true }, see(H)), cabin: seeThroughMaterial({ vertexColors: true }, see(H)), roof: seeThroughMaterial({ vertexColors: true }, see(H)), canvas: seeThroughMaterial({ vertexColors: true, side: THREE.DoubleSide }, see(H)) });
+// boats don't open up around you (removed at the user's request): when the cabin hides you, the
+// character's silhouette shows through instead. Materials are still kept per deck height (H).
+const lambert = (p) => new THREE.MeshLambertMaterial(p);
+const baseMat = (H) => (MAT['base' + H] ??= H ? lambert({ vertexColors: true }) : materials().base);
+const tintMats = (H) => ({ hull: lambert({ vertexColors: true }), cabin: lambert({ vertexColors: true }), roof: lambert({ vertexColors: true }), canvas: lambert({ vertexColors: true, side: THREE.DoubleSide }) });
 const materials = () => {
-  MAT.base ??= seeThroughMaterial({ vertexColors: true }, SEE);
+  MAT.base ??= lambert({ vertexColors: true });
   MAT.glow ??= new THREE.MeshBasicMaterial({ color: new THREE.Color(1.9, 1.05, 0.32) });
   MAT.bulb ??= new THREE.MeshBasicMaterial({ color: new THREE.Color(2.2, 1.6, 0.7) });
   MAT.flagTime ??= { value: 0 };
+  MAT.jolly ??= flagMaterial(0xffffff); // the pirate flag keeps its own colours
   return MAT;
 };
 // a waving flag in a colour: the canvas colour of one boat
@@ -1165,7 +1408,9 @@ function flagMaterial(color) {
 export const UPGRADES = [
   { key: 'engine', all: true, name: 'Engine', desc: 'Top speed +15% per level, and a taller chimney', cost: [{ wood: 6, stone: 4 }, { wood: 10, log: 4, stone: 8 }, { wood: 16, log: 8, stone: 14 }],
     // on the rowboat the same slot is a sail (same speed bonus), bigger with each level (ROW_SAIL)
-    row: { name: 'Sail', desc: 'Top speed +15% per level, and a bigger sail', cost: [{ stick: 4, leaves: 10, wood: 2 }, { stick: 6, leaves: 16, wood: 4 }, { stick: 8, leaves: 24, wood: 6, log: 2 }] } },
+    row: { name: 'Sail', desc: 'Top speed +15% per level, and a bigger sail', cost: [{ stick: 4, leaves: 10, wood: 2 }, { stick: 6, leaves: 16, wood: 4 }, { stick: 8, leaves: 24, wood: 6, log: 2 }] },
+    // on the pirate ship it's the rigging: the same speed bonus, paid in rope (sticks and leaves) and timber
+    ship: { name: 'Rigging', desc: 'Top speed +15% per level: taut rigging and well-trimmed sails', cost: [{ stick: 8, leaves: 12, wood: 4 }, { stick: 12, leaves: 20, wood: 8, log: 2 }, { stick: 16, leaves: 30, wood: 12, log: 4 }] } },
   { key: 'rudder', all: true, name: 'Rudder', desc: 'Turns 20% quicker per level', cost: [{ wood: 4, pebble: 4 }, { wood: 8, stone: 4 }] },
   { key: 'awning', name: 'Canvas awning', desc: 'Shade over the foredeck, in your canvas colour', cost: [{ stick: 6, leaves: 12 }] },
   { key: 'lights', name: 'String lights', desc: 'Warm little lights strung around the deck', cost: [{ stick: 6, wood: 2, berries: 4 }] },
@@ -1181,7 +1426,7 @@ const UPGRADE_GEO = {
   gear: [['gear', gearGeometry]],
 };
 /** Upgrade i as it applies to a boat of kind t (the rowboat's Engine is its Sail). */
-export const upgradeFor = (i, t) => (t === 1 && UPGRADES[i].row ? { ...UPGRADES[i], ...UPGRADES[i].row } : UPGRADES[i]);
+export const upgradeFor = (i, t) => (t === 1 && UPGRADES[i].row ? { ...UPGRADES[i], ...UPGRADES[i].row } : t === 2 && UPGRADES[i].ship ? { ...UPGRADES[i], ...UPGRADES[i].ship } : UPGRADES[i]);
 export const engineFactor = (b) => 1 + 0.15 * (b?.look?.u[0] ?? 0);
 export const rudderFactor = (b) => 1 + 0.2 * (b?.look?.u[1] ?? 0);
 
@@ -1250,7 +1495,9 @@ export class Boats {
         return p;
       });
       // the fixed-model kinds of boat (HULLS 1: the rowboat): their geometry is chosen in setLook
-      const tm = { base: mesh(null, m.base), paint: mesh(null, tint.hull), cabin: mesh(null, tint.cabin), roof: mesh(null, tint.roof), glow: mesh(null, m.glow, false) };
+      const tm = { base: mesh(null, m.base), paint: mesh(null, tint.hull), cabin: mesh(null, tint.cabin), roof: mesh(null, tint.roof), glow: mesh(null, m.glow, false),
+        sail: mesh(null, sailMaterial()), flag: mesh(null, m.jolly) }; // (the pirate ship's animated sails and black flag)
+      tm.sail.customDepthMaterial = tm.sail.material.userData.depth;
       // a rowboat's oars: each on a pivot at its rowlock (sx +1 = starboard), posed every frame in update()
       const oars = [1, -1].map((sx) => {
         const pivot = new THREE.Group(), o = new THREE.Mesh(oarGeometry(), m.base);
@@ -1258,7 +1505,7 @@ export class Boats {
         pivot.add(o); pivot.visible = false; group.add(pivot);
         return { pivot, o, sx };
       });
-      tag(tm.base, 'hull'); tag(tm.paint, 'hull'); tag(tm.cabin, 'cabin'); tag(tm.roof, 'roof');
+      tag(tm.base, 'hull'); tag(tm.paint, 'hull'); tag(tm.cabin, 'cabin'); tag(tm.roof, 'roof'); tag(tm.sail, 'mast'); tag(tm.flag, 'mast');
       // the rowboat's sail upgrade: mast and rigging, and the sail in the canvas colour
       const rowSail = { mast: mesh(null, m.base), sail: mesh(null, tint.canvas) };
       tag(rowSail.mast, 'hull'); tag(rowSail.sail, 'hull');
@@ -1310,8 +1557,12 @@ export class Boats {
     b.tint.roof.color.setHex(col(2));
     b.tint.canvas.color.setHex(col(3));
     b.tint.flag.color.setHex(col(3));
+    const sm = b.tm.sail.material; // the pirate ship's sails: canvas colour, with a little light through the cloth
+    sm.color.setHex(col(3));
+    sm.emissive.setHex(col(3)).multiplyScalar(0.18);
     const hl = (b.hull = hullOf(L)), tg = L.t ? typeGeometry(L.t) : null;
     for (const [k, o] of Object.entries(b.tm)) { const g = tg?.[k]; if (g) o.geometry = g; o.visible = !!g; }
+    if (tg?.flagAt) b.tm.flag.position.set(...tg.flagAt);
     const rs = L.t === 1 ? rowSailParts(L.u[0]) : null;
     for (const [k, o] of Object.entries(b.rowSail)) { if (rs) o.geometry = rs[k]; o.visible = !!rs; }
     for (const oar of b.oars) { oar.pivot.visible = L.t === 1; oar.pivot.position.set(oar.sx * (hl.W - 0.02), hl.DECK + OAR.PIVOT_Y, OAR.PIVOT_Z); }
@@ -1428,7 +1679,10 @@ export class Boats {
   /** The mesh that stands for a part when it's outlined (hovered in edit mode). */
   partMesh(b, part, slot) {
     const sw = b.sw;
-    if (b.look?.t) return part === 'hull' ? b.tm.base : part === 'cabin' || part === 'roof' ? (b.tm[part].visible ? b.tm[part] : null) : null;
+    if (b.look?.t) {
+      const o = part === 'hull' ? b.tm.base : part === 'cabin' || part === 'roof' ? b.tm[part] : part === 'mast' ? b.tm.sail : null;
+      return o?.visible ? o : null;
+    }
     if (part === 'hull') return b.hullM;
     if (part === 'cabin') return sw.cabinWalls.visible ? sw.cabinWalls : null;
     if (part === 'roof') return sw.roof.visible ? sw.roof : null;
@@ -1442,6 +1696,8 @@ export class Boats {
     if (!b) return;
     this.scene.remove(b.group);
     for (const m of Object.values(b.tint)) m.dispose();
+    b.tm.sail.material.userData.depth.dispose();
+    b.tm.sail.material.dispose();
     b.plateMat.map?.dispose();
     b.plateMat.dispose();
     this.list.delete(id);
@@ -1532,6 +1788,12 @@ export class Boats {
       this.spray(b, dt, t);
       // the flag streams away from where the boat is heading, a little to the wind side
       b.flag.rotation.y = Math.PI / 2 + Math.sin(t * 0.7 + b.id) * 0.25;
+      b.tm.flag.rotation.y = b.flag.rotation.y;
+      if (b.tm.sail.visible) { // the sails fill as the ship picks up way (a light breeze keeps them half full at anchor)
+        const hl = b.hull ?? HULLS[0], want = 0.45 + 0.6 * Math.min(1, Math.abs(b.visFwd ?? 0) / hl.MAX_SPEED);
+        b.sailFill = (b.sailFill ?? want) + (want - (b.sailFill ?? want)) * (1 - Math.exp(-dt * 1.2));
+        b.tm.sail.material.userData.fill.value = b.sailFill;
+      }
     }
     this.wake.update(dt, t);
   }

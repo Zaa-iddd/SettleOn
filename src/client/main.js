@@ -9,8 +9,8 @@ import { WAVE_DIR, waveAt } from './waves.js';
 // how the swell handles a boat you sail (scaled by how rough the sea is there): top speed lost heading straight into
 // it / gained running with it, the push down a wave's slope (tiles/s² per unit of slope), and the drift (tiles/s)
 const WAVE_HEAD_SLOW = 0.15, WAVE_FOLLOW = 0.06, WAVE_PUSH = 9, WAVE_DRIFT = 0.22;
-import { Boats, BOAT, hullContact, THROTTLE, UPGRADES, upgradeFor, CABINS, ROOFS, TOPS, MASTS, PROPS, DECK_SLOTS, layoutOf, propAt, engineFactor, rudderFactor, walkable, nearestWalkable, onDeck, toLocal, toWorldXZ, deckY, hullClear, boatHit, HULLS, DECO_SCALE, deckReach, decoFits, decoFoot, hullOf, blueprintGeometry, blueprintLines, resizeLook, SIZE_LEN, SIZE_H, SPLIT } from './boat.js';
-import { getSave, putSave, setMeta } from './saves.js';
+import { Boats, BOAT, canStep, hullContact, THROTTLE, UPGRADES, upgradeFor, CABINS, ROOFS, TOPS, MASTS, PROPS, DECK_SLOTS, layoutOf, propAt, engineFactor, rudderFactor, walkable, nearestWalkable, onDeck, toLocal, toWorldXZ, deckY, hullClear, boatHit, HULLS, DECO_SCALE, deckReach, decoFits, decoFoot, hullOf, blueprintGeometry, blueprintLines, resizeLook, SIZE_LEN, SIZE_H, SPLIT } from './boat.js';
+import { getSave, putSave, setMeta, getMeta } from './saves.js';
 import { Settings } from './settings.js';
 import { Inventory, ITEMS, HOTBAR, iconURL } from './inventory.js';
 import { BOAT_PALETTE, PAINT_SLOTS, UPGRADE_MAX, NAME_MAX, PART_KEYS, cleanLook, HULL_ITEMS, MAX_DECO, SIZE_COUNTS } from '../shared/boatlook.js';
@@ -1421,9 +1421,11 @@ function walkOnDeck(dt, t, keys, yaw) {
     speed = keys.run ? 5.6 : 3.2;
     const nlx = r.lx + dlx * speed * dt, nlz = r.lz + dlz * speed * dt;
     let moved = true;
-    if (walkable(nlx, nlz, undefined, b.obs, b.hull)) { r.lx = nlx; r.lz = nlz; }
-    else if (walkable(nlx, r.lz, undefined, b.obs, b.hull) && Math.abs(dlx) > 0.2) r.lx = nlx;
-    else if (walkable(r.lx, nlz, undefined, b.obs, b.hull) && Math.abs(dlz) > 0.2) r.lz = nlz;
+    // somewhere to stand, and on a ship with levels (the pirate ship's quarterdeck) not up or down a wall: take the stairs
+    const can = (x, z) => walkable(x, z, undefined, b.obs, b.hull) && canStep(b.hull, r.lx, r.lz, x, z);
+    if (can(nlx, nlz)) { r.lx = nlx; r.lz = nlz; }
+    else if (can(nlx, r.lz) && Math.abs(dlx) > 0.2) r.lx = nlx;
+    else if (can(r.lx, nlz) && Math.abs(dlz) > 0.2) r.lz = nlz;
     else moved = false;
     c.ry = Math.atan2(dx, dz);
     anim = keys.run ? ANIM.RUN : ANIM.WALK;
@@ -2398,6 +2400,9 @@ function startSingle(map) {
   game.roster = new Map([[game.me, { id: game.me, name: myName(), color: PLAYER_COLORS[0] }]]);
   game.saveName = map?.name && getSave(map.name) ? map.name : null;
   game.stateKey = game.saveName ? `save:${game.saveName}` : null;
+  // the world's own game mode (worlds from before modes keep the browser-wide toggle)
+  const mode = game.saveName && getMeta(game.saveName).mode;
+  if (mode === 'creative' || mode === 'survival') settings.hold('creative', mode === 'creative', true);
   buildWorld(Math.floor(Math.random() * 2 ** 31), map);
   if (game.saveName) setMeta(game.saveName, { played: Date.now() });
   game.playStart = game.thumbAt = clock.elapsedTime;
@@ -2477,6 +2482,7 @@ function resetSession() {
   game.drops = null;
   if (socket) { game.leaving = true; socket.close(); socket = null; }
   game.saveName = null;
+  settings.release('creative'); // back to the browser-wide creative toggle
   if (inventory.isOpen) inventory.close();
   if (game.world) vitals.save();
   game.scene?.dispose();
@@ -2625,7 +2631,7 @@ function setBoatEdit(on) {
   $('edit-banner').hidden = !on;
   if (on) for (const btn of $('edit-banner').querySelectorAll('button[data-part]')) { // only parts this kind of boat has
     const part = btn.dataset.part;
-    btn.hidden = !!b.look.t && (part === 'top' || part === 'mast' || ((part === 'cabin' || part === 'roof') && !b.tm[part].visible));
+    btn.hidden = !!b.look.t && (part === 'top' || ((part === 'cabin' || part === 'roof' || part === 'mast') && !b.tm[part === 'mast' ? 'sail' : part].visible));
   }
   hidePartMenu();
   game.scene?.setHighlight(null, 0, 0);
@@ -2673,7 +2679,8 @@ function renderPartMenu() {
   if (pm.part === 'hull') colour = 0;
   else if (L.t) { // a fixed model: just its colours
     title = `${HULLS[L.t].name}: ${PART_TITLES[pm.part].toLowerCase()}`;
-    colour = pm.part === 'cabin' && b.tm.cabin.visible ? 1 : pm.part === 'roof' && b.tm.roof.visible ? 2 : null;
+    colour = pm.part === 'cabin' && b.tm.cabin.visible ? 1 : pm.part === 'roof' && b.tm.roof.visible ? 2 : pm.part === 'mast' && b.tm.sail.visible ? 3 : null;
+    if (colour === 3) { title = `${HULLS[L.t].name}: sails`; colourLabel = 'Sail colour'; }
     if (colour === null) title += ' (not on this boat)';
   } else if (pm.part === 'cabin') { styles = opt('cabin', CABINS.map((c) => c.name), L.p[0]); colour = lay.cab ? 1 : null; }
   else if (pm.part === 'roof') {
@@ -2757,15 +2764,20 @@ $('edit-banner').addEventListener('click', (e) => {
   track.addEventListener('pointerdown', (e) => { e.preventDefault(); track.setPointerCapture(e.pointerId); fromY(e); });
   track.addEventListener('pointermove', (e) => { if (track.hasPointerCapture(e.pointerId)) fromY(e); });
 }
-// creative mode (debug): every item in the inventory screen and free building, to try new things
-// instantly. The top-left button toggles it; `?creative` turns it on; remembered per browser.
+// creative mode: every item in the inventory screen and free building. A saved singleplayer world
+// has its own game mode (Survival / Creative, picked in Create world, kept in its details as
+// `mode`); while it's open the top-left button and the setting switch that world's mode.
+// Elsewhere (multiplayer, unsaved or older worlds) it's the browser-wide debug toggle:
+// `?creative` turns it on, remembered per browser.
 const CREATIVE_KEY = 'settleon.creative';
 function setCreative(on, quiet = false) {
   inventory.setCreative(on);
   $('creative-btn').classList.toggle('on', on);
   $('creative-btn').textContent = `Creative: ${on ? 'on' : 'off'}`;
-  try { localStorage.setItem(CREATIVE_KEY, on ? '1' : '0'); } catch {}
-  if (!quiet) toast(on ? 'Creative mode: every item in your inventory (I), building is free' : 'Creative mode off');
+  const worldMode = settings?.local.has('creative') && game.mode === 'single' && game.saveName;
+  if (worldMode) setMeta(game.saveName, { mode: on ? 'creative' : 'survival' });
+  else { try { localStorage.setItem(CREATIVE_KEY, on ? '1' : '0'); } catch {} }
+  if (!quiet) toast(on ? 'Creative mode: every item in your inventory (I), building is free' : (worldMode ? 'Survival mode' : 'Creative mode off'));
 }
 $('creative-btn').addEventListener('click', (e) => { e.currentTarget.blur(); settings.set('creative', !inventory.creative); });
 
@@ -2773,7 +2785,7 @@ $('creative-btn').addEventListener('click', (e) => { e.currentTarget.blur(); set
 const settings = (() => {
   let creative = new URLSearchParams(location.search).has('creative');
   try { creative ||= localStorage.getItem(CREATIVE_KEY) === '1'; } catch {}
-  return new Settings({ initial: { creative }, onChange: (k, v) => applySetting(k, v) });
+  return new Settings({ initial: { creative }, onChange: (k, v, quiet) => applySetting(k, v, quiet) });
 })();
 function applySetting(k, v, quiet = false) {
   if (k === 'creative') setCreative(v, quiet);

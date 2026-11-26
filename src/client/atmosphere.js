@@ -2,6 +2,7 @@
 //  - campfire embers: tiny glowing sparks that rise, wobble and fade (HDR, so they bloom)
 //  - campfire smoke: soft translucent puffs that swell and drift off with the wind
 //  - pollen: warm specks floating in the daylight around the player (fireflies take over at night)
+//  - ground mist: soft, low-lying fog patches that drift over the ground and water at night
 
 import * as THREE from 'three';
 import { groundAt, SEA } from '../shared/world.js';
@@ -9,6 +10,42 @@ import { WIND } from './ambient.js';
 
 export const EMBERS = 22, SMOKE = 12, POLLEN = 70;
 const POLLEN_RANGE = 9; // pollen stays within this many units of the player (wraps around)
+export const MIST = 56;
+const MIST_RANGE = 22; // mist patches stay within this many units of the player
+const MIST_OPACITY = 0.26; // most a single patch covers (they overlap, so it adds up in places)
+
+// A flat, soft-edged fog patch: a noisy blob stepped into a few bands (pixel-art look), unlit.
+// Per instance: aMist = (seed, fade).
+const MIST_VERT = `
+attribute vec2 aMist;
+varying vec2 vUv;
+varying vec2 vMist;
+void main() {
+  vUv = uv * 2.0 - 1.0;
+  vMist = aMist;
+  gl_Position = projectionMatrix * modelViewMatrix * instanceMatrix * vec4(position, 1.0);
+}`;
+const MIST_FRAG = `
+uniform vec3 uColor;
+uniform float uOpacity;
+uniform float uTime;
+varying vec2 vUv;
+varying vec2 vMist;
+float h21(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+float vnoise(vec2 p) {
+  vec2 i = floor(p), f = fract(p);
+  f = f * f * (3.0 - 2.0 * f);
+  return mix(mix(h21(i), h21(i + vec2(1, 0)), f.x), mix(h21(i + vec2(0, 1)), h21(i + vec2(1, 1)), f.x), f.y);
+}
+void main() {
+  vec2 p = vUv * 2.2 + vMist.x * 17.0;
+  float n = vnoise(p + vec2(uTime * 0.05, -uTime * 0.03)) * 0.65 + vnoise(p * 2.1 - uTime * 0.04) * 0.35;
+  float a = 1.0 - smoothstep(0.25, 1.0, length(vUv) + (n - 0.5) * 0.7);
+  a = floor(a * 4.0 + 0.5) / 4.0; // stepped bands, like the other soft effects
+  a *= uOpacity * vMist.y;
+  if (a < 0.004) discard;
+  gl_FragColor = vec4(uColor, a);
+}`;
 const tmpM = new THREE.Matrix4(), tmpQ = new THREE.Quaternion(), tmpE = new THREE.Euler(), tmpS = new THREE.Vector3(), tmpP = new THREE.Vector3();
 
 function pool(geo, mat, count) {
@@ -36,7 +73,20 @@ export class Atmosphere {
     this.embers = Array.from({ length: EMBERS }, (_, i) => this.newEmber({}, (i / EMBERS) * 2));
     this.smoke = Array.from({ length: SMOKE }, (_, i) => this.newSmoke({}, (i / SMOKE) * 4.2));
     this.pollen = null; // placed around the player on the first update
-    scene.add(this.emberMesh, this.smokeMesh, this.pollenMesh);
+    // ground mist: flat patches on the ground (horizontal planes, so terrain that rises through a
+    // patch cuts it along a level line, like fog pooling in the low ground)
+    const plane = new THREE.PlaneGeometry(1, 1).rotateX(-Math.PI / 2);
+    this.mistAttr = new THREE.InstancedBufferAttribute(new Float32Array(MIST * 2), 2).setUsage(THREE.DynamicDrawUsage);
+    plane.setAttribute('aMist', this.mistAttr);
+    this.mistMat = new THREE.ShaderMaterial({
+      vertexShader: MIST_VERT, fragmentShader: MIST_FRAG, transparent: true, depthWrite: false,
+      uniforms: { uColor: { value: new THREE.Color(0x6e7a96) }, uOpacity: { value: 0 }, uTime: { value: 0 } },
+    });
+    this.mistMesh = pool(plane, this.mistMat, MIST);
+    this.mistMesh.renderOrder = 7; // after the water, so it also lies over ponds and the sea
+    this.mistMesh.visible = false;
+    this.mist = null; // placed around the player the first time it's needed
+    scene.add(this.emberMesh, this.smokeMesh, this.pollenMesh, this.mistMesh);
   }
 
   newEmber(e, age = 0) {
@@ -70,8 +120,53 @@ export class Atmosphere {
     return p;
   }
 
-  /** `night` 0..1 (time of day, or deep forest): pollen fades out as it gets dark. */
-  update(t, dt, focus, night = 0) {
+  placeMist(m, focus, anywhere) {
+    // new patches drift in from upwind, except the first batch
+    const R = MIST_RANGE;
+    m.x = focus.x + (Math.random() * 2 - 1) * R;
+    m.z = focus.z + (Math.random() * 2 - 1) * R;
+    if (!anywhere) { m.x -= WIND.x * R * 0.7; m.z -= WIND.z * R * 0.7; }
+    m.y = Math.max(groundAt(this.world, m.x, m.z), SEA) + 0.12 + Math.random() * 0.45;
+    m.sx = 3 + Math.random() * 4;
+    m.sz = m.sx * (0.5 + Math.random() * 0.4);
+    m.rot = Math.random() * Math.PI;
+    m.spin = (Math.random() - 0.5) * 0.03;
+    m.sp = 0.18 + Math.random() * 0.2;
+    m.seed = Math.random();
+    m.life = anywhere ? Math.random() * 30 : 0;
+    m.dur = 30 + Math.random() * 25;
+    return m;
+  }
+
+  /** Ground mist, faded in by `amount` (0..1, the clock's night). */
+  updateMist(t, dt, focus, amount) {
+    this.mistMesh.visible = amount > 0.01;
+    if (!this.mistMesh.visible) return;
+    this.mistMat.uniforms.uOpacity.value = MIST_OPACITY * amount;
+    this.mistMat.uniforms.uTime.value = t;
+    this.mist ??= Array.from({ length: MIST }, () => this.placeMist({}, focus, true));
+    const R = MIST_RANGE, arr = this.mistAttr.array;
+    this.mist.forEach((m, i) => {
+      m.life += dt;
+      m.x += WIND.x * m.sp * dt; m.z += WIND.z * m.sp * dt;
+      if (m.life >= m.dur || Math.abs(m.x - focus.x) > R * 1.25 || Math.abs(m.z - focus.z) > R * 1.25) this.placeMist(m, focus, false);
+      const k = m.life / m.dur;
+      arr[i * 2] = m.seed;
+      arr[i * 2 + 1] = Math.min(1, k * 5, (1 - k) * 5); // fade in and out over a fifth of its life
+      tmpQ.setFromEuler(tmpE.set(0, m.rot + m.spin * m.life, 0));
+      const swell = 1 + 0.08 * Math.sin(t * 0.2 + m.seed * 20);
+      this.mistMesh.setMatrixAt(i, tmpM.compose(tmpP.set(m.x, m.y, m.z), tmpQ, tmpS.set(m.sx * swell, 1, m.sz * swell)));
+    });
+    this.mistMesh.instanceMatrix.needsUpdate = true;
+    this.mistAttr.needsUpdate = true;
+  }
+
+  /**
+   * `night` 0..1 (time of day, or deep forest): pollen fades out as it gets dark.
+   * `clockNight` 0..1 (time of day only): ground mist fades in.
+   */
+  update(t, dt, focus, night = 0, clockNight = 0) {
+    this.updateMist(t, dt, focus, clockNight);
     const c = this.camp;
     this.smokeMat.color.setScalar(0.1 + 0.42 * Math.max(0, 1 - night)); // pale grey by day, a faint dark wisp at night
     // embers: rise fast, slow down, wobble sideways, and shrink away

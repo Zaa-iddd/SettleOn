@@ -30,6 +30,10 @@ export class Settings {
       if (ch.some((c) => c[0] === val)) this.v[k] = val;
     }
     this.onClose = null;
+    // keys whose value currently belongs to the open world, not the browser (main.js: a world's
+    // game mode). set() still applies them but doesn't store them in settleon.settings.
+    this.local = new Set();
+    this.stored = { ...this.v };
     $('settings-done').onclick = () => this.close();
   }
 
@@ -53,8 +57,25 @@ export class Settings {
   /** Set an option from code (e.g. the HUD's Creative button); stores it and tells main.js. */
   set(key, value) {
     this.v[key] = value;
-    try { localStorage.setItem(KEY, JSON.stringify(this.v)); } catch {}
+    if (!this.local.has(key)) this.stored[key] = value;
+    try { localStorage.setItem(KEY, JSON.stringify(this.stored)); } catch {}
     this.onChange(key, value);
+    if (this.isOpen) this.render();
+  }
+
+  /** Hand a key to the open world (e.g. its game mode) with this value, until `release(key)`. */
+  hold(key, value, quiet = false) {
+    this.local.add(key);
+    this.v[key] = value;
+    this.onChange(key, value, quiet);
+    if (this.isOpen) this.render();
+  }
+
+  /** Give a held key back to the browser-wide value. */
+  release(key) {
+    if (!this.local.delete(key)) return;
+    this.v[key] = this.stored[key];
+    this.onChange(key, this.v[key], true);
     if (this.isOpen) this.render();
   }
 

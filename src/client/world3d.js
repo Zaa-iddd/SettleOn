@@ -17,17 +17,18 @@ export const SKY = 0xa3d2ec; // a soft, slightly hazy blue
 // Time of day (hours 0–24). Keyframes blend linearly and wrap at midnight:
 // sky/fog colour, sun (or moon) colour and total intensity, hemisphere fill, and a cloud tint.
 const DAY_KEYS = [
-  // nights are dark on purpose (the user wants players to rely on lanterns, the campfire and fireflies)
-  { h: 0,    sky: 0x05070f, sun: 0x8ea6ff, sunI: 0.22, hemiSky: 0x36426e, hemiGround: 0x0e0e16, hemiI: 0.26, cloud: 0x1e2238 },
-  { h: 4.5,  sky: 0x070a16, sun: 0x8ea6ff, sunI: 0.22, hemiSky: 0x36426e, hemiGround: 0x0e0e16, hemiI: 0.26, cloud: 0x1e2238 },
+  // nights are moody and gloomy: a muted slate-blue murk, dim but readable (lanterns, the campfire
+  // and fireflies still matter)
+  { h: 0,    sky: 0x141a28, sun: 0x9aa8c8, sunI: 0.5, hemiSky: 0x4a5470, hemiGround: 0x1c1c26, hemiI: 0.58, cloud: 0x2c3244 },
+  { h: 4.5,  sky: 0x181e2e, sun: 0x9aa8c8, sunI: 0.5, hemiSky: 0x4a5470, hemiGround: 0x1c1c26, hemiI: 0.58, cloud: 0x2c3244 },
   { h: 6,    sky: 0xeea283, sun: 0xffa466, sunI: 2.0, hemiSky: 0xc4b0dc, hemiGround: 0x6a5450, hemiI: 1.25, cloud: 0xffc4b0 },
   { h: 8,    sky: 0xa9d3ee, sun: 0xffd9a8, sunI: 2.4, hemiSky: 0xc6dcfa, hemiGround: 0x74624e, hemiI: 1.4, cloud: 0xfff6ea },
   { h: 10,   sky: SKY,      sun: 0xffe0b4, sunI: 2.75, hemiSky: 0xc6dcfa, hemiGround: 0x74624e, hemiI: 1.55, cloud: 0xfff6ea },
   { h: 15.5, sky: SKY,      sun: 0xffe0b4, sunI: 2.75, hemiSky: 0xc6dcfa, hemiGround: 0x74624e, hemiI: 1.55, cloud: 0xfff6ea },
   { h: 17.5, sky: 0xf2b486, sun: 0xffb46e, sunI: 2.5, hemiSky: 0xe6c2c0, hemiGround: 0x7a5a4c, hemiI: 1.6, cloud: 0xffd6b8 },
   { h: 19,   sky: 0xc8707c, sun: 0xff7a50, sunI: 1.6, hemiSky: 0xb48ab8, hemiGround: 0x54404a, hemiI: 1.35, cloud: 0xd88a96 },
-  { h: 20.5, sky: 0x0a0d1e, sun: 0x8ea6ff, sunI: 0.22, hemiSky: 0x36426e, hemiGround: 0x0e0e16, hemiI: 0.26, cloud: 0x1e2238 },
-  { h: 24,   sky: 0x05070f, sun: 0x8ea6ff, sunI: 0.22, hemiSky: 0x36426e, hemiGround: 0x0e0e16, hemiI: 0.26, cloud: 0x1e2238 },
+  { h: 20.5, sky: 0x1a2032, sun: 0x9aa8c8, sunI: 0.5, hemiSky: 0x4a5470, hemiGround: 0x1c1c26, hemiI: 0.58, cloud: 0x2c3244 },
+  { h: 24,   sky: 0x141a28, sun: 0x9aa8c8, sunI: 0.5, hemiSky: 0x4a5470, hemiGround: 0x1c1c26, hemiI: 0.58, cloud: 0x2c3244 },
 ];
 export const DEFAULT_TIME = 10;
 const DEEP_DIM = 0.45; // how much the sky fill dims when fully inside the deep forest
@@ -306,8 +307,10 @@ function terrainMaterial(heightTex) {
   const m = new THREE.MeshLambertMaterial();
   m.onBeforeCompile = (sh) => {
     sh.uniforms.uHeights = { value: heightTex };
+    Object.assign(sh.uniforms, seeThrough);
     sh.vertexShader = sh.vertexShader
       .replace('#include <common>', `#include <common>
+        ${SEE_VERT}
         attribute float aKind;
         attribute float aTop;
         attribute vec2 aUnder;
@@ -321,10 +324,25 @@ function terrainMaterial(heightTex) {
         vONormal = normal;
         vKind = aKind;
         vTop = aTop;
-        vUnder = aUnder;`);
+        vUnder = aUnder;`)
+      .replace('#include <project_vertex>', `#include <project_vertex>
+        vSeeDepth = -mvPosition.z;
+        {
+          // only columns that stand between the camera and the player (counting just the part
+          // above SEE_GROUND over the feet) open up
+          vec3 cb = (modelMatrix * instanceMatrix * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
+          vec3 ct = (modelMatrix * instanceMatrix * vec4(0.0, 1.0, 0.0, 1.0)).xyz;
+          cb.y = max(cb.y, uSeeFeet + ${SEE_GROUND.toFixed(2)});
+          vSeeOcc = ct.y > cb.y ? seeOcc(cb, ct, 0.71) : 0.0;
+        }`);
     sh.fragmentShader = sh.fragmentShader
       .replace('#include <common>', `#include <common>
-        ${TERRAIN_GLSL}`)
+        ${TERRAIN_GLSL}
+        ${SEE_GLSL}`)
+      .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>
+        // hills and cliffs in front of the player open up like the tree canopies, but only above
+        // SEE_GROUND over the player's feet, so the ground and small steps in front stay solid
+        if (vWPos.y > uSeeFeet + ${SEE_GROUND.toFixed(2)}) seeCut(vSeeDepth, 0.0);`)
       .replace('vec4 diffuseColor = vec4( diffuse, opacity );', 'vec4 diffuseColor = vec4( terrainColor(), opacity );');
   };
   return m;
@@ -417,24 +435,88 @@ function reedGeometry() {
 
 const TREE_VARIANTS = 4, PINE_VARIANTS = 3, REDWOOD_VARIANTS = 3;
 
-// Tree canopies open up around the local player: fragments of the tree that are in front of the
-// character and inside a circle around it on screen are discarded with a 4×4 Bayer dither at the
-// edge, so the player is visible through the leaves. Shadows use the depth material, so they stay.
+// Tree canopies (and terrain, see terrainMaterial) open up around the local player: fragments in
+// front of the character and inside a circle around it on screen are discarded with a 4×4 Bayer
+// dither at the edge, so the player is visible through them. Shadows use the depth material, so they stay.
+// see-through hole: radius in world units around the player, and its minimum share of the screen height;
+// past the hole, only SEE_RING of the pixels are kept, back to solid at SEE_FADE × the radius
+const SEE_R = 1.7, SEE_MIN = 0.11, SEE_RING = 0.5, SEE_FADE = 2.6;
+const SEE_GROUND = 0.6; // terrain opens up only this far above the player's feet
 const seeThrough = {
   uSeePos: { value: new THREE.Vector2(-9999, -9999) }, // player, in render-target pixels
   uSeeRadius: { value: 0 }, // in render-target pixels
   uSeeDepth: { value: 0 }, // player's distance along the view axis
+  uSeeFeet: { value: -999 }, // player's feet height (world y)
+  uSeeWorld: { value: new THREE.Vector3(0, -999, 0) }, // player's middle (world)
 };
-// `minY`: only fragments above this world height open up (a boat's cabin, not its deck)
-export function seeThroughMaterial(params, { minY = null } = {}) {
+// Only objects that actually stand between the camera and the player open up: each instance's
+// vertical axis (a capsule of radius r) is tested against the camera→player sight line in the
+// vertex shader, giving vSeeOcc (1 = in the way, fading to 0 over SEE_OCC_SOFT past r).
+const SEE_OCC_SOFT = 0.6;
+const SEE_TRUNK = 1.0; // share of a tree trunk's pixels kept in the see-through hole (1 = stays solid)
+const SEE_VERT = /* glsl */`
+  varying float vSeeDepth;
+  varying float vSeeOcc;
+  uniform vec3 uSeeWorld; uniform float uSeeFeet;
+  // shortest distance between segments p1-q1 and p2-q2
+  float seeSegDist(vec3 p1, vec3 q1, vec3 p2, vec3 q2) {
+    vec3 d1 = q1 - p1, d2 = q2 - p2, r = p1 - p2;
+    float a = max(dot(d1, d1), 1e-6), e = max(dot(d2, d2), 1e-6), f = dot(d2, r);
+    float c = dot(d1, r), b = dot(d1, d2), den = a * e - b * b;
+    float s = den > 1e-6 ? clamp((b * f - c * e) / den, 0.0, 1.0) : 0.0;
+    float t = (b * s + f) / e;
+    if (t < 0.0) { t = 0.0; s = clamp(-c / a, 0.0, 1.0); }
+    else if (t > 1.0) { t = 1.0; s = clamp((b - c) / a, 0.0, 1.0); }
+    return distance(p1 + d1 * s, p2 + d2 * t);
+  }
+  float seeOcc(vec3 base, vec3 top, float r) {
+    return 1.0 - smoothstep(r, r + ${SEE_OCC_SOFT.toFixed(2)}, seeSegDist(cameraPosition, uSeeWorld, base, top));
+  }`;
+// fragment-shader helpers: seeCut(view depth) discards the fragment if it's in the see-through hole
+const SEE_GLSL = /* glsl */`
+  varying float vSeeDepth;
+  varying float vSeeOcc;
+  uniform vec2 uSeePos; uniform float uSeeRadius; uniform float uSeeDepth; uniform float uSeeFeet;
+  float seeBayer(vec2 p) {
+    ivec2 i = ivec2(mod(p, 4.0));
+    float m[16] = float[16](0.,8.,2.,10.,12.,4.,14.,6.,3.,11.,1.,9.,15.,7.,13.,5.);
+    return (m[i.x + i.y * 4] + 0.5) / 16.0;
+  }
+  // minKeep: the least share of pixels kept (trunks stay solid)
+  void seeCut(float depth, float minKeep) {
+    if (uSeeRadius > 0.0 && depth < uSeeDepth - 0.25) {
+      float d = distance(gl_FragCoord.xy, uSeePos) / uSeeRadius;
+      // fully open in the middle, then a wide half see-through (dithered) ring that thickens
+      // back to solid by SEE_FADE radii, like the clouds' soft hole
+      float keep = min(smoothstep(0.6, 1.0, d), ${SEE_RING.toFixed(2)} + ${(1 - SEE_RING).toFixed(2)} * smoothstep(1.0, ${SEE_FADE.toFixed(2)}, d));
+      keep = 1.0 - vSeeOcc * (1.0 - keep); // only on objects in the way
+      keep = max(keep, minKeep);
+      if (keep < seeBayer(gl_FragCoord.xy)) discard;
+    }
+  }`;
+// `minY`: only fragments above this world height open up (a boat's cabin, not its deck).
+// `occ`: [y0, y1, r] = each instance's axis (local y) and radius (local units, scaled with it);
+// only instances whose axis passes near the camera→player line open up. Without it, always.
+export function seeThroughMaterial(params, { minY = null, occ = null } = {}) {
   const m = new THREE.MeshLambertMaterial(params);
-  const low = minY === null ? '' : ` && vSeeY > ${minY.toFixed(3)}`;
+  const low = minY === null ? '' : `if (vSeeY > ${minY.toFixed(3)}) `;
   m.onBeforeCompile = (sh) => {
     Object.assign(sh.uniforms, seeThrough);
     sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', '#include <common>\nvarying float vSeeDepth;\nvarying float vSeeY;')
+      .replace('#include <common>', `#include <common>
+        varying float vSeeY;
+        ${SEE_VERT}`)
       .replace('#include <project_vertex>', `#include <project_vertex>
         vSeeDepth = -mvPosition.z;
+        ${occ ? `#ifdef USE_INSTANCING
+          {
+            mat4 im = modelMatrix * instanceMatrix;
+            float sc = length(im[0].xyz);
+            vSeeOcc = seeOcc((im * vec4(0.0, ${occ[0].toFixed(2)}, 0.0, 1.0)).xyz, (im * vec4(0.0, ${occ[1].toFixed(2)}, 0.0, 1.0)).xyz, ${occ[2].toFixed(2)} * sc);
+          }
+        #else
+          vSeeOcc = 1.0;
+        #endif` : 'vSeeOcc = 1.0;'}
         #ifdef USE_INSTANCING
           vSeeY = (modelMatrix * instanceMatrix * vec4(transformed, 1.0)).y;
         #else
@@ -442,21 +524,21 @@ export function seeThroughMaterial(params, { minY = null } = {}) {
         #endif`);
     sh.fragmentShader = sh.fragmentShader
       .replace('#include <common>', `#include <common>
-        varying float vSeeDepth; varying float vSeeY;
-        uniform vec2 uSeePos; uniform float uSeeRadius; uniform float uSeeDepth;
-        float seeBayer(vec2 p) {
-          ivec2 i = ivec2(mod(p, 4.0));
-          float m[16] = float[16](0.,8.,2.,10.,12.,4.,14.,6.,3.,11.,1.,9.,15.,7.,13.,5.);
-          return (m[i.x + i.y * 4] + 0.5) / 16.0;
+        varying float vSeeY;
+        ${SEE_GLSL}`)
+      .replace('#include <color_pars_fragment>', `#include <color_pars_fragment>
+        // trees: bark (redder than green, unlike every leaf band) never fades away
+        float seeTrunk() {
+          #if defined( USE_COLOR )
+            return vColor.r > vColor.g ? ${SEE_TRUNK.toFixed(2)} : 0.0;
+          #else
+            return 0.0;
+          #endif
         }`)
       .replace('#include <clipping_planes_fragment>', `#include <clipping_planes_fragment>
-        if (uSeeRadius > 0.0 && vSeeDepth < uSeeDepth - 0.25${low}) {
-          float d = distance(gl_FragCoord.xy, uSeePos) / uSeeRadius;
-          float keep = smoothstep(0.55, 1.0, d); // fully open in the middle, dithered edge
-          if (keep < seeBayer(gl_FragCoord.xy)) discard;
-        }`);
+        ${low}seeCut(vSeeDepth, ${occ ? 'seeTrunk()' : '0.0'});`);
   };
-  m.customProgramCacheKey = () => `see:${minY}`; // a program per height limit
+  m.customProgramCacheKey = () => `see:${minY}:${occ}`; // a program per variant
   return m;
 }
 const _seeV = new THREE.Vector3();
@@ -477,7 +559,7 @@ const cutaway = { uCutPlayer: { value: new THREE.Vector3(0, -999, 0) }, uCutCam:
 // `above` over the player are cut, the allowed height rising by `slope` per unit outside the corridor
 export const CUTAWAY = { above: 2.4, width: 3.0, slope: 1.6, fade: 1.0 };
 function redwoodMaterial() {
-  const m = seeThroughMaterial({ vertexColors: true });
+  const m = seeThroughMaterial({ vertexColors: true }, { occ: [0, 11.6, 2.5] });
   const inner = m.onBeforeCompile;
   m.onBeforeCompile = (sh) => {
     inner(sh);
@@ -521,9 +603,13 @@ export function setSeeThrough(camera, pos, rtW, rtH) {
   if (depth <= camera.near) { seeThrough.uSeeRadius.value = 0; return; }
   _seeV.set(pos.x, pos.y + 0.5, pos.z).project(camera);
   seeThrough.uSeePos.value.set((_seeV.x * 0.5 + 0.5) * rtW, (_seeV.y * 0.5 + 0.5) * rtH);
-  // ~0.95 world units around the character, in render-target pixels
-  seeThrough.uSeeRadius.value = (0.95 / depth) * (rtH / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2)));
+  // SEE_R world units around the character, in render-target pixels, but never smaller than
+  // SEE_MIN of the screen height, so the hole stays big enough to spot you when zoomed out
+  const worldR = (SEE_R / depth) * (rtH / (2 * Math.tan(THREE.MathUtils.degToRad(camera.fov) / 2)));
+  seeThrough.uSeeRadius.value = Math.max(worldR, rtH * SEE_MIN);
   seeThrough.uSeeDepth.value = depth;
+  seeThrough.uSeeFeet.value = pos.y;
+  seeThrough.uSeeWorld.value.set(pos.x, pos.y + 0.5, pos.z);
   cutaway.uCutPlayer.value.set(pos.x, pos.y, pos.z);
   cutaway.uCutCam.value.set(camera.position.x, camera.position.z);
 }
@@ -985,7 +1071,7 @@ export class WorldScene {
     this.heightTex.needsUpdate = true;
     this.terrainMat = terrainMaterial(this.heightTex);
     this.mats = {
-      leaf: seeThroughMaterial({ vertexColors: true }),
+      leaf: seeThroughMaterial({ vertexColors: true }, { occ: [0.2, 2.13, 0.85] }), // leafy trees and pines
       // redwoods: cut away near the player (see redwoodMaterial)
       red: redwoodMaterial(),
       rock: mat(0x9a958a),
@@ -1912,11 +1998,17 @@ export class WorldScene {
     this.baseHemiI = hemiI * (1 - SHADOW_DEPTH); // dimmed further inside the deep forest (applyDarkness)
     lerpHex(this.cloudMat.uniforms.uTint.value, a.cloud, b.cloud, t);
 
-    // sun by day, moon by night (the moon's arc runs 18 → 6); both keep a minimum height so
-    // shadows never stretch across the whole island
-    const day = h >= 5.75 && h <= 18.25;
-    const ang = day ? ((h - 6) / 12) * Math.PI : ((((h - 18) + 24) % 24) / 12) * Math.PI;
-    const dir = new THREE.Vector3(Math.cos(ang), Math.max(day ? 0.18 : 0.35, Math.sin(ang)), 0.45).normalize();
+    // sun by day (east at 6 → west at 18), moon by night (its own arc, 18 → 6); both keep a minimum
+    // height so shadows never stretch across the whole island. The light swings from one to the
+    // other gradually through dusk (18:15–20:30) and dawn (4:30–5:55), while it's dim, instead of
+    // jumping from west to east at a fixed minute.
+    const PI = Math.PI, clamp = THREE.MathUtils.clamp, ss = THREE.MathUtils.smoothstep;
+    const sa = clamp(((h - 6) / 12) * PI, 0, PI);
+    const ma = clamp(((((h - 18) + 24) % 24) / 12) * PI, 0, PI);
+    const moonW = h >= 12 ? ss(h, 18.25, 20.5) : 1 - ss(h, 4.5, 5.9);
+    const dir = new THREE.Vector3(Math.cos(sa), Math.max(0.18, Math.sin(sa)), 0.45).normalize()
+      .lerp(new THREE.Vector3(Math.cos(ma), Math.max(0.35, Math.sin(ma)), 0.45).normalize(), moonW)
+      .normalize();
     this.sunOffset.copy(dir).multiplyScalar(70); // far enough above the tallest redwoods
     this.cloudMat.uniforms.uSun.value.copy(dir);
     const color = lerpHex(new THREE.Color(), a.sun, b.sun, t), total = num('sunI');
@@ -2044,7 +2136,7 @@ export class WorldScene {
     this.ambient.update(t, dt, focus);
     this.effects.update(dt);
     this.updateShakes(dt);
-    this.atmosphere.update(t, dt, focus, this.night ?? 0);
+    this.atmosphere.update(t, dt, focus, this.night ?? 0, this.timeNight ?? 0);
 
     // zoomed out: push fog back, widen shadow coverage, fade the cloud layer in
     this.scene.fog.near = 28 + camDist;

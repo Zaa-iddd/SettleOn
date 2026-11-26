@@ -8,6 +8,8 @@ import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { groundAt, rng, SEA, K, toCell } from '../shared/world.js';
 import { LEAFY_LIFT } from './trees3d.js';
+import { Deer } from './deer.js';
+import { waveAt, waveClock } from './waves.js';
 
 export const WIND = new THREE.Vector3(1, 0, 0.35).normalize(); // matches cloud drift
 
@@ -278,6 +280,9 @@ export class Ambient {
     this.flocks.forEach((f, fi) => { for (let k = 0; k < FLOCK_MAX; k++) this.birds.setColorAt(fi * FLOCK_MAX + k, c.setHex(f.color).multiplyScalar(0.92 + ((k * 37) % 10) / 60)); });
     scene.add(this.birds);
 
+    // ---------- deer: small herds grazing near the player (deer.js) ----------
+    this.deer = new Deer(world, scene);
+
     // ---------- fish: schools under the surface; a body plus a wagging tail ----------
     this.fish = [];
     for (let s = 0; s < SCHOOLS; s++) {
@@ -291,7 +296,8 @@ export class Ambient {
       new THREE.BoxGeometry(0.012, 0.04, 0.06).translate(0, 0.045, -0.01), // back fin
     ]);
     const fishTail = new THREE.BoxGeometry(0.014, 0.075, 0.07).translate(0, 0, -0.035); // hinged at the body
-    const swimMat = new THREE.MeshBasicMaterial({ transparent: true, opacity: FISH_OPACITY, depthWrite: false });
+    // lit (not MeshBasic), so they darken at night like everything else instead of glowing
+    const swimMat = new THREE.MeshLambertMaterial({ transparent: true, opacity: FISH_OPACITY, depthWrite: false });
     const jumpMat = new THREE.MeshLambertMaterial();
     this.fishBody = instancedMesh(fishBody, swimMat, this.fish.length);
     this.fishTail = instancedMesh(fishTail, swimMat, this.fish.length);
@@ -357,12 +363,15 @@ export class Ambient {
     // re-home one school at a time when it has fallen behind (or never found water)
     const s = Math.floor(t * 2) % SCHOOLS, lead = this.fish.find((f) => f.school === s);
     if (!lead.home || Math.hypot(lead.x - focus.x, lead.z - focus.z) > FISH_RANGE + 8) this.homeSchool(s, focus);
-    const surface = SEA + Math.sin(t * 0.8) * 0.03;
+    const T = waveClock();
     this.fish.forEach((f, i) => {
       tmpM.compose(tmpP.set(0, -100, 0), tmpQ.identity(), zero);
       for (const m of [this.fishBody, this.fishTail, this.jumpBody, this.jumpTail]) m.setMatrixAt(i, tmpM);
       if (!f.home) return;
-      let y = surface + 0.006, pitch = 0;
+      // ride the swell: the water mesh is lifted by the same waves, so a fixed height got covered by every crest
+      // (+ a small margin for the water mesh's linear interpolation between its 2-unit quads)
+      const surface = SEA + waveAt(this.world, f.x, f.z, T);
+      let y = surface + 0.035, pitch = 0;
       if (f.jump) { // a leap: an arc out of the water, nose up then down, splashing in and out
         const j = f.jump;
         j.t = Math.min(1, j.t + dt / j.dur);
@@ -419,7 +428,7 @@ export class Ambient {
         if (co.type !== 5 && Math.hypot(co.x - focus.x, co.z - focus.z) < REEF_RANGE) { sch.home = co; break; }
       }
     }
-    const top = SEA - 0.14, zero = tmpS.set(0, 0, 0);
+    const top = SEA - 0.14, zero = tmpS.set(0, 0, 0), T = waveClock();
     this.reefFish.forEach((f, i) => {
       const home = this.reefSchools[f.school].home;
       if (!home) {
@@ -431,7 +440,7 @@ export class Ambient {
       f.a += f.w * dt * (1 + 0.3 * Math.sin(t * 0.9 + f.ph)); // a little surge now and then
       const r = f.r + Math.sin(t * 0.6 + f.ph) * 0.15;
       const x = home.x + Math.cos(f.a) * r, z = home.z + Math.sin(f.a) * r;
-      const y = Math.min(top, Math.max(home.y + 0.12, home.y + f.yo + Math.sin(t * 1.4 + f.ph) * 0.05));
+      const y = Math.min(top + waveAt(this.world, x, z, T), Math.max(home.y + 0.12, home.y + f.yo + Math.sin(t * 1.4 + f.ph) * 0.05));
       const sg = Math.sign(f.w), yaw = Math.atan2(-Math.sin(f.a) * sg, Math.cos(f.a) * sg); // along the circle
       tmpQ.setFromEuler(tmpE.set(0, yaw + Math.sin(t * 8 + f.ph) * 0.1, 0, 'YXZ'));
       tmpM.compose(tmpP.set(x, y, z), tmpQ, tmpS.set(REEF_FISH_SIZE, REEF_FISH_SIZE, REEF_FISH_SIZE));
@@ -833,6 +842,7 @@ export class Ambient {
     if (this.frogs.length) this.updateFrogs(t, dt, focus);
     if (this.swarms.length || this.striders.length) this.updateInsects(t, focus);
     this.updateBirds(t, dt, focus);
+    this.deer.update(t, dt, focus);
     this.updateFish(t, dt, focus);
     this.updateReefFish(t, dt, focus);
   }

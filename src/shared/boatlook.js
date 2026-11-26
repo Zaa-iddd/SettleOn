@@ -37,7 +37,7 @@ export const PROP_COUNT = 7; // including 0 = nothing
 export const DECK_SLOT_COUNT = 6;
 // The kinds of boat, by the item that launches each (boat.js HULLS has their shapes and handling). Swappable parts,
 // deck props and the decorative upgrades are for the cabin boat (0); the others have fixed models you can paint.
-export const HULL_ITEMS = ['boat', 'rowboat'];
+export const HULL_ITEMS = ['boat', 'rowboat', 'pirate'];
 export const MAX_DECO = 24; // things on one boat's deck
 // The cabin boat's size: how many length and height levels there are (level 0 = the original boat)
 export const SIZE_COUNTS = [5, 4];

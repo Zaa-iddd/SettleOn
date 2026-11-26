@@ -5,7 +5,7 @@ import * as THREE from 'three';
 import { generateWorld } from '../shared/world.js';
 import { encodeMap, cloneBase, blankBase, endlessMap, decodeMap, decodeEndless, isEndlessMap } from '../shared/mapfile.js';
 import { WorldScene, setEditorView } from './world3d.js';
-import { saveNames, getSave, putSave, deleteSave, renameSave, freeName, getMeta, saveOptions, esc } from './saves.js';
+import { saveNames, getSave, putSave, deleteSave, renameSave, freeName, getMeta, setMeta, saveOptions, esc } from './saves.js';
 
 const $ = (id) => document.getElementById(id);
 const PANELS = ['menu-main', 'menu-single', 'menu-edit', 'menu-delete', 'menu-multi', 'menu-create'];
@@ -98,6 +98,7 @@ export class Menu {
       $('create-name').value = '';
       $('create-seed').value = String(Math.floor(Math.random() * 1e6));
       $('create-type').value = 'endless';
+      $('create-mode').value = 'survival';
     }
     if (id === 'menu-create') {
       this.prefill = false;
@@ -133,7 +134,7 @@ export class Menu {
           ${thumb}
           <span class="world-info">
             <span class="world-name">${esc(w.name)}</span>
-            <span class="world-sub">${type}${seed}</span>
+            <span class="world-sub">${type}${seed}${w.meta.mode === 'creative' ? ' · Creative' : w.meta.mode === 'survival' ? ' · Survival' : ''}</span>
             <span class="world-sub">${w.meta.played ? `Last played: ${when(w.meta.played)}` : 'Never played'}</span>
           </span>
         </button>`;
@@ -241,6 +242,7 @@ export class Menu {
       $('create-name').value = freeName(this.selected);
       $('create-seed').value = Number.isFinite(map.seed) ? String(map.seed) : String(Math.floor(Math.random() * 1e6));
       $('create-type').value = isEndlessMap(map) ? 'endless' : 'random';
+      $('create-mode').value = getMeta(this.selected).mode === 'creative' ? 'creative' : 'survival';
       this.go('menu-create');
     };
     $('world-import').onclick = () => $('world-file').click();
@@ -310,6 +312,7 @@ export class Menu {
         map = encodeMap(base, name);
       }
       if (!putSave(name, map)) this.toast("This browser won't store worlds here, so it can't be kept after you leave");
+      setMeta(name, { mode: $('create-mode').value === 'creative' ? 'creative' : 'survival' });
       this.selected = name;
       return { base, map, name };
     };
