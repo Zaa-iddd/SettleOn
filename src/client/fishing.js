@@ -7,15 +7,16 @@
 import * as THREE from 'three';
 import { SEA, toCell } from '../shared/world.js';
 
-// The fish (original species). str = how hard it fights (0..1); where they bite is in weightAt(); cm = size range.
+// The fish (original species). str = how hard it fights (0..1); where they bite is in weightAt(); cm = size range;
+// food = hunger points when eaten (vitals.js).
 export const FISH = [
-  { id: 'minnow', name: 'Minnow', str: 0.2, cm: [5, 9], col: ['#9fb8ac', '#e8f0ea', '#6f8a80'] },
-  { id: 'perch', name: 'Sunny Perch', str: 0.4, cm: [14, 28], col: ['#e0a83a', '#f6e8aa', '#b8602e'] },
-  { id: 'koi', name: 'Spotted Koi', str: 0.5, cm: [25, 50], col: ['#f08a3c', '#fff4e2', '#c8462a'] },
-  { id: 'mackerel', name: 'Silver Mackerel', str: 0.62, cm: [24, 40], col: ['#5a86b0', '#e2eaf2', '#2f4f70'] },
-  { id: 'tang', name: 'Reef Tang', str: 0.55, cm: [15, 30], col: ['#3a7ad8', '#ffd84a', '#1e3f8a'] },
-  { id: 'carp', name: 'Golden Carp', str: 0.8, cm: [35, 70], col: ['#f0c030', '#fff0a0', '#b8820e'] },
-  { id: 'moonfish', name: 'Moonfish', str: 1.0, cm: [50, 95], col: ['#b8c4ff', '#f0f2ff', '#7a6ad0'] },
+  { id: 'minnow', name: 'Minnow', str: 0.2, cm: [5, 9], food: 2, col: ['#9fb8ac', '#e8f0ea', '#6f8a80'] },
+  { id: 'perch', name: 'Sunny Perch', str: 0.4, cm: [14, 28], food: 3, col: ['#e0a83a', '#f6e8aa', '#b8602e'] },
+  { id: 'koi', name: 'Spotted Koi', str: 0.5, cm: [25, 50], food: 4, col: ['#f08a3c', '#fff4e2', '#c8462a'] },
+  { id: 'mackerel', name: 'Silver Mackerel', str: 0.62, cm: [24, 40], food: 5, col: ['#5a86b0', '#e2eaf2', '#2f4f70'] },
+  { id: 'tang', name: 'Reef Tang', str: 0.55, cm: [15, 30], food: 3, col: ['#3a7ad8', '#ffd84a', '#1e3f8a'] },
+  { id: 'carp', name: 'Golden Carp', str: 0.8, cm: [35, 70], food: 6, col: ['#f0c030', '#fff0a0', '#b8820e'] },
+  { id: 'moonfish', name: 'Moonfish', str: 1.0, cm: [50, 95], food: 8, col: ['#b8c4ff', '#f0f2ff', '#7a6ad0'] },
 ];
 // how likely each fish is to bite at a water depth (and at night, for the moonfish)
 function weightAt(f, depth, night, perfect) {

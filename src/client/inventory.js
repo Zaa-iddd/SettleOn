@@ -145,6 +145,24 @@ const TOOL_ART = {
     '...oooooooooo...',
     '................',
   ],
+  planks: [ // three boards stacked, seen from above the front-left corner, with dark gaps between them
+    '................',
+    '................',
+    '...oooooooooooo.',
+    '..oRLRRRLRRRRRo.',
+    '.olRRlRRLRRRRho.',
+    'oRRRRRRRRRRRhBo.',
+    'oLLLLLLLLLLoBoo.',
+    'orrrlrrrrlrooho.',
+    'oooooooooooohBo.',
+    'oLLLLLLLLLLoBoo.',
+    'orrrrrlrlrrooho.',
+    'oooooooooooohBo.',
+    'oLLLLLLLLLLoBo..',
+    'orrlrrrrrrroo...',
+    'oooooooooooo....',
+    '................',
+  ],
   log: [ // a log lying down: bark, with the pale ringed cut end on the right
     '................',
     '................',
@@ -539,7 +557,7 @@ export const ITEMS = {
   leaves: { name: 'Leaves', stack: 64, art: TOOL_ART.leaves }, // from broken bushes and chopped trees
   backpack: { name: 'Backpack', stack: 1, unlock: true, art: TOOL_ART.backpack }, // never held: crafting it unlocks the bag
   pebble: { name: 'Pebble', stack: 64, art: TOOL_ART.pebble }, // picked up off the ground; for crafting tools
-  berries: { name: 'Berries', stack: 64, art: TOOL_ART.berries }, // found on bushes
+  berries: { name: 'Berries', stack: 64, food: 2, art: TOOL_ART.berries }, // found on bushes; edible (food = hunger points, vitals.js)
   // furniture (`furn`): placed on a tile, see FURNITURE in world.js and main.js
   workbench: { name: 'Workbench', stack: 16, place: true, furn: true, art: TOOL_ART.workbench },
   chair: { name: 'Chair', stack: 16, place: true, furn: true, art: TOOL_ART.chair },
@@ -556,13 +574,13 @@ export const ITEMS = {
   pennant: { name: 'Pennant Pole', stack: 16, place: true, furn: true, art: TOOL_ART.pennant },
   boat: { name: 'Cabin Boat', stack: 1, boat: true, hull: 0, art: TOOL_ART.boat }, // launched on open water (main.js), then walked on and sailed
   rod: { name: 'Fishing Rod', stack: 1, tool: 'rod', art: TOOL_ART.rod }, // cast, wait for the bite, reel in (fishing.js)
-  ...Object.fromEntries(FISH.map((f) => [f.id, { name: f.name, stack: 16, fish: true, art: fishArt(f) }])), // what you catch
+  ...Object.fromEntries(FISH.map((f) => [f.id, { name: f.name, stack: 16, fish: true, food: f.food, art: fishArt(f) }])), // what you catch
   rowboat: { name: 'Rowboat', stack: 1, boat: true, hull: 1, tool: 'boat', art: TOOL_ART.rowboat }, // the other kinds of boat (boat.js HULLS)
   pickaxe: { name: 'Pickaxe', stack: 1, tool: 'pickaxe', art: TOOL_ART.pickaxe },
   dirt: { name: 'Dirt', stack: 64, block: true, art: blockArt({ base: '#8d5c3a', light: '#a8724c', dark: '#6a4329', speck: '#6f472c', speck2: '#a97a52', top: ['#8fd04f', '#5fa32f'] }) },
   stone: { name: 'Stone', stack: 64, block: true, art: blockArt({ base: '#8e8c88', light: '#aaa8a3', dark: '#696763', speck: '#74726e', speck2: '#a3a19c' }) },
   sand: { name: 'Sand', stack: 64, block: true, art: blockArt({ base: '#e2cf92', light: '#f1e2ae', dark: '#bfa86c', speck: '#cdb877', speck2: '#f3e6bd' }) },
-  wood: { name: 'Wood', stack: 64, block: true, art: blockArt({ base: '#a87444', light: '#c08a56', dark: '#7a4f2c', speck: '#9a683c', speck2: '#b47e4c', planks: true }) },
+  wood: { name: 'Planks', stack: 64, art: TOOL_ART.planks }, // a crafting material (not placeable); the id stays 'wood' for old saves
   wall: { name: 'Wooden Wall', stack: 64, block: true, art: wallArt() },
   snow: { name: 'Snow', stack: 64, block: true, art: blockArt({ base: '#eef3f8', light: '#ffffff', dark: '#c3cfdc', speck: '#d7e1ec', speck2: '#ffffff' }) },
 };
@@ -616,6 +634,8 @@ export function iconURL(id) {
 }
 
 const $ = (id) => document.getElementById(id);
+
+const CRAFT_KEY = 'settleon.craftpanel'; // is the crafting panel shown beside the inventory ('0' = hidden)
 
 export class Inventory {
   /** @param {{ onChange?: () => void, toast?: (s: string) => void }} opts */
@@ -724,15 +744,31 @@ export class Inventory {
     this.station = station;
     this.isOpen = true;
     $('inventory').hidden = false;
-    $('inv-title').textContent = station === 'bench' ? 'Workbench' : 'Inventory';
+    document.body.classList.add('inv-open'); // the regular hotbar, bars and held name step aside
+    $('inv-craft-title').textContent = station === 'bench' ? 'Workbench' : 'Crafting';
+    this.showCraft(station === 'bench' || this.craftOpen()); // a workbench always shows its recipes
     this.buildCraft();
     this.render();
+  }
+  // the crafting panel beside the inventory: toggled with its tab or C, remembered per browser
+  craftOpen() { try { return localStorage.getItem(CRAFT_KEY) !== '0'; } catch { return true; } }
+  showCraft(on) {
+    $('inv-craft-box').hidden = !on;
+    $('inv-craft-toggle').classList.toggle('on', on);
+    $('inv-craft-toggle').textContent = on ? 'Hide crafting · C' : 'Crafting · C';
+  }
+  toggleCraft() {
+    if (!this.isOpen) return;
+    const on = $('inv-craft-box').hidden;
+    this.showCraft(on);
+    try { localStorage.setItem(CRAFT_KEY, on ? '1' : '0'); } catch {}
   }
   close() {
     if (this.cursor) { const left = this.add(this.cursor.id, this.cursor.count); this.cursor = left ? { ...this.cursor, count: left } : null; }
     this.cursor = null;
     this.isOpen = false;
     $('inventory').hidden = true;
+    document.body.classList.remove('inv-open');
     this.render();
   }
 
@@ -857,10 +893,12 @@ export class Inventory {
       el.addEventListener('mouseenter', () => { $('inv-name').textContent = it.name; });
       all.append(el);
     }
+    $('inv-craft-toggle').addEventListener('click', (e) => { e.currentTarget.blur(); this.toggleCraft(); });
+    $('inv-close').addEventListener('click', (e) => { e.currentTarget.blur(); this.close(); });
     $('inv-clear').addEventListener('click', (e) => { e.currentTarget.blur(); this.slots.fill(null); this.cursor = null; this.render(); this.onChange(); });
   }
 
-  // crafting: one button per recipe on offer (ingredients → result), lit when you have the ingredients
+  // crafting: one row per recipe on offer (the result, its name, and the ingredients), lit when you have them
   buildCraft() {
     const craft = $('inv-craft');
     craft.innerHTML = '';
@@ -870,8 +908,9 @@ export class Inventory {
       el.className = 'craft';
       el.tabIndex = -1;
       el.dataset.recipe = i;
-      const cost = Object.entries(r.cost).map(([id, n]) => `<span class="craft-item"><img alt="" src="${iconURL(id)}" /><b>${n}</b></span>`).join('');
-      el.innerHTML = `${cost}<span class="craft-arrow">→</span><span class="craft-item"><img alt="" src="${iconURL(r.out)}" /><b>${r.n > 1 ? r.n : ''}</b></span>`;
+      const cost = Object.entries(r.cost).map(([id, n]) => `<span class="craft-item" data-id="${id}" data-n="${n}" title="${ITEMS[id].name}"><img alt="" src="${iconURL(id)}" /><b>${n}</b></span>`).join('');
+      el.innerHTML = `<span class="craft-out"><img alt="" src="${iconURL(r.out)}" /><b>${r.n > 1 ? r.n : ''}</b></span>`
+        + `<span class="craft-info"><span class="craft-name">${ITEMS[r.out].name}</span><span class="craft-cost">${cost}</span></span>`;
       el.title = `${ITEMS[r.out].name}${r.n > 1 ? ` ×${r.n}` : ''}: ${Object.entries(r.cost).map(([id, n]) => `${n} ${ITEMS[id].name}`).join(', ')}`;
       el.addEventListener('click', () => { el.blur(); this.craft(r); });
       el.addEventListener('mouseenter', () => { $('inv-name').textContent = el.title; });
@@ -896,6 +935,7 @@ export class Inventory {
       el.classList.toggle('selected', i === this.selected && i < HOTBAR);
     });
     document.querySelectorAll('#inv-craft .craft').forEach((el) => el.classList.toggle('off', !this.canCraft(RECIPES[Number(el.dataset.recipe)])));
+    document.querySelectorAll('#inv-craft .craft-item').forEach((el) => el.classList.toggle('short', this.count(el.dataset.id) < Number(el.dataset.n)));
     paint($('inv-cursor'), this.cursor);
     $('inv-cursor').hidden = !this.cursor;
   }

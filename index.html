@@ -47,7 +47,11 @@
         <input id="time-slider" type="range" min="0" max="24" step="0.25" value="10" tabindex="-1" aria-label="Time of day" />
       </div>
       <!-- the boat panel (main.js renderBoatPanel): name, paint and upgrades, opened with B (or the Boat button) aboard -->
-      <button id="boat-btn" class="btn" tabindex="-1" title="Your boat: name, paint and upgrades (B)" hidden>Boat</button>
+      <div id="boat-btns">
+        <button id="boat-btn" class="btn" tabindex="-1" title="Your boat: name, parts, paint and upgrades (B)" hidden>Customize boat</button>
+      </div>
+      <!-- the key prompt above the hotbar (main.js updatePrompt): "F Board boat", "F Take the helm"... click it to do it -->
+      <button id="key-prompt" tabindex="-1" hidden><kbd id="kp-key">F</kbd><span id="kp-text"></span></button>
       <div id="boat-panel" hidden>
         <div class="panel bp-panel">
           <h2>Your boat</h2>
@@ -77,7 +81,7 @@
           <dt>Click workbench</dt><dd>craft</dd>
           <dt>Right-click bush</dt><dd>search for berries</dd>
           <dt>1–8</dt><dd>pick a hotbar slot</dd>
-          <dt>I / Tab</dt><dd>inventory</dd>
+          <dt>I / Tab</dt><dd>inventory (C: show / hide crafting)</dd>
           <dt>R</dt><dd>rotate</dd>
           <dt>Q / E</dt><dd>turn camera</dd>
           <dt>Wheel</dt><dd>zoom</dd>
@@ -85,9 +89,10 @@
           <dt>B</dt><dd>your boat: name, upgrades, customize</dd>
           <dt>Aboard</dt><dd>click the deck with furniture or a decoration to place it (R turns it) · axe to take it back</dd>
           <dt>At the helm</dt><dd>W/S throttle · A/D steer</dd>
+          <dt>Berries / fish</dt><dd>click to eat (fills hunger; a full belly heals)</dd>
           <dt>Fishing Rod</dt><dd>hold on water, let go to cast · click when it bites · hold to reel, keep the needle in the green</dd>
           <dt>H</dt><dd>show / hide this</dd>
-          <dt>Esc</dt><dd>menu</dd>
+          <dt>Esc</dt><dd>pause menu</dd>
         </dl>
       </div>
       <!-- fishing (see src/client/fishing.js): the cast power meter, the bite "!", the reel bars and the catch -->
@@ -100,25 +105,42 @@
       </div>
       <div id="fish-get" hidden><div class="fg-title">FISH GET!</div><img alt="" /><div class="fg-name"></div></div>
       <!-- inventory (see src/client/inventory.js): hotbar, held item name, and the inventory screen -->
+      <!-- health and hunger (see src/client/vitals.js) -->
+      <div id="vitals"></div>
+      <div id="hurt"></div>
       <div id="held-name"></div>
       <div id="hotbar" class="panel"></div>
       <div id="ctx-menu" class="panel" hidden><button class="btn" tabindex="-1">Search for berries</button></div>
       <div id="inventory" hidden>
-        <div class="panel inv-panel">
-          <h2 id="inv-title">Inventory</h2>
-          <div id="inv-bag" class="inv-grid"></div>
-          <p id="inv-nobag">No bag yet: only your hotbar can hold things. Craft a <b>Backpack</b> from sticks and leaves for 24 more slots.</p>
-          <div id="inv-bar" class="inv-grid"></div>
-          <h3>Crafting</h3>
-          <div id="inv-craft"></div>
-          <p id="inv-craft-hint"></p>
-          <div id="inv-creative" hidden>
-            <h3>Creative: every item <span class="muted">(click: a stack · right-click: one)</span></h3>
-            <div id="inv-all"></div>
-            <button id="inv-clear" class="btn" tabindex="-1">Empty inventory</button>
+        <div class="inv-layout">
+          <div class="inv-main">
+            <section class="inv-box">
+              <div class="inv-tab" id="inv-title">Backpack</div>
+              <div id="inv-bag" class="inv-grid"></div>
+              <p id="inv-nobag">No bag yet: only your hotbar can hold things. Craft a <b>Backpack</b> from sticks and leaves for 24 more slots.</p>
+            </section>
+            <section class="inv-box inv-barbox">
+              <div class="inv-tab">Hotbar</div>
+              <div id="inv-bar" class="inv-grid"></div>
+            </section>
+            <section class="inv-box" id="inv-creative" hidden>
+              <div class="inv-tab">Creative</div>
+              <p class="inv-note">Every item · click: a stack · right-click: one</p>
+              <div id="inv-all"></div>
+              <button id="inv-clear" class="inv-btn" tabindex="-1">Empty inventory</button>
+            </section>
+            <div id="inv-name"></div>
+            <div class="inv-foot">
+              <button id="inv-craft-toggle" class="inv-tab inv-tabbtn" tabindex="-1">Crafting · C</button>
+              <button id="inv-close" class="inv-tab inv-tabbtn" tabindex="-1">ESC · Close</button>
+            </div>
+            <p class="inv-help">Click: pick up / put down · Right-click: half / one · Shift-click: move</p>
           </div>
-          <div id="inv-name"></div>
-          <p class="inv-help">Click: pick up / put down · Right-click: half / one · Shift-click: move · click a recipe to craft · <b>I</b> or <b>Esc</b> to close</p>
+          <section class="inv-box inv-craftbox" id="inv-craft-box">
+            <div class="inv-tab" id="inv-craft-title">Crafting</div>
+            <div id="inv-craft"></div>
+            <p id="inv-craft-hint"></p>
+          </section>
         </div>
         <div id="inv-cursor" hidden><img alt="" draggable="false" /><span class="count"></span></div>
       </div>
@@ -133,16 +155,45 @@
         <div id="menu-main" class="panel menu-panel">
           <button id="menu-play-single" class="btn big">Play singleplayer</button>
           <button id="menu-play-multi" class="btn big">Multiplayer</button>
-          <button id="menu-create-world" class="btn big">Create world</button>
           <button id="menu-editor" class="btn big">Map editor</button>
+          <button id="menu-settings" class="btn big">Settings</button>
         </div>
-        <div id="menu-single" class="panel menu-panel" hidden>
-          <h2>Singleplayer</h2>
-          <label>World <select id="single-world"></select></label>
-          <p class="menu-note">Same seed, same world. Worlds you create or save in the map editor show up here.</p>
+        <!-- world select (Minecraft-style): saved worlds with a picture, type, seed and last played -->
+        <div id="menu-single" class="panel menu-panel wide" hidden>
+          <h2>Select world</h2>
+          <div id="world-list" role="listbox" aria-label="Saved worlds"></div>
+          <div class="menu-grid two">
+            <button id="world-play" class="btn accent">Play Selected World</button>
+            <button id="world-create" class="btn">Create New World</button>
+          </div>
+          <div class="menu-grid four">
+            <button id="world-edit" class="btn">Edit</button>
+            <button id="world-delete" class="btn">Delete</button>
+            <button id="world-recreate" class="btn" title="A new world with the same seed and type">Re-Create</button>
+            <button id="world-import" class="btn" title="Open a .settleon.json world file">Import</button>
+          </div>
+          <input id="world-file" type="file" accept=".json,application/json" hidden />
           <div class="menu-row">
-            <button class="btn" data-go="menu-main">Back</button>
-            <button id="single-play" class="btn accent">Play</button>
+            <button class="btn" data-go="menu-main">Cancel</button>
+          </div>
+        </div>
+        <div id="menu-edit" class="panel menu-panel" hidden>
+          <h2>Edit world</h2>
+          <label>World name <input id="edit-name" maxlength="40" /></label>
+          <p id="edit-info" class="menu-note"></p>
+          <button id="edit-editor" class="btn">Open in map editor</button>
+          <button id="edit-export" class="btn">Export world file</button>
+          <div class="menu-row">
+            <button class="btn" data-go="menu-single">Cancel</button>
+            <button id="edit-save" class="btn accent">Save</button>
+          </div>
+        </div>
+        <div id="menu-delete" class="panel menu-panel" hidden>
+          <h2>Delete world?</h2>
+          <p id="delete-text" class="menu-text"></p>
+          <div class="menu-row">
+            <button class="btn" data-go="menu-single">Cancel</button>
+            <button id="delete-yes" class="btn danger">Delete</button>
           </div>
         </div>
         <div id="menu-multi" class="panel menu-panel" hidden>
@@ -172,10 +223,30 @@
             </select>
           </label>
           <div class="menu-row">
-            <button class="btn" data-go="menu-main">Back</button>
+            <button class="btn" data-go="menu-single">Back</button>
             <button id="create-edit" class="btn">Create &amp; edit</button>
             <button id="create-play" class="btn accent">Create &amp; play</button>
           </div>
+        </div>
+      </div>
+
+      <!-- pause menu (Esc in game, main.js togglePause): singleplayer pauses, multiplayer keeps running -->
+      <div id="pause" hidden>
+        <div id="pause-box" class="panel menu-panel">
+          <h2 id="pause-title">Game paused</h2>
+          <p id="pause-note" class="menu-note"></p>
+          <button id="pause-resume" class="btn big accent">Back to Game</button>
+          <button id="pause-settings" class="btn big">Settings</button>
+          <button id="pause-quit" class="btn big">Save &amp; Quit to Title</button>
+        </div>
+      </div>
+
+      <!-- settings (settings.js), from the title screen or the pause menu -->
+      <div id="settings" hidden>
+        <div class="panel menu-panel">
+          <h2>Settings</h2>
+          <div id="settings-list" class="menu-grid two"></div>
+          <div class="menu-row"><button id="settings-done" class="btn accent">Done</button></div>
         </div>
       </div>
 

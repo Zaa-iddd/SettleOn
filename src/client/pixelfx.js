@@ -7,7 +7,8 @@
 
 import * as THREE from 'three';
 
-export const PIXEL_SIZE = () => (window.innerWidth < 700 ? 2 : 3); // CSS px per art pixel, close up
+export const PIXEL_PREF = { size: 0 }; // the Pixel size setting: 0 = auto, otherwise CSS px per art pixel
+export const PIXEL_SIZE = () => PIXEL_PREF.size || (window.innerWidth < 700 ? 2 : 3); // CSS px per art pixel, close up
 // zooming out shrinks the art pixels: camera distances where the pixel size drops by 1, then 2
 export const ZOOM_PIXEL_STEPS = [15]; // one step only: full resolution (size 1) zoomed out was too slow
 const ZOOM_HYSTERESIS = 1; // distance slack so the size doesn't flicker at a boundary

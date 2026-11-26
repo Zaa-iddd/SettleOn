@@ -27,11 +27,14 @@ function noneIcon() {
   return cv.toDataURL();
 }
 
-/** A data URL picture of variant `v` of a part `kind` ('hull', 'cabin', 'roof', 'top', 'mast', 'prop') on a boat with look `look`. */
-export function partIcon(renderer, kind, v, look) {
-  const key = `${kind}:${v}:${look.p.join()}:${look.c.join()}`;
+/**
+ * A data URL picture of variant `v` of a part `kind` ('hull', 'cabin', 'roof', 'top', 'mast', 'prop', or 'upgrade':
+ * v = the upgrade's index, at level `lvl`) on a boat with look `look`.
+ */
+export function partIcon(renderer, kind, v, look, lvl = 1) {
+  const key = `${kind}:${v}:${look.p.join()}:${look.c.join()}:${look.t}:${lvl}`;
   if (cache.has(key)) return cache.get(key);
-  const pieces = partPieces(kind, v, look);
+  const pieces = partPieces(kind, v, look, lvl);
   if (!pieces.length) { const u = noneIcon(); cache.set(key, u); return u; }
   if (!scene) {
     scene = new THREE.Scene();

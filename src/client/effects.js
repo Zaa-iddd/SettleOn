@@ -6,7 +6,8 @@
 import * as THREE from 'three';
 import { K, SEA } from '../shared/world.js';
 
-const MAX_PUFFS = 96, MAX_CHIPS = 48, MAX_DROPS = 320, MAX_FOAM = 200;
+const MAX_PUFFS = 96, MAX_CHIPS = 48, MAX_DROPS = 320, MAX_FOAM = 200, MAX_LEAVES = 160;
+const LEAF_COLS = [0x7fbf3f, 0x5fa83a, 0x8fcf4a, 0x4f8f32, 0xb8d94f, 0xd9c64a];
 const GRAVITY = 11;
 // dust and chip colours per ground kind
 // 'water' is a splash (fish leaping), not a ground kind
@@ -42,6 +43,30 @@ export class Effects {
     this.nextFoam = 0;
     this.dropsLive = this.foamLive = 0;
     scene.add(this.dropMesh, this.foamMesh);
+    // leaves shaken out of a tree: they flutter down, rest on the ground a moment, then shrink away
+    this.leaves = Array.from({ length: MAX_LEAVES }, () => ({ life: 1, dur: 1 }));
+    this.leafMesh = pool(new THREE.PlaneGeometry(0.11, 0.075), new THREE.MeshLambertMaterial({ color: 0xffffff, side: THREE.DoubleSide }), MAX_LEAVES);
+    this.nextLeaf = 0;
+    this.leavesLive = 0;
+    scene.add(this.leafMesh);
+  }
+
+  /** n leaves let go from a canopy around (x, y, z) of radius r, settling on the ground at `floor` (a height, or a (x, z) => height). */
+  leafFall(x, y, z, r, n, floor) {
+    for (let i = 0; i < n; i++) {
+      const l = this.leaves[this.nextLeaf], a = Math.random() * Math.PI * 2, d = Math.sqrt(Math.random()) * r;
+      const lx = x + Math.cos(a) * d, lz = z + Math.sin(a) * d;
+      Object.assign(l, {
+        x: lx, y: y + (Math.random() - 0.4) * r * 0.8, z: lz, floor: typeof floor === 'function' ? floor(lx + Math.cos(a) * 0.6, lz + Math.sin(a) * 0.6) : floor,
+        vx: Math.cos(a) * (0.3 + Math.random() * 0.6), vy: 0.3 + Math.random() * 0.8, vz: Math.sin(a) * (0.3 + Math.random() * 0.6),
+        sway: Math.random() * 10, swayRate: 2.5 + Math.random() * 2.5, spin: Math.random() * 6, spinRate: 3 + Math.random() * 5,
+        life: 0, dur: 99, rest: 0,
+      });
+      this.leafMesh.setColorAt(this.nextLeaf, tmpC.set(LEAF_COLS[Math.floor(Math.random() * LEAF_COLS.length)]).multiplyScalar(0.9 + Math.random() * 0.2));
+      this.nextLeaf = (this.nextLeaf + 1) % MAX_LEAVES;
+    }
+    this.leafMesh.instanceColor.needsUpdate = true;
+    this.leavesLive = MAX_LEAVES;
   }
 
   /** One droplet of water from (x, y, z) with velocity (vx, vy, vz); it falls back to the surface at `floor`. */
@@ -119,6 +144,34 @@ export class Effects {
   }
 
   update(dt) {
+    if (this.leavesLive) {
+      let any = false;
+      this.leaves.forEach((l, i) => {
+        if (l.life >= l.dur) return;
+        any = true;
+        l.life += dt;
+        let s = 1;
+        if (l.y > l.floor + 0.02) { // falling: a quick hop out of the canopy, then a slow fluttering fall
+          l.vy = Math.max(-0.75, l.vy - 5 * dt);
+          const drag = Math.exp(-dt * 1.5);
+          l.vx *= drag; l.vz *= drag;
+          const sw = Math.sin(l.life * l.swayRate + l.sway);
+          l.x += (l.vx + sw * 0.5) * dt; l.z += (l.vz + Math.cos(l.life * l.swayRate * 0.8 + l.sway) * 0.35) * dt;
+          l.y = Math.max(l.floor + 0.02, l.y + l.vy * dt);
+          l.spin += l.spinRate * dt;
+          tmpQ.setFromEuler(tmpE.set(sw * 0.9, l.spin, Math.cos(l.spin) * 0.6));
+        } else { // resting flat on the ground, then shrinking away
+          l.rest += dt;
+          tmpQ.setFromEuler(tmpE.set(-Math.PI / 2, 0, l.spin));
+          s = Math.max(0, 1 - Math.max(0, l.rest - 1.6) / 0.5);
+          if (s <= 0) l.life = l.dur;
+        }
+        if (l.life >= l.dur) s = 0;
+        this.leafMesh.setMatrixAt(i, tmpM.compose(tmpP.set(l.x, l.y, l.z), tmpQ, tmpS.set(s, s, s)));
+      });
+      this.leafMesh.instanceMatrix.needsUpdate = true;
+      if (!any) this.leavesLive = 0;
+    }
     // dust puffs: burst outward along the ground, slow down, swell then shrink away
     this.puffs.forEach((p, i) => {
       if (p.life >= p.dur) return;

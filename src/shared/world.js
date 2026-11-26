@@ -20,7 +20,7 @@ export const MAX_KIND = 13;
 // The seabed can go below 0 (endless oceans: deep water and an abyss), down to MIN_LEVEL × STEP.
 export const MIN_LEVEL = -8;
 // Coral reefs grow in shallow to mid water (depth REEF_MIN..REEF_MAX) where a slow reef noise passes REEF_T.
-export const REEF_T = 0.56, REEF_MIN = 0.25, REEF_MAX = 1.6;
+export const REEF_T = 0.62, REEF_MIN = 0.25, REEF_MAX = 1.6;
 export const CORAL_TYPES = ['branch', 'brain', 'fan', 'tube', 'anemone'];
 export const isWood = (k) => k === K.WOOD || k === K.WOOD2 || k === K.WALL; // what the axe breaks
 
@@ -30,14 +30,14 @@ export const FURNITURE = ['workbench', 'chair', 'table', 'bed', 'lamp', 'shelf',
 export const MAX_FURNITURE = 15; // highest type number the server and saves accept (room to grow)
 
 // Things players took from the world, kept as "picks" [ix, iz, t] per cell:
-// a bush broken (BUSH), a bush's berries picked (BERRIES), a pebble picked up (PEBBLE).
+// a bush broken (BUSH), a bush's berries picked (BERRIES), a pebble picked up (PEBBLE), a rock mined (ROCK).
 // Log piles: logs placed on a tile stack up 3, then 2, then 1 (PILE_MAX), lying along x (r 0) or z (r 1).
 // world.piles: Map(cellKey -> [ix, iz, r, n]).
 export const PILE_MAX = 6;
 // Height of a pile's top, which players stand on: one row of logs (n 1-3), two (4-5) or three (6).
 // Matches the log model in world3d.js (radius 0.165, rows 0.165·√3 apart).
 export const pileTop = (n) => 0.33 + (n >= 6 ? 2 : n >= 4 ? 1 : 0) * 0.165 * Math.sqrt(3);
-export const PICK = { BUSH: 0, BERRIES: 1, PEBBLE: 2 };
+export const PICK = { BUSH: 0, BERRIES: 1, PEBBLE: 2, ROCK: 3 };
 export const pickKey = (ix, iz, t) => cellKey(ix, iz) * 4 + t;
 /** Apply picks to generated lists in place: `has(pickKey)` says what was taken. */
 export function applyPicks(has, bushes, pebbles) {
@@ -338,7 +338,7 @@ export function finishWorld(base) {
     }
   }
   const rocks = base.rocks.filter((r) => inWorld(r.ix, r.iz)).map(({ ix, iz, s }) => ({
-    x: toWorld(ix) + (hash2(ix, iz, seed + 901) - 0.5) * 0.5, z: toWorld(iz) + (hash2(ix, iz, seed + 902) - 0.5) * 0.5, y: H(ix, iz), s,
+    ix, iz, x: toWorld(ix) + (hash2(ix, iz, seed + 901) - 0.5) * 0.5, z: toWorld(iz) + (hash2(ix, iz, seed + 902) - 0.5) * 0.5, y: H(ix, iz), s,
   }));
 
   // flowers on open meadow cells (not near the camp or ruins, not under a tree or rock)
@@ -388,7 +388,7 @@ export function finishWorld(base) {
 
   // Foliage (decorative, walk-through): grass tufts, bushes, ferns, mushrooms, reeds
   const tufts = [], tallGrass = [], bushes = [], ferns = [], mushrooms = [], reeds = [], motes = [], pebbles = [];
-  const water = { lilies: [], seaweed: [], seaRocks: [], corals: [], seagrass: [], pickles: [] };
+  const water = { lilies: [], seaweed: [], seaRocks: [], corals: [], seagrass: [] };
   const lush = { reeds, tallGrass, ferns, bushes, ...water }; // lists waterLife / bankLife add to
   const nearWater = (ix, iz) => [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => kind(ix + dx, iz + dz) === K.SEABED);
   const nearCamp = (ix, iz) => Math.hypot(camp.ix - ix, camp.iz - iz) < 1.5;
@@ -515,6 +515,17 @@ export function finishWorld(base) {
   const picks = new Map();
   const setPick = (ix, iz, t) => {
     const key = pickKey(ix, iz, t);
+    if (t === PICK.ROCK) { // a mined rock leaves the world (and the base, so island saves keep it gone) with its obstacle
+      picks.set(key, [ix, iz, t]);
+      const i = rocks.findIndex((r) => r.ix === ix && r.iz === iz);
+      if (i < 0) return [];
+      const [r] = rocks.splice(i, 1);
+      const bi = base.rocks.findIndex((b) => b.ix === ix && b.iz === iz);
+      if (bi >= 0) base.rocks.splice(bi, 1);
+      const obs = obstacles.get(iz * W + ix);
+      if (obs) { const j = obs.findIndex((o) => Math.abs(o.x - r.x) < 1e-6 && Math.abs(o.z - r.z) < 1e-6); if (j >= 0) obs.splice(j, 1); }
+      return [r];
+    }
     const hit = (t === PICK.PEBBLE ? pebbles : bushes).filter((o) => toCell(o.x) === ix && toCell(o.z) === iz);
     picks.set(key, [ix, iz, t]);
     applyPicks((k) => k === key, bushes, pebbles);
@@ -537,8 +548,8 @@ export function waterLife(ix, iz, H, kind, spot, roll, out, seed = 0) {
   let reef = 0;
   if (depth >= REEF_MIN && depth <= REEF_MAX) {
     reef = smooth(REEF_T, REEF_T + 0.12, fbm(ix / 15, iz / 15, seed + 515, 3));
-    if (reef > 0 && roll(60) < 0.35 + reef * 0.6) {
-      const n = 1 + Math.floor(roll(61) * (1 + reef * 3));
+    if (reef > 0 && roll(60) < 0.12 + reef * 0.3) {
+      const n = 1 + Math.floor(roll(61) * (1 + reef));
       for (let p = 0; p < n; p++) {
         const it = spot(ix, iz, 130 + p, 0.9);
         const t = Math.floor(roll(62 + p) * (depth < 0.45 ? 4 : 5)); // no tall fans in the very shallow water
@@ -547,7 +558,7 @@ export function waterLife(ix, iz, H, kind, spot, roll, out, seed = 0) {
     }
   }
   // starfish on the sandy bottom of the shallows
-  if (depth < 0.9 && roll(66) < 0.045) out.corals.push({ ...spot(ix, iz, 150, 0.8), type: 5, c: Math.floor(roll(67) * 3), s: 0.8 + roll(68) * 0.4 });
+  if (depth < 0.9 && roll(66) < 0.015) out.corals.push({ ...spot(ix, iz, 150, 0.8), type: 5, c: Math.floor(roll(67) * 3), s: 0.8 + roll(68) * 0.4 });
   let shore = false;
   for (let dz = -2; dz <= 2 && !shore; dz++) for (let dx = -2; dx <= 2; dx++) if (kind(ix + dx, iz + dz) !== K.SEABED) { shore = true; break; }
   // reeds and cattails standing in the shallows, tall enough to poke out of the water
@@ -568,8 +579,6 @@ export function waterLife(ix, iz, H, kind, spot, roll, out, seed = 0) {
     const n = 1 + Math.floor(roll(81) * (1 + meadow * 4));
     for (let m = 0; m < n; m++) out.seagrass.push({ ...spot(ix, iz, 170 + m, 0.9), h: Math.min(depth, 1.3) });
   }
-  // sea pickles: little clusters of pale tubes on the bottom that glow at night (more in meadows and reefs)
-  if (depth >= 0.3 && depth <= 2.4 && roll(84) < 0.035 + meadow * 0.05 + reef * 0.05) out.pickles.push({ ...spot(ix, iz, 180, 0.7), n: 1 + Math.floor(roll(85) * 4) });
   if (roll(20) < (reef > 0 ? 0.18 : 0.42)) {
     const c = 1 + Math.floor(roll(21) * 3);
     for (let m = 0; m < c; m++) out.seaweed.push({ ...spot(ix, iz, 90 + m, 0.85), h: Math.min(depth, 2.2) });

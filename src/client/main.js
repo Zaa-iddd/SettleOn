@@ -5,20 +5,28 @@ import PartySocket from 'partysocket';
 import { finishWorld, spawnPoint, groundAt, toCell, toWorld, WORLD, SEA, STEP, K, cellKey, keyX, keyZ, PICK, isWood, PILE_MAX, FURNITURE, clockHour } from '../shared/world.js';
 import { createEndlessWorld } from '../shared/endless.js';
 import { decodeMap, isEndlessMap, decodeEndless, endlessMap, encodeMap, cleanEdits, cleanChops, cleanBenches, cleanPicks, cleanPiles, cleanBoats } from '../shared/mapfile.js';
-import { Boats, BOAT, THROTTLE, UPGRADES, CABINS, ROOFS, TOPS, MASTS, PROPS, DECK_SLOTS, layoutOf, propAt, engineFactor, rudderFactor, walkable, nearestWalkable, onDeck, toLocal, toWorldXZ, deckY, hullClear, boatHit, HULLS, DECO_SCALE, deckReach, decoFits, decoFoot, hullOf, blueprintGeometry, blueprintLines, resizeLook, SIZE_LEN, SIZE_H, SPLIT } from './boat.js';
-import { getSave, putSave } from './saves.js';
+import { WAVE_DIR, waveAt } from './waves.js';
+// how the swell handles a boat you sail (scaled by how rough the sea is there): top speed lost heading straight into
+// it / gained running with it, the push down a wave's slope (tiles/s² per unit of slope), and the drift (tiles/s)
+const WAVE_HEAD_SLOW = 0.15, WAVE_FOLLOW = 0.06, WAVE_PUSH = 9, WAVE_DRIFT = 0.22;
+import { Boats, BOAT, hullContact, THROTTLE, UPGRADES, upgradeFor, CABINS, ROOFS, TOPS, MASTS, PROPS, DECK_SLOTS, layoutOf, propAt, engineFactor, rudderFactor, walkable, nearestWalkable, onDeck, toLocal, toWorldXZ, deckY, hullClear, boatHit, HULLS, DECO_SCALE, deckReach, decoFits, decoFoot, hullOf, blueprintGeometry, blueprintLines, resizeLook, SIZE_LEN, SIZE_H, SPLIT } from './boat.js';
+import { getSave, putSave, setMeta } from './saves.js';
+import { Settings } from './settings.js';
 import { Inventory, ITEMS, HOTBAR, iconURL } from './inventory.js';
 import { BOAT_PALETTE, PAINT_SLOTS, UPGRADE_MAX, NAME_MAX, PART_KEYS, cleanLook, HULL_ITEMS, MAX_DECO, SIZE_COUNTS } from '../shared/boatlook.js';
 import { Editor } from './editor.js';
 import { identify, inDiscord } from './discord.js';
 import { Menu } from './menu.js';
 import { PLAYER_COLORS } from '../shared/world.js';
-import { PixelRenderer, TILT } from './pixelfx.js';
+import { PixelRenderer, TILT, PIXEL_PREF } from './pixelfx.js';
 import { partIcon } from './boaticons.js';
 import { WorldScene, DEFAULT_TIME, furnitureGeometry, logGeo, logOffset } from './world3d.js';
 import { makeCharacter, animateCharacter, ANIM, TOOLS, setTool, swingTool, SWING_SECS, setLantern } from './character.js';
 import { GridController, IMPACT_DROP } from './controller.js';
 import { Fishing } from './fishing.js';
+import { Drops } from './drops.js';
+import { LEAFY_LIFT } from './trees3d.js';
+import { Vitals } from './vitals.js';
 import { Input } from './input.js';
 import { PathFinder } from './pathfind.js';
 
@@ -151,9 +159,53 @@ function placeController(ix, iz) {
   game.ctrl.onLand = (drop) => {
     const c = game.ctrl, p = c.pos;
     game.scene.effects.impact(p.x, p.y, p.z, drop, game.world.kind(c.ix, c.iz));
+    if (drop >= FALL_HURT) vitals.hurt(Math.floor((drop - 2) * 2), 'fall'); // a long drop hurts (2.5: half a heart, 3: a heart)
   };
   return game.ctrl;
 }
+
+// ---------- the player's state in a world: where you stood, facing, camera, the boat you were on ----------
+// Kept per world like the inventory (`settleon.player.save:<name>` / `room:<room>`, game.stateKey), written
+// every few seconds, when leaving the world and when the tab closes, and read back when the world is built.
+// Singleplayer worlds also keep their own time of day. A room's entry only counts for the same world (mapKey).
+const PLAYER_KEY = 'settleon.player.';
+function savePlayer() {
+  const c = game.ctrl;
+  if (!game.stateKey || !c || !game.world) return;
+  const st = { v: 1, world: game.mapKey, ix: c.ix, iz: c.iz, ry: c.ry, yaw: game.cam.yawTarget, dist: game.cam.dist };
+  if (game.mode === 'single' && Number.isFinite(game.time)) st.time = game.time;
+  if (game.ride) st.ride = [game.ride.id, game.ride.lx, game.ride.lz];
+  try { localStorage.setItem(PLAYER_KEY + game.stateKey, JSON.stringify(st)); } catch {}
+}
+/** Put the player back where they left this world. Returns false if there's nothing (valid) to restore. */
+function restorePlayer() {
+  let st = null;
+  try { st = game.stateKey && JSON.parse(localStorage.getItem(PLAYER_KEY + game.stateKey)); } catch {}
+  if (!st || st.v !== 1 || !Number.isInteger(st.ix) || !Number.isInteger(st.iz)) return false;
+  if (game.mode === 'multi' && st.world !== game.mapKey) return false; // the room plays another world now
+  const boat = st.ride && game.boats.list.get(st.ride[0]);
+  // the tile may have been built on or dug since: the nearest open one
+  const [cx, cz] = boat ? [toCell(boat.x), toCell(boat.z)] : [st.ix, st.iz];
+  const [ix, iz] = game.paths.nearestOpen(cx, cz, 8) ?? [cx, cz];
+  placeController(ix, iz);
+  game.ctrl.ry = Number.isFinite(st.ry) ? st.ry : 0;
+  if (boat) {
+    const spot = nearestWalkable(st.ride[1], st.ride[2], boat.obs, boat.hull) ?? boat.hull.HELM;
+    game.boatHint = true;
+    board(boat, spot[0], spot[1]);
+    game.ctrl.pos.x = boat.x; game.ctrl.pos.z = boat.z; game.ctrl.pos.y = deckY(boat, 0); // the deck walker places you from here on
+  }
+  if (Number.isFinite(st.yaw)) game.cam.yaw = game.cam.yawTarget = Math.round(st.yaw / (Math.PI / 4)) * (Math.PI / 4);
+  if (Number.isFinite(st.dist)) game.cam.dist = Math.max(6, Math.min(boat ? BOAT_ZOOM : MAX_ZOOM, st.dist));
+  if (game.mode === 'single' && FROZEN === null && Number.isFinite(st.time)) setClock(st.time);
+  return true;
+}
+window.addEventListener('pagehide', () => { // closing or reloading the tab: keep everything
+  savePlayer();
+  writeSave();
+  if (game.invKey) { clearTimeout(game.invTimer); game.invTimer = null; try { localStorage.setItem(INV_KEY + game.invKey, JSON.stringify(inventory.toJSON())); } catch {} }
+  if (game.world) vitals.save();
+});
 
 function buildWorld(seed, map = null, roomEdits = [], roomChops = [], roomBenches = [], roomPicks = [], roomPiles = [], roomBoats = []) {
   game.seed = seed;
@@ -198,6 +250,7 @@ function buildWorld(seed, map = null, roomEdits = [], roomChops = [], roomBenche
   game.remotes.clear();
   game.ruinsFound.clear();
   game.paths = new PathFinder(game.world);
+  game.paths.footprint = furnitureFootprint; // furniture blocks only where it stands
   // spawn on the center of the nearest open tile by the campfire
   const spawn = spawnPoint(game.world, game.me);
   // dev/testing: ?spawn=deep starts in the middle of the biggest deep (redwood) forest near the camp
@@ -241,9 +294,12 @@ function buildWorld(seed, map = null, roomEdits = [], roomChops = [], roomBenche
     }
     if (best) { spawn.x = toWorld(best[0]); spawn.z = toWorld(best[1]); }
   }
-  const [six, siz] = game.paths.nearestOpen(toCell(spawn.x), toCell(spawn.z), 8) ?? [toCell(spawn.x), toCell(spawn.z)];
-  placeController(six, siz);
-  game.ctrl.ry = 0; // face the camera
+  // where you left off in this world (unless a ?spawn= test override is set); otherwise by the campfire
+  if (new URLSearchParams(location.search).has('spawn') || !restorePlayer()) {
+    const [six, siz] = game.paths.nearestOpen(toCell(spawn.x), toCell(spawn.z), 8) ?? [toCell(spawn.x), toCell(spawn.z)];
+    placeController(six, siz);
+    game.ctrl.ry = 0; // face the camera
+  }
   game.scene.preload(game.ctrl.pos); // endless: build the chunks around the spawn before the first frame
   game.cam.focus.set(game.ctrl.pos.x, game.ctrl.pos.y + 0.5, game.ctrl.pos.z);
   applyTime(game.time);
@@ -401,6 +457,51 @@ function sendPosition(now) {
   Object.assign(l, { x: c.pos.x, y: c.pos.y, z: c.pos.z, ry: c.ry, a, b: bk, at: now });
 }
 
+// ---------- swimming splashes ----------
+
+/**
+ * Splashes for a swimming character: a splash when it goes into the water, droplets flicked up by each
+ * paddling hand (in time with the doggy paddle, `ch.phase`), foam from the kicking feet, and a gentle
+ * ring of foam now and then while treading water. Client-only, for you and for other players.
+ */
+function swimSplash(ch, anim, speed, x, z, ry, dt) {
+  const fx = game.scene?.effects;
+  const was = ch.swimWas;
+  ch.swimWas = anim === ANIM.SWIM;
+  if (!fx || anim !== ANIM.SWIM) return;
+  const y = SEA + waveAt(game.world, x, z);
+  const sx = Math.sin(ry), sz = Math.cos(ry); // facing
+  if (!was) { fx.splash(x + sx * 0.15, y, z + sz * 0.15, 0.35 + Math.min(0.4, speed * 0.08), sx * 0.4, sz * 0.4); ch.swimSide = Math.sin(ch.phase) >= 0; return; }
+  const moving = speed > 0.3;
+  // each arm's stroke: the sine of the paddle phase changes sign as a hand slaps the water
+  const side = Math.sin(ch.phase) >= 0;
+  if (side !== ch.swimSide) {
+    ch.swimSide = side;
+    const s = side ? 1 : -1; // which hand (right / left)
+    const hx = x + sx * 0.24 + sz * 0.13 * s, hz = z + sz * 0.24 - sx * 0.13 * s;
+    const n = moving ? 4 + Math.round(Math.random() * 3) : 2;
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2, out = 0.2 + Math.random() * 0.5;
+      fx.drop(hx, y + 0.03, hz, Math.cos(a) * out + sx * (moving ? 0.6 : 0.1), 1.2 + Math.random() * 1.3, Math.sin(a) * out + sz * (moving ? 0.6 : 0.1), 0.035 + Math.random() * 0.03, y);
+    }
+    fx.foamAt(hx, hz, sz * 0.25 * s, -sx * 0.25 * s, 0.11, 0.7 + Math.random() * 0.4, 0.5, y);
+  }
+  // kicking feet churn foam behind, and a soft wake fans out to the sides while moving
+  ch.swimFoam = (ch.swimFoam ?? 0) + dt * (moving ? 14 : 2.5);
+  while (ch.swimFoam >= 1) {
+    ch.swimFoam -= 1;
+    const j = (Math.random() - 0.5) * 0.22;
+    if (moving) {
+      const s = Math.random() < 0.5 ? 1 : -1;
+      fx.foamAt(x - sx * 0.3 + sz * j, z - sz * 0.3 - sx * j, (-sx * 0.3 + sz * 0.35 * s) * (0.5 + Math.random() * 0.5), (-sz * 0.3 - sx * 0.35 * s) * (0.5 + Math.random() * 0.5), 0.09 + Math.random() * 0.05, 0.9 + Math.random() * 0.6, 0.4, y);
+      if (Math.random() < 0.25) fx.drop(x - sx * 0.32, y + 0.02, z - sz * 0.32, -sx * 0.4 + (Math.random() - 0.5) * 0.4, 0.8 + Math.random() * 0.8, -sz * 0.4 + (Math.random() - 0.5) * 0.4, 0.03 + Math.random() * 0.02, y);
+    } else { // treading water: a little ring around the body
+      const a = Math.random() * Math.PI * 2;
+      fx.foamAt(x + Math.cos(a) * 0.22, z + Math.sin(a) * 0.22, Math.cos(a) * 0.12, Math.sin(a) * 0.12, 0.08, 1 + Math.random() * 0.5, 0.3, y);
+    }
+  }
+}
+
 // ---------- per-frame ----------
 
 const clock = new THREE.Clock();
@@ -413,6 +514,8 @@ function frame() {
   if (editor.active) { editor.frame(dt, t); return; }
   if (menu.active) { menu.frame(dt, t); return; }
   if (!game.world || !game.ctrl) return;
+  // singleplayer pause: the world stands still, only the last view is drawn
+  if (game.paused && game.mode === 'single') { pixel.render(game.scene.scene, camera); return; }
 
   const cam = game.cam;
   // aboard a boat you can zoom out further (BOAT_ZOOM); stepping ashore eases back inside the normal limit
@@ -430,13 +533,14 @@ function frame() {
   // local player (tile-locked); keyboard overrides tap-to-go inside the controller.
   // WASD are screen directions, so turn them by the camera yaw and snap to the 8 grid directions.
   const keys = input.read(); // read even when ignored, so a queued jump doesn't fire later
-  const k0 = inventory.isOpen || !$('boat-panel').hidden || game.boatEdit ? { x: 0, z: 0, run: false, jump: false } : keys;
+  const k0 = game.paused || inventory.isOpen || !$('boat-panel').hidden || game.boatEdit ? { x: 0, z: 0, run: false, jump: false } : keys;
   if (game.boatEdit && (!game.ride || game.ride.id !== game.boatEdit)) setBoatEdit(false);
   $('boat-btn').hidden = !game.ride; // the Boat button shows while you're aboard
+  updatePrompt();
   if (!game.ride && !$('boat-panel').hidden) toggleBoatPanel(false);
   // boats: sail the one you steer, ease the others, then walk on deck, board one, or walk the land
   const throttleSteps = input.takeThrottle(); // W / S presses (only used at a boat's helm)
-  if (game.ride) driveBoat(dt, k0, inventory.isOpen ? 0 : throttleSteps);
+  if (game.ride) driveBoat(dt, k0, inventory.isOpen || game.paused ? 0 : throttleSteps);
   else if (!$('throttle').hidden) throttleHud(null);
   game.boats.update(dt, t, game.driving);
   if (game.ride) walkOnDeck(dt, t, k0, cam.yaw);
@@ -449,11 +553,21 @@ function frame() {
     root.rotation.y = c.ry;
     game.local.char.rowPhase = game.boats.list.get(game.ride?.id)?.rowPhase ?? 0; // in step with the oars
     animateCharacter(game.local.char, c.anim, c.speed, dt, t);
+    swimSplash(game.local.char, c.anim, c.speed, c.pos.x, c.pos.z, c.ry, dt);
     // fishing: one per world scene; moving or putting the rod away reels the line in
     if (game.fishing?.scene !== game.scene.scene) { game.fishing?.cancel(fishCtx()); game.fishing = new Fishing(game.scene.scene); }
     if (game.fishing.active && ((keys.x || keys.z) && !game.ride?.steer || TOOLS[game.tool] !== 'rod')) game.fishing.cancel(fishCtx());
     game.fishing.update(dt, t, fishCtx(), input.pressed);
   }
+  // items on the ground: one Drops per world scene; walk up to them to pick them up
+  if (game.drops?.scene !== game.scene.scene) { game.drops?.clear(); game.drops = new Drops(game.scene.scene); }
+  game.drops.update(dt, t, {
+    floor: dropFloor, player: game.local ? c.pos : null, night: game.scene.night ?? 0,
+    add: (id, n) => inventory.add(id, n), onFull: () => toast('Your inventory is full'),
+  });
+  // health and hunger: hunger drains faster running, swimming and rowing
+  const effort = c.anim === ANIM.RUN ? 'run' : c.anim === ANIM.SWIM ? 'swim' : c.anim === ANIM.ROW ? (game.driving ? 'row' : 'idle') : c.anim === ANIM.WALK ? 'walk' : 'idle';
+  vitals.update(dt, effort, inventory.creative);
   updateMarker(t);
   updateOutline();
   if (game.ride || game.blueprint?.visible) updateDeckBlueprint(); // placing on a boat's deck
@@ -495,7 +609,7 @@ function frame() {
       r.rl[0] += (r.ride[1] - r.rl[0]) * k;
       r.rl[1] += (r.ride[2] - r.rl[1]) * k;
       const [wx, wz] = toWorldXZ(rb, r.rl[0], r.rl[1]);
-      r.pos.set(wx, deckY(rb, t), wz);
+      r.pos.set(wx, deckY(rb, t, r.rl[0], r.rl[1]), wz);
     } else r.pos.lerp(r.target, k);
     r.speed = before.distanceTo(r.pos) / Math.max(dt, 1e-3);
     let d = r.targetRy - r.ry;
@@ -505,6 +619,7 @@ function frame() {
     r.char.root.rotation.y = r.ry;
     r.char.rowPhase = rb?.rowPhase ?? 0;
     animateCharacter(r.char, r.a, r.speed, dt, t);
+    swimSplash(r.char, r.a, r.speed, r.pos.x, r.pos.z, r.ry, dt);
   }
 
   // lanterns at night: everyone carries one; real lights for you and the 3 nearest other players
@@ -522,18 +637,22 @@ function frame() {
   // aboard a boat the camera follows the boat itself (its middle, at deck height), not you walking around on it;
   // it follows faster then, so a boat at full speed doesn't run away from the view
   const rideBoat = game.ride && game.boats.list.get(game.ride.id);
-  if (rideBoat) cam.focus.lerp(tmp.set(rideBoat.sx, deckY(rideBoat, t) + 0.5, rideBoat.sz), 1 - Math.exp(-dt * 10));
+  if (rideBoat) cam.focus.lerp(tmp.set(rideBoat.sx, deckY(rideBoat, t) - (rideBoat.wH ?? 0) * 0.7 + 0.5, rideBoat.sz), 1 - Math.exp(-dt * 10));
   else cam.focus.lerp(tmp.set(c.pos.x, c.pos.y + 0.5, c.pos.z), 1 - Math.exp(-dt * 6));
   placeCamera(camera, cam.focus, cam.dist, cam.yaw);
 
   pixel.setZoom(cam.dist);
   // tilt-shift: subtle up close, a little stronger zoomed out (where the miniature look reads best)
-  pixel.setTiltShift(TILT.strength * (0.7 + 0.6 * Math.min(1, Math.max(0, (cam.dist - 8) / 20))));
+  pixel.setTiltShift(settings.v.tilt ? TILT.strength * (0.7 + 0.6 * Math.min(1, Math.max(0, (cam.dist - 8) / 20))) : 0);
+  if (game.scene.sun.castShadow !== settings.v.shadows) game.scene.sun.castShadow = game.scene.cloudSun.castShadow = settings.v.shadows; // the Shadows setting
   game.scene.cloudRes.value.set(pixel.rt.width, pixel.rt.height);
   game.scene.update(t, dt, c.pos, cam.dist);
   camera.updateMatrixWorld();
   game.scene.setSeeThrough(camera, game.boatEdit ? null : c.pos, pixel.rt.width, pixel.rt.height); // no cutaway while customizing the boat
   pixel.render(game.scene.scene, camera);
+  // a picture for the world list: shortly after starting, then every minute
+  if (t - (game.playerSaved ?? 0) > 5) { game.playerSaved = t; savePlayer(); }
+  if (game.saveName && t - game.thumbAt > (game.thumbAt === game.playStart ? 3 : 60)) { game.thumbAt = t; captureThumb(false); }
 
   updateLabels();
   updateArea(t);
@@ -600,6 +719,7 @@ function onTap(px, py, first) {
     if (wheelAt(px, py)) return toggleHelm();
     if (ITEMS[inventory.held?.id]?.furn) return placeOnDeck(px, py);
     if (TOOLS[game.tool] === 'axe') return takeFromDeck(px, py);
+    if (ITEMS[inventory.held?.id]?.food) return eatHeld();
     return;
   }
   const frog = frogAt(px, py);
@@ -625,7 +745,9 @@ function onTap(px, py, first) {
   if (bush) return breakBush(bush); // a click breaks a bush, whatever is in hand
   const pebble = pebbleAt(px, py);
   if (pebble) return pickPebble(pebble);
+  if (TOOLS[game.tool] === 'pickaxe') { const rock = rockAt(px, py); if (rock) return mineRock(rock); } // the pickaxe breaks rocks
   if (item &&(item.tool || item.block || item.place)) useToolAt(px, py); // a tool digs, a block or workbench is placed
+  else if (item?.food) eatHeld(); // food in hand: a click eats one
 }
 
 // ---------- bushes and pebbles ----------
@@ -666,7 +788,29 @@ function inReach(o, run) {
   game.pendingAct = { x: o.x, z: o.z, reach: GATHER_REACH, run };
   return false;
 }
+// a furniture piece's footprint in its tile, [x0, x1, z0, z1] unrotated (from the model's bounding box)
+const footprints = new Map();
+function furnitureFootprint(t) {
+  if (!footprints.has(t)) {
+    const g = furnitureGeometry(t);
+    if (!g.boundingBox) g.computeBoundingBox();
+    const { min, max } = g.boundingBox;
+    footprints.set(t, [min.x, max.x, min.z, max.z]);
+  }
+  return footprints.get(t);
+}
 const give = (id, n) => { if (n > 0 && inventory.add(id, n) > 0) toast('Your inventory is full'); };
+// break something: its items pop out on the ground to be picked up (see drops.js)
+function dropItem(id, n, x, y, z, spread = 1) {
+  if (!game.drops || game.drops.scene !== game.scene?.scene) return give(id, n);
+  game.drops.spawn(id, n, x, y, z, spread);
+}
+// ground height for drops and falling leaves: the floor you'd stand on, or the water's surface
+function dropFloor(x, z) {
+  const ix = toCell(x), iz = toCell(z), P = game.paths;
+  if (!P) return groundAt(game.world, x, z);
+  return P.waterAt(ix, iz) ? SEA : P.floorAt(ix, iz);
+}
 function breakBush(b) {
   const ix = toCell(b.x), iz = toCell(b.z), c = game.ctrl, now = clock.elapsedTime, w = game.world;
   if (!inReach(b, () => { const q = onCell('bushes', ix, iz); if (q) breakBush(q); })) return;
@@ -679,9 +823,10 @@ function breakBush(b) {
     if (!q) return;
     game.scene.effects.impact(q.x, q.y + 0.35, q.z, 1.6, 'leaves');
     applyPick(ix, iz, PICK.BUSH);
-    give('stick', 1 + Math.floor(Math.random() * 2)); // 1-2 sticks, 1-2 leaves, and its berries if it had any
-    give('leaves', 1 + Math.floor(Math.random() * 2));
-    if (q.berries) give('berries', 1 + Math.floor(Math.random() * 2));
+    const by = q.y + 0.35; // 1-2 sticks, 1-2 leaves, and its berries if it had any
+    dropItem('stick', 1 + Math.floor(Math.random() * 2), q.x, by, q.z);
+    dropItem('leaves', 1 + Math.floor(Math.random() * 2), q.x, by, q.z);
+    if (q.berries) dropItem('berries', 1 + Math.floor(Math.random() * 2), q.x, by, q.z);
     if (game.mode === 'multi') send({ type: 'pick', ix, iz, t: PICK.BUSH });
     saveDigging();
   }, SWING_SECS * 450);
@@ -695,7 +840,7 @@ function searchBush(b) {
   if (!q.berries) return toast('No berries on this bush');
   const n = 1 + Math.floor(Math.random() * 3);
   applyPick(ix, iz, PICK.BERRIES);
-  give('berries', n);
+  dropItem('berries', n, q.x, q.y + 0.4, q.z, 0.7);
   toast(n === 1 ? 'You found a berry' : `You found ${n} berries`);
   if (game.mode === 'multi') send({ type: 'pick', ix, iz, t: PICK.BERRIES });
   saveDigging();
@@ -709,32 +854,63 @@ function pickPebble(p) {
   if (game.mode === 'multi') send({ type: 'pick', ix, iz, t: PICK.PEBBLE });
   saveDigging();
 }
-// take a bush, its berries or a pebble out of the world and the scene
+// Rocks: the pickaxe breaks them (rockHits swings, by size) into Stone (rockStone), and sometimes a pebble.
+// A mined rock is a pick (PICK.ROCK): gone for good, synced and saved like a broken bush.
+const rockHits = (r) => (r.s < 0.38 ? 2 : 3);
+const rockStone = (r) => 1 + Math.round(r.s * 6); // 3 for a small rock, 4 for a big one
+const rockAt = (px, py) => thingAt(nearby('rocks', 14), px, py, 0.25, Math.max(18, 240 / game.cam.dist));
+const mineHits = new Map(); // cellKey -> swings so far on a rock
+function mineRock(r) {
+  const ix = toCell(r.x), iz = toCell(r.z), c = game.ctrl, now = clock.elapsedTime, w = game.world;
+  if (!inReach(r, () => { const q = onCell('rocks', ix, iz); if (q) mineRock(q); })) return;
+  if (now < game.nextDig) return;
+  game.nextDig = now + SWING_SECS + 0.05;
+  c.ry = Math.atan2(r.x - c.pos.x, r.z - c.pos.z);
+  if (game.local) swingTool(game.local.char);
+  setTimeout(() => {
+    const q = game.world === w && onCell('rocks', ix, iz);
+    if (!q) return;
+    const key = cellKey(ix, iz), hits = (mineHits.get(key) ?? 0) + 1, top = q.y + q.s * 0.6;
+    game.scene.effects.impact(q.x, top, q.z, 1.2, K.ROCK); // stone chips fly
+    if (hits < rockHits(q)) { mineHits.set(key, hits); return; }
+    mineHits.delete(key);
+    game.scene.effects.impact(q.x, q.y + 0.2, q.z, 2.2, K.ROCK); // it breaks apart
+    applyPick(ix, iz, PICK.ROCK);
+    dropItem('stone', rockStone(q), q.x, top, q.z, 1.1);
+    if (Math.random() < 0.4) dropItem('pebble', 1, q.x, top, q.z, 1.1);
+    if (game.mode === 'multi') send({ type: 'pick', ix, iz, t: PICK.ROCK });
+    saveDigging();
+  }, SWING_SECS * 450);
+}
+// take a bush, its berries, a pebble or a rock out of the world and the scene
 function applyPick(ix, iz, t) {
   const w = game.world, hit = w.setPick(ix, iz, t);
   if (w.endless) game.scene.refreshCell(ix, iz); // rebuilds that chunk without it
   else for (const o of hit) {
+    if (t === PICK.ROCK) { game.scene.hideTree({ x: o.x, y: o.y + o.s * 0.35, z: o.z }); continue; } // the rock instance sits a little up
     if (t !== PICK.PEBBLE) game.scene.hideBerries(o);
     if (t !== PICK.BERRIES) game.scene.hideTree(o);
   }
+  if (t === PICK.ROCK && game.paths) { game.paths.refresh(ix, iz); game.digVersion = (game.digVersion ?? 0) + 1; } // its tile is open now
 }
 function onPick({ id, ix, iz, t }) {
   if (id === game.me) return;
   applyPick(ix, iz, t);
   const r = game.remotes.get(id);
-  if (r && t === PICK.BUSH) swingTool(r.char);
+  if (r && (t === PICK.BUSH || t === PICK.ROCK)) swingTool(r.char);
 }
 // right click: a small menu for the bush under the cursor
 function hideCtx() { $('ctx-menu').hidden = true; }
 function onRight(px, py) {
   hideCtx();
   if (!game.world || !game.ctrl || editor.active || inventory.isOpen || (game.mode !== 'single' && game.mode !== 'multi')) return;
-  if (game.ride) return; // aboard: nothing to right-click yet
+  if (game.ride) { if (ITEMS[inventory.held?.id]?.food) eatHeld(); return; } // aboard: right-click only eats
   const wb = benchAt(px, py);
   if (wb && wb[3] === 0) return useWorkbench(wb); // right-clicking a workbench opens it too
   // a small menu: a boat can go back in your inventory, a bush can be searched for berries
   const boat = boatAt(px, py), b = boat ? null : bushAt(px, py);
-  if (!boat && !b) return;
+  if (!boat && !b) { if (ITEMS[inventory.held?.id]?.food) eatHeld(); return; } // nothing to right-click: eat what's in hand
+
   const el = $('ctx-menu'), btn = el.querySelector('button');
   el.style.left = `${px}px`;
   el.style.top = `${py}px`;
@@ -806,14 +982,21 @@ function chopTree(t) {
   const key = cellKey(t.ix, t.iz), type = treeType(t), w = game.world;
   setTimeout(() => {
     if (game.world !== w) return;
-    const hits = (game.chopHits.get(key) ?? 0) + 1;
+    const hits = (game.chopHits.get(key) ?? 0) + 1, last = hits >= TREE_HITS[type];
     game.scene.effects.impact(t.x, t.y + 0.45, t.z, 1.0, 'wood'); // chips fly
-    if (hits < TREE_HITS[type]) { game.chopHits.set(key, hits); return; }
+    // the tree shakes and leaves flutter down from the canopy
+    const cy = t.y + (type === 'redwood' ? 8 : type === 'pine' ? 1.1 : 1.1 + LEAFY_LIFT) * t.s, cr = (type === 'redwood' ? 1.6 : 0.65) * t.s;
+    game.scene.effects.leafFall(t.x, cy, t.z, cr, last ? 40 : 10 + Math.floor(Math.random() * 6), dropFloor);
+    if (!last) {
+      game.chopHits.set(key, hits);
+      game.scene.shakeTree(t, t.x - game.ctrl.pos.x, t.z - game.ctrl.pos.z, type === 'redwood' ? 0.03 : 0.08);
+      return;
+    }
     game.chopHits.delete(key);
-    game.scene.effects.impact(t.x, t.y + (type === 'redwood' ? 5 : 1.4) * t.s, t.z, 2.4, 'leaves'); // the canopy bursts
+    game.scene.effects.impact(t.x, cy, t.z, 2.4, 'leaves'); // the canopy bursts
     applyChop(t.ix, t.iz);
-    give('log', TREE_WOOD[type]);
-    give('leaves', TREE_LEAVES[type]);
+    dropItem('log', TREE_WOOD[type], t.x, t.y + 0.8, t.z, 1.3);
+    dropItem('leaves', TREE_LEAVES[type], t.x, t.y + 0.8, t.z, 1.3);
     if (game.mode === 'multi') send({ type: 'chop', ix: t.ix, iz: t.iz });
     saveDigging();
   }, SWING_SECS * 450);
@@ -1063,13 +1246,7 @@ function leaveBoat(ix = null, iz = null) {
 function boatKey() {
   if (!game.ctrl || !game.boats) return;
   if (game.ride) return toggleHelm();
-  const c = game.ctrl;
-  let best = null, bd = 4.5;
-  for (const b of game.boats.list.values()) {
-    const [lx, lz] = toLocal(b, c.pos.x, c.pos.z);
-    const hl = b.hull, d = Math.hypot(Math.max(0, Math.abs(lx) - hl.W), Math.max(0, lz - hl.TIP, hl.STERN - lz));
-    if (d < bd) { bd = d; best = b; }
-  }
+  const c = game.ctrl, best = nearestBoat();
   if (!best) return toast('No boat nearby');
   if (!c.swimming && deckY(best, 0) - c.pos.y > 1.4) return toast("Can't climb aboard from here");
   board(best, best.hull.HELM[0], best.hull.HELM[1]);
@@ -1140,11 +1317,16 @@ function driveBoat(dt, keys, steps = 0) {
   // SHALLOW_SLOW, and it sheds speed quickly on running onto a sandbank
   const shallow = Math.min(1, (b.lift ?? 0) / BOAT.SHALLOW_LIFT);
   const hl = b.hull;
-  const want = b.sail * hl.MAX_SPEED * engineFactor(b) * (1 - BOAT.SHALLOW_SLOW * shallow); // the engine upgrade adds 15% a level
+  // the swell (waves.js, open water only): heading into it costs a little top speed, running with it gains a little
+  const env = Math.min(1, b.wEnv ?? 0), head = -(fx * WAVE_DIR.x + fz * WAVE_DIR.z); // 1 = bow straight into the swell
+  const seas = 1 - env * (head > 0 ? WAVE_HEAD_SLOW * head : -WAVE_FOLLOW * head);
+  const want = b.sail * hl.MAX_SPEED * engineFactor(b) * (1 - BOAT.SHALLOW_SLOW * shallow) * seas; // the engine upgrade adds 15% a level
   // filling the sail builds speed (ACCEL); backing it against your way brakes a bit harder; no sail glides (GLIDE)
   let rate = !want ? hl.GLIDE : fwd && Math.sign(want) !== Math.sign(fwd) ? hl.ACCEL * 1.4 : Math.abs(want) > Math.abs(fwd) ? hl.ACCEL : hl.GLIDE;
   if (Math.abs(fwd) > Math.abs(want)) rate = Math.max(rate, BOAT.SAND_DRAG * shallow); // the sand drags it down
   fwd += (want - fwd) * (1 - Math.exp(-dt * rate));
+  // climbing a wave's face slows it, sliding down the back surfs it on (wP: the bow's pitch on the swell, + = up)
+  fwd -= Math.sin(b.wP ?? 0) * WAVE_PUSH * dt;
   side *= Math.exp(-dt * BOAT.KEEL);
   b.vx = fwd * fx + side * rx;
   b.vz = fwd * fz + side * rz;
@@ -1155,18 +1337,24 @@ function driveBoat(dt, keys, steps = 0) {
   const ny = b.yaw + b.turn * dt;
   // turning can't swing the hull into land, or deeper into another boat
   const hitNow = boatHit(game.boats, b.id, b.x, b.z, b.yaw, hl)?.depth ?? 0;
-  if (hullClear(w, b.x, b.z, ny, hl) && (boatHit(game.boats, b.id, b.x, b.z, ny, hl)?.depth ?? 0) <= hitNow + 1e-4) b.yaw = ny; else b.turn = 0;
+  if (hullClear(w, b.x, b.z, ny, hl) && (boatHit(game.boats, b.id, b.x, b.z, ny, hl)?.depth ?? 0) <= hitNow + 1e-4) b.yaw = ny;
+  else {
+    // swinging the bow or stern into the shore: a small splash where it touches
+    if (Math.abs(b.turn) > 0.15 && !hullClear(w, b.x, b.z, ny, hl)) shoreSplash(b, hullContact(w, b.x, b.z, ny, hl), Math.abs(b.turn) * 1.2, 0, 0);
+    b.turn = 0;
+  }
   // move; against land it bumps back a little and loses its way
+  // the swell also sets the boat slowly along with it (drift, not kept as speed)
+  const dvx = WAVE_DIR.x * WAVE_DRIFT * env, dvz = WAVE_DIR.z * WAVE_DRIFT * env;
   const speed = Math.hypot(b.vx, b.vz);
-  if (speed > 0.005) {
-    const nx = b.x + b.vx * dt, nz = b.z + b.vz * dt;
+  if (speed > 0.005 || env > 0.05) {
+    const nx = b.x + (b.vx + dvx) * dt, nz = b.z + (b.vz + dvz) * dt;
     if (hullClear(w, nx, nz, b.yaw, hl)) { b.x = nx; b.z = nz; }
     else {
-      if (speed > 1.2) {
-        toast('Bump! Land ahead');
-        const end = (fwd || 1) > 0 ? hl.TIP : hl.STERN, k = Math.min(1, speed / hl.MAX_SPEED), d = Math.sign(fwd || 1); // where it hit
-        game.scene.effects.splash(b.x + fx * end, SEA, b.z + fz * end, 0.55 + 0.45 * k, fx * d * (0.4 + k), fz * d * (0.4 + k));
-      }
+      // a splash where the hull meets the shore, bigger the faster it hit (even a gentle nudge sloshes a little)
+      const k = Math.min(1, speed / hl.MAX_SPEED), mx = (b.vx + dvx) / (speed || 1), mz = (b.vz + dvz) / (speed || 1);
+      shoreSplash(b, hullContact(w, nx, nz, b.yaw, hl), speed, mx * (0.4 + k), mz * (0.4 + k));
+      if (speed > 1.2) toast('Bump! Land ahead');
       b.vx *= -0.25; b.vz *= -0.25;
       b.sail *= 0.3;
     }
@@ -1202,6 +1390,21 @@ function driveBoat(dt, keys, steps = 0) {
     sendBoat(b);
     game.driving = null;
   }
+}
+
+// A splash where a boat touches the shore at (cx, cz) (hullContact), thrown along (dx, dz). Its size follows the
+// speed it hit at; small bumps while grinding along the shore are spaced out (SHORE_SPLASH_GAP) so it doesn't fizz.
+const SHORE_SPLASH_GAP = 0.35;
+function shoreSplash(b, at, speed, dx, dz) {
+  if (!at || speed < 0.15) return;
+  const now = performance.now() / 1000, big = speed > 1.2;
+  if (!big && now - (b.shoreAt ?? 0) < SHORE_SPLASH_GAP) return;
+  if (big && now - (b.shoreAt ?? 0) < 0.12) return;
+  b.shoreAt = now;
+  const k = Math.min(1, speed / (b.hull?.MAX_SPEED ?? BOAT.MAX_SPEED)), s = Math.sqrt((b.hull?.W ?? BOAT.W) / BOAT.W);
+  // pull the point back a little toward the boat, onto the water's edge
+  const ex = at[0] + (b.x - at[0]) * 0.12, ez = at[1] + (b.z - at[1]) * 0.12;
+  game.scene.effects.splash(ex, SEA, ez, (0.22 + 0.78 * k) * s, dx, dz);
 }
 
 // walking on deck: free movement (not tile-locked) in deck coordinates, around the cabin and cargo;
@@ -1242,7 +1445,7 @@ function walkOnDeck(dt, t, keys, yaw) {
     if (b.look.t === 1) { anim = ANIM.ROW; c.ry = b.syaw + Math.PI; } // at the oars, facing the stern like a real rower
   }
   const [wx, wz] = toWorldXZ(b, r.lx, r.lz);
-  c.pos.x = wx; c.pos.z = wz; c.pos.y = deckY(b, t);
+  c.pos.x = wx; c.pos.z = wz; c.pos.y = deckY(b, t, r.lx, r.lz);
   c.ix = toCell(wx); c.iz = toCell(wz);
   c.swimming = false;
   c.anim = anim;
@@ -1261,6 +1464,35 @@ function syncTool() {
   if (game.tool !== before) game.pendingDig = null; // switched tools on the way: forget the dig
   if (game.local) setTool(game.local.char, game.tool);
 }
+// ---------- health and hunger (vitals.js) ----------
+const FALL_HURT = 2.5; // drops this big or bigger hurt
+const vitals = new Vitals({ el: $('vitals'), hurtEl: $('hurt'), onFaint: faint });
+// eat one of the food in hand (berries, fish)
+function eatHeld() {
+  const held = inventory.held, item = held && ITEMS[held.id];
+  if (!item?.food) return;
+  if (!vitals.eat(item.food)) return toast("You're full");
+  inventory.takeHeld();
+  if (game.local) swingTool(game.local.char);
+  toast(`Yum! ${item.name}`);
+}
+// out of health: faint, and wake up by the campfire with full health (keeping your things)
+function faint(why) {
+  if (!game.world || !game.ctrl) return;
+  game.fishing?.cancel(fishCtx());
+  if (game.boatEdit) setBoatEdit(false);
+  if (game.driving === game.ride?.id) game.driving = null;
+  game.ride = null;
+  game.pendingDig = game.pendingChop = game.pendingAct = game.pendingCatch = null;
+  const sp = spawnPoint(game.world, game.me);
+  const [ix, iz] = game.paths.nearestOpen(toCell(sp.x), toCell(sp.z), 8) ?? [toCell(sp.x), toCell(sp.z)];
+  placeController(ix, iz).ry = 0;
+  game.scene.preload(game.ctrl.pos);
+  game.cam.focus.set(game.ctrl.pos.x, game.ctrl.pos.y + 0.5, game.ctrl.pos.z);
+  vitals.revive();
+  toast(why === 'hunger' ? 'You fainted from hunger... and woke up by the campfire. Eat something!' : 'You fainted... and woke up by the campfire');
+}
+
 // The inventory is kept in this browser per saved world (singleplayer) or per room (multiplayer).
 const INV_KEY = 'settleon.inv.';
 function loadInventory(key) {
@@ -1268,6 +1500,7 @@ function loadInventory(key) {
   inventory.reset();
   try { if (key) inventory.fromJSON(JSON.parse(localStorage.getItem(INV_KEY + key))); } catch {}
   if (inventory.creative) inventory.setCreative(true); // a fresh inventory: creative still opens the bag
+  vitals.load(key); // health and hunger go with the inventory
   syncTool();
   if (inventory.slots.every((s) => !s)) toast('Break bushes for sticks and leaves, pick up pebbles, then craft (I)');
 }
@@ -1278,13 +1511,13 @@ function saveInventory() {
     try { localStorage.setItem(INV_KEY + game.invKey, JSON.stringify(inventory.toJSON())); } catch {}
   }, 800);
 }
-// R turns what you're about to place (game.rot, quarter turns): Wood's planks, the Workbench's facing
+// R turns what you're about to place (game.rot, quarter turns): log piles and furniture's facing
 function heldLabel() {
   const held = inventory.held, rot = game.rot ?? 0;
   let text = held ? ITEMS[held.id].name : '';
-  if (held?.id === 'wood') text += ` · planks ${rot % 2 ? 'north-south' : 'east-west'} (R)`;
   if (held?.id === 'log') text += ` · place to stack, lying ${rot % 2 ? 'north-south' : 'east-west'} (R)`;
   if (held && ITEMS[held.id].furn) text += rot ? ` · turned ${rot * 90}° (R)` : ' · R turns it';
+  if (held && ITEMS[held.id].food) text += ' · click to eat';
   $('held-name').textContent = text;
 }
 // R: turn the furniture under the cursor, or else what's in hand
@@ -1305,7 +1538,7 @@ function rotateKey() {
     return;
   }
   const id = inventory.held?.id;
-  if (id !== 'wood' && id !== 'log' && !ITEMS[id]?.furn) return;
+  if (id !== 'log' && !ITEMS[id]?.furn) return;
   game.rot = ((game.rot ?? 0) + 1) % 4;
   heldLabel();
 }
@@ -1452,6 +1685,7 @@ function hoverTarget(px, py) {
   if (bush) return { kind: 'bush', obj: bush };
   const pebble = pebbleAt(px, py);
   if (pebble) return { kind: 'pebble', obj: pebble };
+  if (TOOLS[game.tool] === 'pickaxe') { const rock = rockAt(px, py); if (rock) return { kind: 'rock', obj: rock }; }
   return null;
 }
 
@@ -1519,7 +1753,7 @@ function updateOutline() {
       o.userData.bench.rotation.y = (((Math.round(Math.atan2(c.ix - ix, c.iz - iz) / (Math.PI / 2)) % 4) + 4 + rot) % 4) * Math.PI / 2;
     } else {
       const mats = ghostParts().mats;
-      o.userData.block.material = held.id === 'wood' ? (rot % 2 ? mats.wood2 : mats.wood) : mats[held.id] ?? mats.dirt;
+      o.userData.block.material = mats[held.id] ?? mats.dirt;
       o.userData.block.visible = true;
     }
   }
@@ -1536,7 +1770,7 @@ function actAt(ix, iz) {
 }
 
 // what a placed block becomes, and the highest you can build
-const PLACE_KINDS = { dirt: K.SOIL, stone: K.ROCK, sand: K.SAND, snow: K.SNOW, wood: K.WOOD, wall: K.WALL };
+const PLACE_KINDS = { dirt: K.SOIL, stone: K.ROCK, sand: K.SAND, snow: K.SNOW, wall: K.WALL }; // (planks aren't placeable; old wooden floors still break into planks)
 const MAX_BUILD_H = 24;
 
 // put the held block on a neighbouring tile: the tile rises one block
@@ -1552,7 +1786,7 @@ function placeAt(ix, iz) {
   if (game.local) swingTool(game.local.char);
   setTimeout(() => {
     if (game.world !== w) return;
-    const nh = h + STEP, nk = nh < SEA ? K.SEABED : id === 'wood' && (game.rot ?? 0) % 2 ? K.WOOD2 : PLACE_KINDS[id]; // underwater, it builds up the bottom
+    const nh = h + STEP, nk = nh < SEA ? K.SEABED : PLACE_KINDS[id]; // underwater, it builds up the bottom
     // remember the ground below the placed blocks, so the column's lower part keeps showing it
     const k0 = w.kind(ix, iz), cur = w.under(ix, iz);
     const u = nk === K.SEABED ? null : !cur ? [h, k0] : k0 !== nk ? [h, k0] : cur;
@@ -1635,7 +1869,7 @@ function takeLog(pl) {
     if (!cur) return;
     applyPile(ix, iz, cur[2], cur[3] - 1);
     game.scene.effects.impact(x, w.H(ix, iz) + 0.4, z, 1.0, 'wood');
-    give('log', 1);
+    dropItem('log', 1, x, w.H(ix, iz) + 0.6, z, 0.6);
     sendPile(ix, iz);
     saveDigging();
   }, SWING_SECS * 450);
@@ -1816,7 +2050,7 @@ function takeBench(b) {
     if (game.world !== w || !w.benches.has(cellKey(ix, iz))) return;
     applyBench(ix, iz, 0, false);
     game.scene.effects.impact(x, w.H(ix, iz) + 0.4, z, 1.4, 'wood');
-    give(id, 1);
+    dropItem(id, 1, x, w.H(ix, iz) + 0.6, z, 0.6);
     if (game.mode === 'multi') send({ type: 'bench', ix, iz, r: 0, t: 0, on: false });
     saveDigging();
   }, SWING_SECS * 450);
@@ -1848,7 +2082,7 @@ function digAt(ix, iz) {
     else nk = nh < SEA ? K.SEABED : k === K.SAND || k === K.SNOW || k === K.ROCK || isWood(k) ? k : K.SOIL;
     applyDig(ix, iz, nh, nk, u);
     game.scene.effects.impact(x, h, z, 1.8, k);
-    if (inventory.add(DROPS[k] ?? 'dirt', 1) > 0) toast('Your inventory is full');
+    dropItem(DROPS[k] ?? 'dirt', 1, x, nh + 0.4, z, 0.6);
     sendDig(ix, iz, nh, nk, u);
     saveDigging();
   }, SWING_SECS * 450); // about when the tool lands
@@ -1884,13 +2118,35 @@ function onDig({ id, ix, iz, lvl, k, ulvl = -1, uk = 0 }) {
 // singleplayer on a saved world: keep the digging in the save (at most every 1.5 s)
 function saveDigging() {
   if (game.mode !== 'single' || !game.saveName || game.saveTimer) return;
-  game.saveTimer = setTimeout(() => {
-    game.saveTimer = null;
+  game.saveTimer = setTimeout(writeSave, 1500);
+}
+// write the world back to its save now (also when quitting, so the last 1.5 s of building aren't lost)
+function writeSave() {
+  clearTimeout(game.saveTimer);
+  game.saveTimer = null;
+  {
     const w = game.world, name = game.saveName;
-    if (!w || !getSave(name)) return;
+    if (game.mode !== 'single' || !w || !name || !getSave(name)) return;
     const benches = [...w.benches.values()], picks = w.pickList(), piles = [...w.piles.values()], boats = game.boats?.listOut() ?? [];
     putSave(name, w.endless ? endlessMap(name, w.seed, w.editsList(), w.choppedList(), benches, picks, piles, boats) : { ...encodeMap(w.base, name), ...(benches.length ? { benches } : {}), ...(picks.length ? { picks } : {}), ...(piles.length ? { piles } : {}), ...(boats.length ? { boats } : {}) });
-  }, 1500);
+  }
+}
+
+// a small screenshot of the world for the world list (the canvas holds only the 3D view; the HUD is HTML)
+const thumbCanvas = document.createElement('canvas');
+thumbCanvas.width = 192;
+thumbCanvas.height = 108;
+function captureThumb(redraw) {
+  if (!game.saveName || !game.scene) return;
+  try {
+    if (redraw) pixel.render(game.scene.scene, camera); // the drawing buffer is only readable right after a render
+    const src = pixel.renderer.domElement, ctx = thumbCanvas.getContext('2d');
+    const sw = src.width, sh = src.height, want = 16 / 9;
+    const cw = Math.min(sw, sh * want), ch = cw / want; // the middle, cropped to 16:9
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(src, (sw - cw) / 2, (sh - ch) / 2, cw, ch, 0, 0, thumbCanvas.width, thumbCanvas.height);
+    setMeta(game.saveName, { thumb: thumbCanvas.toDataURL('image/jpeg', 0.82), played: Date.now() });
+  } catch {}
 }
 
 function makeMarker() {
@@ -2126,6 +2382,7 @@ const menu = new Menu({
   onSingle: (map) => startSingle(map),
   onMulti: (room, map) => startMulti(room, map),
   onEditor: (base, name) => { menu.hide(); editor.open(base, name); },
+  onSettings: () => settings.open(),
 });
 
 function myName() {
@@ -2139,8 +2396,11 @@ function startSingle(map) {
   game.mode = 'single';
   game.me = 'solo';
   game.roster = new Map([[game.me, { id: game.me, name: myName(), color: PLAYER_COLORS[0] }]]);
-  buildWorld(Math.floor(Math.random() * 2 ** 31), map);
   game.saveName = map?.name && getSave(map.name) ? map.name : null;
+  game.stateKey = game.saveName ? `save:${game.saveName}` : null;
+  buildWorld(Math.floor(Math.random() * 2 ** 31), map);
+  if (game.saveName) setMeta(game.saveName, { played: Date.now() });
+  game.playStart = game.thumbAt = clock.elapsedTime;
   loadInventory(game.saveName ? `save:${game.saveName}` : null);
   onRoster([...game.roster.values()]);
   $('loading').hidden = true;
@@ -2153,6 +2413,7 @@ function startMulti(room, map = null) {
   resetSession();
   game.mode = 'multi';
   identity.room = room;
+  game.stateKey = `room:${room}`;
   loadInventory(`room:${room}`);
   game.bringMap = map;
   $('loading').hidden = false;
@@ -2163,22 +2424,61 @@ function startMulti(room, map = null) {
 /** Back to the main menu (leaves the multiplayer room). */
 function toMenu() {
   if (editor.active) { editor.playPending = false; game.exitToGame = true; editor.close(); }
+  const wasSaved = game.mode === 'single' && !!game.saveName;
+  if (wasSaved) { captureThumb(true); writeSave(); }
+  togglePause(false);
   resetSession();
   game.mode = 'menu';
-  menu.show();
+  menu.show(wasSaved ? 'menu-single' : 'menu-main');
 }
+
+// ---------- pause menu (Esc in game): Back to Game, Settings, Quit ----------
+// Singleplayer really pauses (the world stops and the clock waits); in multiplayer the room carries on.
+function togglePause(open = !game.paused) {
+  const playing = (game.mode === 'single' || game.mode === 'multi') && game.world;
+  if (open && !playing) return;
+  if (open === !!game.paused) return;
+  game.paused = open;
+  document.body.classList.toggle('paused', open);
+  $('pause').hidden = !open;
+  if (open) {
+    if (inventory.isOpen) inventory.close();
+    hideCtx();
+    game.pausedAt = Date.now();
+    const single = game.mode === 'single';
+    $('pause-title').textContent = single ? 'Game paused' : 'Game menu';
+    $('pause-note').textContent = single
+      ? (game.saveName ? `“${game.saveName}” waits for you.` : "This world isn't saved. Create a world from the menu to keep one.")
+      : `Room ${identity?.room ?? ''}: everyone else keeps playing.`;
+    $('pause-quit').textContent = single ? (game.saveName ? 'Save & Quit to Title' : 'Quit to Title') : 'Leave Room';
+  } else {
+    settings.close();
+    // the clock stood still too: carry on from where it was paused
+    if (game.mode === 'single' && game.clock && game.pausedAt) game.clock.at += Date.now() - game.pausedAt;
+    game.pausedAt = 0;
+    clock.getDelta(); // no big step on the first frame back
+  }
+}
+$('pause-resume').addEventListener('click', () => togglePause(false));
+$('pause-settings').addEventListener('click', () => { $('pause').hidden = true; settings.open(() => { if (game.paused) $('pause').hidden = false; }); });
+$('pause-quit').addEventListener('click', () => toMenu());
 
 // forget the current world, players and connection
 function resetSession() {
+  savePlayer();
+  game.stateKey = null;
   game.blueprint?.removeFromParent();
   game.blueprint = null;
   game.launchBp?.removeFromParent();
   game.launchBp = game.launchMemo = null;
   if (game.fishing && game.local) game.fishing.cancel(fishCtx());
   game.fishing = null;
+  game.drops?.clear();
+  game.drops = null;
   if (socket) { game.leaving = true; socket.close(); socket = null; }
   game.saveName = null;
   if (inventory.isOpen) inventory.close();
+  if (game.world) vitals.save();
   game.scene?.dispose();
   game.scene = null;
   game.world = null;
@@ -2195,7 +2495,7 @@ function resetSession() {
   $('players').innerHTML = '';
 }
 
-$('open-menu').addEventListener('click', (e) => { e.currentTarget.blur(); toMenu(); });
+$('open-menu').addEventListener('click', (e) => { e.currentTarget.blur(); togglePause(true); });
 // ---------- the boat panel (B while aboard): name, paint and upgrades ----------
 const boatPanelBoat = () => (game.ride ? game.boats?.list.get(game.ride.id) : null);
 function toggleBoatPanel(open = $('boat-panel').hidden) {
@@ -2225,12 +2525,14 @@ function renderBoatPanel() {
   const L = b.look;
   if (document.activeElement !== $('bp-name')) $('bp-name').value = L.n;
   // upgrades: level pips, the next level's cost, and a Build button
-  $('bp-ups').innerHTML = UPGRADES.map((u, i) => {
-    if (b.look.t && !u.all) return ''; // decorations are built for the cabin boat
+  $('bp-ups').innerHTML = UPGRADES.map((u0, i) => {
+    if (b.look.t && !u0.all) return ''; // decorations are built for the cabin boat
+    const u = upgradeFor(i, b.look.t); // the rowboat's Engine is its Sail
     const lvl = L.u[i], max = UPGRADE_MAX[i], cost = u.cost[lvl];
     const pips = Array.from({ length: max }, (_, k) => `<i class="${k < lvl ? 'on' : ''}"></i>`).join('');
     const items = cost ? Object.entries(cost).map(([id, n]) => `<span class="craft-item${inventory.count(id) >= n || inventory.creative ? '' : ' short'}"><img alt="" src="${iconURL(id)}" /><b>${n}</b></span>`).join('') : '';
-    return `<div class="bp-up"><div class="bp-up-text"><b>${u.name}</b> <span class="bp-pips">${pips}</span><br><small>${u.desc}</small></div>
+    const pic = partIcon(pixel.renderer, 'upgrade', i, L, Math.min(max, lvl + 1)); // what the next level adds (or the finished one)
+    return `<div class="bp-up${cost ? '' : ' done'}"><img class="bp-up-pic" alt="" src="${pic}" /><div class="bp-up-text"><b>${u.name}</b> <span class="bp-pips">${pips}</span><br><small>${u.desc}</small></div>
       <div class="bp-up-cost">${items}</div>
       <button class="btn${cost && canPay(cost) ? ' accent' : ''}" data-u="${i}" tabindex="-1" ${cost ? (canPay(cost) ? '' : 'disabled') : 'disabled'}>${cost ? (lvl ? 'Upgrade' : 'Build') : 'Done'}</button></div>`;
   }).join('');
@@ -2239,14 +2541,14 @@ $('bp-ups').addEventListener('click', (e) => {
   const btn = e.target.closest('button[data-u]'), b = boatPanelBoat();
   if (!btn || !b) return;
   btn.blur();
-  const i = Number(btn.dataset.u), cost = UPGRADES[i].cost[b.look.u[i]];
+  const i = Number(btn.dataset.u), up = upgradeFor(i, b.look.t), cost = up.cost[b.look.u[i]];
   if (!cost || !canPay(cost)) return;
   if (!inventory.creative) for (const [id, n] of Object.entries(cost)) inventory.remove(id, n);
   inventory.render(); inventory.onChange();
   const u = b.look.u.slice();
   u[i]++;
   setBoatLook(b, { ...b.look, u });
-  toast(`${UPGRADES[i].name} ${UPGRADE_MAX[i] > 1 ? `level ${u[i]}` : 'built'}!`);
+  toast(`${up.name} ${UPGRADE_MAX[i] > 1 ? `level ${u[i]}` : 'built'}!`);
 });
 $('bp-name').maxLength = NAME_MAX;
 $('bp-name').addEventListener('change', () => { const b = boatPanelBoat(); if (b) setBoatLook(b, { ...b.look, n: $('bp-name').value }); $('bp-name').blur(); });
@@ -2254,6 +2556,55 @@ $('bp-name').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('bp-n
 $('bp-close').addEventListener('click', (e) => { e.currentTarget.blur(); toggleBoatPanel(false); });
 $('boat-btn').addEventListener('click', (e) => { e.currentTarget.blur(); toggleBoatPanel(); });
 $('bp-edit').addEventListener('click', (e) => { e.currentTarget.blur(); setBoatEdit(true); });
+
+// ---------- the key prompt above the hotbar: what F does here (board a nearby boat, take or leave the helm) ----------
+// Rebuilt only when its text changes. Clicking it does the same as the key.
+let promptKey = '', promptFade = 0, helmAt = 0; // helmAt: when you took the helm (its prompt fades after HELM_PROMPT_MS)
+const HELM_PROMPT_MS = 5000;
+function nearestBoat(max = 4.5) { // the boat whose hull is nearest you, within `max`
+  const c = game.ctrl;
+  let best = null, bd = max;
+  for (const b of game.boats.list.values()) {
+    const [lx, lz] = toLocal(b, c.pos.x, c.pos.z);
+    const hl = b.hull, d = Math.hypot(Math.max(0, Math.abs(lx) - hl.W), Math.max(0, lz - hl.TIP, hl.STERN - lz));
+    if (d < bd) { bd = d; best = b; }
+  }
+  return best;
+}
+function updatePrompt() {
+  let key = '', text = '', more = '';
+  const busy = game.mode === 'menu' || !game.ctrl || !game.boats || inventory.isOpen || !$('boat-panel').hidden || game.boatEdit;
+  if (!busy) {
+    const r = game.ride;
+    const name = (b) => (b?.look?.n ? `“${b.look.n}”` : (b?.hull?.name ?? 'boat').toLowerCase());
+    if (!r?.steer) helmAt = 0;
+    else if (!helmAt) helmAt = performance.now();
+    if (r?.steer) { // shown for the first few seconds at the helm, then out of the way
+      if (performance.now() - helmAt < HELM_PROMPT_MS) { key = 'F'; text = 'Leave the helm'; more = '<kbd>W</kbd><kbd>S</kbd>throttle <kbd>A</kbd><kbd>D</kbd>steer'; }
+    }
+    else if (r) { key = 'F'; text = 'Take the helm'; more = '<kbd>B</kbd>boat'; }
+    else {
+      const b = nearestBoat();
+      if (b) { key = 'F'; text = `Board the ${name(b)}`; }
+    }
+  }
+  const sig = key + text + more;
+  if (sig === promptKey) return;
+  promptKey = sig;
+  const el = $('key-prompt');
+  clearTimeout(promptFade);
+  if (!key) { // fade out (keeping the old text while it goes), then hide
+    if (el.hidden) return;
+    el.classList.add('out');
+    promptFade = setTimeout(() => { el.hidden = true; el.classList.remove('out'); }, 600);
+    return;
+  }
+  el.classList.remove('out');
+  el.hidden = false;
+  $('kp-key').textContent = key;
+  $('kp-text').innerHTML = text + (more ? ` <span class="kp-more">${more}</span>` : '');
+}
+$('key-prompt').addEventListener('click', (e) => { e.currentTarget.blur(); boatKey(); });
 
 // ---------- boat edit mode: hover a part of your boat to outline it, click it to change it ----------
 // game.boatEdit = the boat's id while editing. Parts are found by raycasting the boat's meshes (boat.js tags each
@@ -2416,12 +2767,22 @@ function setCreative(on, quiet = false) {
   try { localStorage.setItem(CREATIVE_KEY, on ? '1' : '0'); } catch {}
   if (!quiet) toast(on ? 'Creative mode: every item in your inventory (I), building is free' : 'Creative mode off');
 }
-$('creative-btn').addEventListener('click', (e) => { e.currentTarget.blur(); setCreative(!inventory.creative); });
-{
-  let on = new URLSearchParams(location.search).has('creative');
-  try { on ||= localStorage.getItem(CREATIVE_KEY) === '1'; } catch {}
-  setCreative(on, true);
+$('creative-btn').addEventListener('click', (e) => { e.currentTarget.blur(); settings.set('creative', !inventory.creative); });
+
+// ---------- settings (settings.js): from the title screen and the pause menu ----------
+const settings = (() => {
+  let creative = new URLSearchParams(location.search).has('creative');
+  try { creative ||= localStorage.getItem(CREATIVE_KEY) === '1'; } catch {}
+  return new Settings({ initial: { creative }, onChange: (k, v) => applySetting(k, v) });
+})();
+function applySetting(k, v, quiet = false) {
+  if (k === 'creative') setCreative(v, quiet);
+  if (k === 'pixel') { PIXEL_PREF.size = v; pixel.resize(); }
+  if (k === 'minimap') document.body.classList.toggle('no-minimap', !v);
+  if (k === 'labels') document.body.classList.toggle('no-labels', !v);
+  // shadows and tilt-shift are read every frame
 }
+for (const [k, v] of Object.entries(settings.v)) applySetting(k, v, true);
 // the controls card: the "?" button or H toggles it, Esc closes it first
 function toggleHelp(open = $('help').hidden) {
   $('help').hidden = !open;
@@ -2430,12 +2791,15 @@ function toggleHelp(open = $('help').hidden) {
 $('help-btn').addEventListener('click', (e) => { e.currentTarget.blur(); toggleHelp(); });
 window.addEventListener('keydown', (e) => {
   const playing = (game.mode === 'single' || game.mode === 'multi') && !editor.active;
-  if (e.code === 'Escape' && playing) { if (game.boatEdit) { if (game.partMenu) hidePartMenu(); else setBoatEdit(false); } else if (!$('boat-panel').hidden) toggleBoatPanel(false); else if (!$('help').hidden) toggleHelp(false); else if (inventory.isOpen) inventory.close(); else toMenu(); return; }
-  if (e.target.closest?.('input, select, textarea') || !playing) return;
+  if (e.code === 'Escape' && settings.isOpen) { settings.close(); return; }
+  if (menu.active) { if (e.code === 'Escape') menu.back(); else if (menu.key(e)) e.preventDefault(); return; }
+  if (e.code === 'Escape' && playing) { if (game.boatEdit) { if (game.partMenu) hidePartMenu(); else setBoatEdit(false); } else if (!$('boat-panel').hidden) toggleBoatPanel(false); else if (!$('help').hidden) toggleHelp(false); else if (inventory.isOpen) inventory.close(); else togglePause(); return; }
+  if (e.target.closest?.('input, select, textarea') || !playing || game.paused) return;
   if (e.code === 'KeyH') { toggleHelp(); return; }
   if (e.code === 'KeyB' && !inventory.isOpen) { if (game.boatEdit) setBoatEdit(false); else toggleBoatPanel(); return; }
   if (e.code === 'KeyF' && !inventory.isOpen) { boatKey(); return; }
   if (e.code === 'KeyI' || e.code === 'Tab') { e.preventDefault(); hideCtx(); inventory.toggle(); return; }
+  if (e.code === 'KeyC' && inventory.isOpen) { inventory.toggleCraft(); return; } // show / hide the crafting panel
   if (e.code === 'KeyR' && !inventory.isOpen) { rotateKey(); return; }
   const n = e.code.startsWith('Digit') ? Number(e.code.slice(5)) - 1 : -1;
   if (n >= 0 && n < HOTBAR) inventory.select(n);
@@ -2463,7 +2827,7 @@ function openEditor() {
     return;
   }
   pixel.renderer.setAnimationLoop(frame);
-  if (import.meta.env.DEV) window.__dbg = { game, pixel, camera, inventory, actAt, useWorkbench, launchAt, launchPlan, boatKey, editPick }; // dev only: lets headless tests inspect the renderer and act
+  if (import.meta.env.DEV) window.__dbg = { game, pixel, camera, inventory, vitals, actAt, useWorkbench, launchAt, launchPlan, boatKey, editPick }; // dev only: lets headless tests inspect the renderer and act
   // ?room=... jumps straight into multiplayer (handy for testing); otherwise the main menu
   if (new URLSearchParams(location.search).has('room')) startMulti(identity.room);
   else toMenu();

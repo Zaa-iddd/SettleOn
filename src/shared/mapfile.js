@@ -69,11 +69,11 @@ export function cleanPiles(list) {
   const lim = WORLD_LIMIT + WORLD;
   return list.slice(-MAX_EDITS).filter((e) => Array.isArray(e) && e.length === 4 && e.every(Number.isInteger) && Math.abs(e[0]) <= lim && Math.abs(e[1]) <= lim && (e[2] === 0 || e[2] === 1) && e[3] >= 1 && e[3] <= 6);
 }
-/** Validate a list of picks [[ix, iz, t 0..2]...] (see PICK in world.js); bad entries are dropped. */
+/** Validate a list of picks [[ix, iz, t 0..3]...] (see PICK in world.js); bad entries are dropped. */
 export function cleanPicks(list) {
   if (!Array.isArray(list)) return [];
   const lim = WORLD_LIMIT + WORLD;
-  return list.slice(-MAX_EDITS).filter((e) => Array.isArray(e) && e.length === 3 && e.every(Number.isInteger) && Math.abs(e[0]) <= lim && Math.abs(e[1]) <= lim && e[2] >= 0 && e[2] <= 2);
+  return list.slice(-MAX_EDITS).filter((e) => Array.isArray(e) && e.length === 3 && e.every(Number.isInteger) && Math.abs(e[0]) <= lim && Math.abs(e[1]) <= lim && e[2] >= 0 && e[2] <= 3);
 }
 /** Validate a list of placed furniture [[ix, iz, rot 0..3, type?]...] (no type = a workbench); bad entries are dropped. */
 export function cleanBenches(list) {

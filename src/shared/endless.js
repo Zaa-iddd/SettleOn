@@ -13,7 +13,7 @@
 
 import {
   WORLD, STEP, SEA, K, VILLAGE_RADIUS, TREE_SCALE, WORLD_LIMIT, LEAFY_NEAR, PINE_CHANCE, PINE_SCALE, PINE_NEAR, TALL_GRASS_T,
-  rng, hash2, fbm, smooth, toWorld, toCell, cellKey, keyX, keyZ, isForest, isDirt, FOREST_SCALE, waterLife, bankLife, pickKey, applyPicks, pebbleChance } from './world.js';
+  rng, hash2, fbm, smooth, toWorld, toCell, cellKey, keyX, keyZ, isForest, isDirt, FOREST_SCALE, waterLife, bankLife, pickKey, applyPicks, pebbleChance, PICK } from './world.js';
 
 export const CH = 16; // cells per chunk side
 const DEEP_T = 0.647; // fbm value above which lowland grass/forest becomes deep forest (~16%, like the island)
@@ -348,6 +348,7 @@ export function createEndlessWorld(seed) {
     const H = HG, kind = kindG;
     const edited = (ix, iz) => !!editAt(ix, iz);
     const choppedHere = choppedByChunk.get(key);
+    const picksHere = picksByChunk.get(key); // what players took (bushes, berries, pebbles, rocks)
     const x0 = cx * CH, z0 = cz * CH, x1 = x0 + CH, z1 = z0 + CH;
     const inChunk = (ix, iz) => ix >= x0 && ix < x1 && iz >= z0 && iz < z1;
     const nearRuins = ruinsIn(x0 - 8, z0 - 8, x1 + 8, z1 + 8);
@@ -417,7 +418,7 @@ export function createEndlessWorld(seed) {
 
     const trees = [], redwoods = [], rocks = [], flowers = [], corners = new Set();
     const tufts = [], tallGrass = [], bushes = [], ferns = [], mushrooms = [], reeds = [], motes = [], pebbles = [];
-    const pond = { lilies: [], seaweed: [], seaRocks: [], corals: [], seagrass: [], pickles: [] };
+    const pond = { lilies: [], seaweed: [], seaRocks: [], corals: [], seagrass: [] };
     const cairns = [];
     const lush = { reeds, tallGrass, ferns, bushes, ...pond }; // lists waterLife / bankLife add to
     const obstacles = new Map(); // cell key -> circles
@@ -441,7 +442,8 @@ export function createEndlessWorld(seed) {
           redwoods.push(t);
           addObs(t.x, t.z, 0.42 * t.s);
         } else if (ob.type === 'rock') {
-          const r = { x: toWorld(ix) + (hash2(ix, iz, seed + 901) - 0.5) * 0.5, z: toWorld(iz) + (hash2(ix, iz, seed + 902) - 0.5) * 0.5, y, s: ob.s };
+          if (picksHere?.has(pickKey(ix, iz, PICK.ROCK))) continue; // mined: left out, with its obstacle
+          const r = { ix, iz, x: toWorld(ix) + (hash2(ix, iz, seed + 901) - 0.5) * 0.5, z: toWorld(iz) + (hash2(ix, iz, seed + 902) - 0.5) * 0.5, y, s: ob.s };
           rocks.push(r);
           addObs(r.x, r.z, r.s * 0.9);
         } else {
@@ -569,7 +571,6 @@ export function createEndlessWorld(seed) {
     }
 
     // what players took: generated above as usual, then left out (so nothing else shifts)
-    const picksHere = picksByChunk.get(key);
     if (picksHere) applyPicks((k) => picksHere.has(k), bushes, pebbles);
 
     return contentCache.set(key, {

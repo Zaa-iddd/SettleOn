@@ -254,10 +254,10 @@ export class Room extends Server {
         this.sendAll({ type: 'bench', id: player.id, ix, iz, r, t, on: !!on }, conn);
         return;
       }
-      // a player broke a bush (t 0), picked its berries (1) or picked up a pebble (2) on cell (ix, iz)
+      // a player broke a bush (t 0), picked its berries (1), picked up a pebble (2) or mined a rock (3) on cell (ix, iz)
       case 'pick': {
         const { ix, iz, t } = msg;
-        if (![ix, iz, t].every(Number.isInteger) || !inLim(ix, iz) || t < 0 || t > 2) return;
+        if (![ix, iz, t].every(Number.isInteger) || !inLim(ix, iz) || t < 0 || t > 3) return;
         this.put('picks', cellKey(ix, iz) * 4 + t, [ix, iz, t]);
         this.sendAll({ type: 'pick', id: player.id, ix, iz, t }, conn);
         return;

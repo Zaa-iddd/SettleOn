@@ -11,6 +11,7 @@
 import * as THREE from 'three';
 import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { SEA, toCell } from '../shared/world.js';
+import { waveAt, waveEnv, waveClock } from './waves.js';
 import { seeThroughMaterial, furnitureGeometry, furnitureGlowGeometry } from './world3d.js'; // (a circular import, used only lazily)
 import { BOAT_PALETTE, UPGRADE_KEYS, cleanLook, defaultLook } from '../shared/boatlook.js';
 
@@ -93,8 +94,10 @@ export function toWorldXZ(b, lx, lz) {
 }
 /** Gentle bobbing on the waves (shared by the hull and everyone on deck). */
 export const bobY = (b, t) => Math.sin(t * 1.25 + b.id % 7) * 0.045;
-// `lift`: how far the boat rides up over shallow sand so its keel clears the seabed (Boats.update)
-export const deckY = (b, t) => SEA + (b.hull ?? HULLS[0]).DECK + bobY(b, t) + (b.lift ?? 0);
+// `lift`: how far the boat rides up over shallow sand so its keel clears the seabed (Boats.update); `wH`: how far
+// the swell lifts it (waves.js). (lx, lz): a spot on deck, which rises and falls as the boat pitches and rolls
+// (`dyx`, `dyz`: height change per unit across and along the deck, set in Boats.update).
+export const deckY = (b, t, lx = 0, lz = 0) => SEA + (b.hull ?? HULLS[0]).DECK + bobY(b, t) + (b.lift ?? 0) + (b.wH ?? 0) + lx * (b.dyx ?? 0) + lz * (b.dyz ?? 0);
 
 // points around the hull that must all be over water (bow tip, sides, stern corners)
 HULLS[0].pts = [[0, 3.3], [0.75, 2.6], [-0.75, 2.6], [1.2, 1.0], [-1.2, 1.0], [1.2, -1.0], [-1.2, -1.0], [1.2, -3.0], [-1.2, -3.0], [0, -3.0]];
@@ -205,6 +208,17 @@ export function hullClear(world, x, z, yaw, hl = HULLS[0]) {
     if (world.H(toCell(wx), toCell(wz)) >= SEA) return false;
   }
   return true;
+}
+
+/** Where a boat at (x, z, yaw) touches land: the average of its hull points over land, or null (for splashes). */
+export function hullContact(world, x, z, yaw, hl = HULLS[0]) {
+  const c = Math.cos(yaw), s = Math.sin(yaw);
+  let n = 0, sx = 0, sz = 0;
+  for (const [lx, lz] of hl.pts) {
+    const wx = x + lx * c + lz * s, wz = z - lx * s + lz * c;
+    if (world.H(toCell(wx), toCell(wz)) >= SEA) { n++; sx += wx; sz += wz; }
+  }
+  return n ? [sx / n, sz / n] : null;
 }
 
 /**
@@ -802,6 +816,33 @@ const oarGeometry = () => shared('oar', () => parts(({ box }) => {
   box(0.05, 0.06, 0.06, C.DARK, 0.02, 0, 0); // the collar at the rowlock
 }));
 
+// The rowboat's Sail upgrade (its slot 0, the cabin boat's Engine): a mast stepped through the forward thwart with a
+// square sail across the boat, bellying forward over the bow, so it never hides the rower (who faces the stern).
+// Each level makes it bigger: [sail width, sail height, cloths].
+export const ROW_SAIL = [null, [0.7, 0.55, 3], [0.95, 0.8, 4], [1.25, 1.05, 5]];
+const ROW_MAST_Z = 0.5, ROW_SAIL_Y = 0.62; // the mast's spot and the boom's height above the deck
+const rowMastGeometry = (lvl) => parts(({ add, box }) => {
+  const hl = HULLS[1], dk = hl.DECK, [w, h] = ROW_SAIL[lvl], y0 = dk + ROW_SAIL_Y, top = y0 + h, Z = ROW_MAST_Z;
+  add(new THREE.CylinderGeometry(0.028, 0.04, top + 0.14 - dk, 6).translate(0, (dk + top + 0.14) / 2, Z), C.POST);
+  add(new THREE.CylinderGeometry(0.045, 0.045, 0.04, 6).translate(0, top + 0.16, Z), C.BRASS); // the truck
+  box(0.08, 0.08, 0.08, C.DARK, 0, dk + 0.205, Z); // the partner on the thwart
+  box(w + 0.12, 0.035, 0.035, C.CAP, 0, top, Z + 0.035); // the yard
+  box(w + 0.04, 0.03, 0.03, C.CAP, 0, y0, Z + 0.035); // the boom
+  const line = (a, b) => { const A = new THREE.Vector3(...a), B = new THREE.Vector3(...b); add(new THREE.BoxGeometry(0.012, 0.012, A.distanceTo(B)).lookAt(B.clone().sub(A)).translate((A.x + B.x) / 2, (A.y + B.y) / 2, (A.z + B.z) / 2), C.ROPE); };
+  line([0, top + 0.1, Z], [0, dk + 0.32, hl.TIP - 0.05]); // forestay to the stem
+  for (const sx of [-1, 1]) line([0, top + 0.08, Z], [sx * (halfW(Z, hl) - 0.04), dk + 0.15, Z - 0.12]); // shrouds
+  for (const sx of [-1, 1]) line([sx * (w / 2 + 0.04), y0, Z + 0.035], [sx * (halfW(-0.3, hl) - 0.05), dk + 0.15, -0.3]); // sheets aft
+});
+const rowSailGeometry = (lvl) => parts(({ box }) => {
+  const dk = HULLS[1].DECK, [w, h, n] = ROW_SAIL[lvl], y0 = dk + ROW_SAIL_Y, cw = w / n;
+  for (let k = 0; k < n; k++) {
+    const belly = (0.05 + 0.03 * lvl) * Math.sin(Math.PI * (k + 0.5) / n); // fuller in the middle
+    box(cw + 0.004, h - 0.03, 0.022, k % 2 ? 0.9 : 1.0, -w / 2 + cw * (k + 0.5), y0 + h / 2, ROW_MAST_Z + 0.06 + belly);
+    box(cw * 0.9, 0.03, 0.03, 0.74, -w / 2 + cw * (k + 0.5), y0 + 0.025, ROW_MAST_Z + 0.065 + belly); // the bolt rope along the foot
+  }
+});
+export const rowSailParts = (lvl) => (lvl > 0 ? { mast: shared(`rowMast${lvl}`, () => rowMastGeometry(lvl)), sail: shared(`rowSail${lvl}`, () => rowSailGeometry(lvl)) } : null);
+
 /** The geometries of a fixed-model boat kind (the rowboat): { base, paint, cabin?, roof?, glow? }, built once. */
 function typeGeometry(t) {
   return (geoCache['type' + t] ??= (() => {
@@ -816,16 +857,93 @@ function typeGeometry(t) {
 }
 
 const shared = (key, build) => (geoCache[key + DIM.key] ??= build()); // one per size (see useDims)
+// Compact models drawn only as the upgrades' pictures in the boat panel (the real pieces are spread over the whole
+// boat and would be specks at 48 px). Built around the origin; the icon camera frames whatever it's given.
+const line3 = (add, a, b, r, col) => { const A = new THREE.Vector3(...a), B = new THREE.Vector3(...b); add(new THREE.BoxGeometry(r, r, A.distanceTo(B)).lookAt(B.clone().sub(A)).translate((A.x + B.x) / 2, (A.y + B.y) / 2, (A.z + B.z) / 2), col); };
+const ICON_BUILD = {
+  // a little steam engine: an iron block on a bed, a brass flywheel, and a stove pipe taller each level
+  engine: (lvl) => parts(({ add, box }) => {
+    box(0.9, 0.12, 0.6, C.DARK, 0, 0.06, 0);
+    box(0.6, 0.45, 0.45, C.IRON, -0.05, 0.34, 0);
+    box(0.64, 0.06, 0.49, C.BRASS, -0.05, 0.5, 0);
+    add(new THREE.CylinderGeometry(0.26, 0.26, 0.07, 12).rotateX(Math.PI / 2).translate(0.1, 0.36, 0.28), C.BRASS);
+    add(new THREE.CylinderGeometry(0.07, 0.07, 0.1, 8).rotateX(Math.PI / 2).translate(0.1, 0.36, 0.3), C.IRON);
+    const h = 0.3 + 0.25 * lvl;
+    add(new THREE.CylinderGeometry(0.08, 0.09, h, 8).translate(-0.22, 0.56 + h / 2, -0.08), C.IRON);
+    add(new THREE.CylinderGeometry(0.13, 0.09, 0.07, 8).translate(-0.22, 0.58 + h, -0.08), C.IRON);
+  }),
+  // a rudder hung off a bit of transom, with its tiller; a bigger blade each level
+  rudder: (lvl) => parts(({ box }) => {
+    const d = 0.36 + 0.12 * lvl;
+    box(0.7, 0.5, 0.08, C.PLANK2, 0, 0.35, -0.1); // the transom (behind it, from the icon's camera)
+    box(0.06, 0.95, 0.08, C.POST, 0, 0.1, 0); // the stock
+    box(0.05, 0.55, d, C.CAP, 0, -0.1, d / 2 - 0.02); // the blade
+    box(0.055, 0.04, d, C.IRON, 0, 0.17, d / 2 - 0.02);
+    for (const y of [-0.2, 0.3]) box(0.1, 0.05, 0.1, C.IRON, 0, y, -0.05); // the gudgeons
+    box(0.05, 0.05, 0.6, C.RAIL, 0, 0.6, -0.3, 0, 0.12); // the tiller, over the deck
+  }),
+  // a sagging wire between two posts (the bulbs are the glow part)
+  lights: () => parts(({ add, box }) => {
+    for (const x of [-0.7, 0.7]) box(0.07, 0.8, 0.07, C.POST, x, 0.4, 0);
+    const P = ICON_BULBS.map(([x, y]) => [x, y + 0.05, 0]);
+    [[-0.7, 0.78, 0], ...P, [0.7, 0.78, 0]].forEach((a, i, all) => { if (i) line3(add, all[i - 1], a, 0.02, C.IRON); });
+  }),
+  // a line of pennants, canvas colour and white
+  buntLine: () => parts(({ add, box }) => {
+    for (const x of [-0.75, 0.75]) box(0.06, 0.9, 0.06, C.POST, x, 0.45, 0);
+    const pts = ICON_PENNANTS.map(([x, y]) => [x, y, 0]);
+    [[-0.75, 0.86, 0], ...pts, [0.75, 0.86, 0]].forEach((a, i, all) => { if (i) line3(add, all[i - 1], a, 0.02, C.ROPE); });
+  }),
+  buntA: () => parts(({ add }) => ICON_PENNANTS.forEach(([x, y], k) => { if (k % 2 === 0) add(new THREE.ConeGeometry(0.1, 0.24, 3).rotateX(Math.PI).translate(x, y - 0.13, 0), 1.0); })),
+  buntB: () => parts(({ add }) => ICON_PENNANTS.forEach(([x, y], k) => { if (k % 2) add(new THREE.ConeGeometry(0.1, 0.24, 3).rotateX(Math.PI).translate(x, y - 0.13, 0), C.WHITE); })),
+  // a life ring leaning on a tyre fender, with its rope
+  trim: () => parts(({ add, box }) => {
+    const g = new THREE.TorusGeometry(0.3, 0.09, 6, 16).rotateX(-0.25);
+    add(g.translate(0, 0.42, 0), (x, y) => (Math.floor((Math.atan2(y - 0.42, x) + Math.PI) / (Math.PI / 4)) % 2 ? C.RED : C.WHITE));
+    add(new THREE.TorusGeometry(0.15, 0.08, 6, 12).rotateY(Math.PI / 2).translate(0.48, 0.2, 0.1), C.TYRE);
+    box(0.03, 0.5, 0.03, C.ROPE, 0.48, 0.6, 0.1);
+  }),
+  // a rod with its line, and a bucket with fish in it
+  gear: () => parts(({ add, box }) => {
+    add(new THREE.CylinderGeometry(0.2, 0.15, 0.32, 10).translate(0.15, 0.16, 0), 0x5a7a8a);
+    add(new THREE.CylinderGeometry(0.205, 0.205, 0.04, 10).translate(0.15, 0.3, 0), C.IRON);
+    box(0.08, 0.22, 0.28, 0xf08a3c, 0.1, 0.38, 0, 0.4, 0, 0.5);
+    box(0.08, 0.18, 0.24, 0xa9bccd, 0.22, 0.38, -0.03, -0.3, 0, -0.4);
+    line3(add, [-0.35, 0.05, 0.05], [-0.1, 1.1, -0.05], 0.04, C.POST);
+    box(0.09, 0.09, 0.09, C.IRON, -0.3, 0.25, 0.04);
+    line3(add, [-0.1, 1.1, -0.05], [-0.3, 0.6, 0.05], 0.012, C.WHITE);
+  }),
+};
+const ICON_BULBS = [-0.45, -0.2, 0.05, 0.3, 0.55].map((x) => [x, 0.78 - 0.22 * Math.sin(Math.PI * (x + 0.7) / 1.4)]);
+const ICON_PENNANTS = [-0.5, -0.25, 0, 0.25, 0.5].map((x) => [x, 0.86 - 0.24 * Math.sin(Math.PI * (x + 0.75) / 1.5)]);
+const iconGeo = (k, lvl = 0) => shared(`icon.${k}.${lvl}`, () => ICON_BUILD[k](lvl));
+const iconBulbs = () => shared('icon.bulbs', () => {
+  const g = mergeGeometries(ICON_BULBS.map(([x, y]) => { const b = new THREE.BoxGeometry(0.1, 0.12, 0.1).translate(x, y - 0.06, 0); b.deleteAttribute('uv'); return b; }));
+  g.userData.shared = true;
+  return g;
+});
+/** The picture of upgrade i at level lvl on a boat with look L. */
+function upgradePieces(i, L, lvl) {
+  const key = UPGRADE_KEYS[i];
+  if (key === 'engine' && L.t === 1) { const rs = rowSailParts(Math.min(lvl, 3)); return [{ geo: rs.mast }, { geo: rs.sail, tint: 'canvas' }]; }
+  if (key === 'engine' || key === 'rudder') return [{ geo: iconGeo(key, lvl) }];
+  if (key === 'awning') return [{ geo: shared('awningPoles', awningPolesGeometry) }, { geo: shared('awningCanvas', awningCanvasGeometry), tint: 'canvas' }];
+  if (key === 'lights') return [{ geo: iconGeo('lights') }, { geo: iconBulbs(), glow: true }];
+  if (key === 'bunting') return [{ geo: iconGeo('buntLine') }, { geo: iconGeo('buntA'), tint: 'canvas' }, { geo: iconGeo('buntB') }];
+  if (key === 'trim' || key === 'gear') return [{ geo: iconGeo(key) }];
+  return [];
+}
 /**
  * The shapes that make up one variant of a part, for drawing its icon: [{ geo, tint, pos? }], tint = which look colour
  * tints it (null = fixed colours). kind: 'hull', 'cabin', 'roof', 'top', 'mast' or 'prop'; `look` gives the context
  * (the cabin a roof sits on, where the mast stands).
  */
-export function partPieces(kind, v, look) {
+export function partPieces(kind, v, look, lvl = 1) {
   const L = look ?? defaultLook();
   useDims(null); // icons show the parts on a boat of the original size
   if (kind === 'hull') return [{ geo: shared('base', baseGeometry) }, { geo: shared('hullPaint', hullPaintGeometry), tint: 'hull' }];
   if (kind === 'prop') { const g = propGeometry(v); return g ? [{ geo: g }, ...(v === 6 ? [{ geo: propGlowGeometry(), glow: true }] : [])] : []; }
+  if (kind === 'upgrade') return upgradePieces(v, L, Math.max(1, lvl));
   const ci = kind === 'cabin' ? v : L.p[0] === 2 ? 0 : L.p[0], cab = CABINS[ci];
   if (!cab.w) return [];
   const lay = layoutOf({ ...L, p: kind === 'cabin' ? [ci, 0, 2, 2] : kind === 'roof' ? [ci, v, 2, 2] : kind === 'top' ? [ci, L.p[1] === 2 ? 0 : L.p[1], v, 2] : [L.p[0], L.p[1], L.p[2], v] });
@@ -865,7 +983,10 @@ export function boatGeometry(b = null) {
 export function blueprintGeometry(look) {
   const L = cleanLook(look);
   useDims(L);
-  if (L.t) return shared('bp' + L.t, () => { const tg = typeGeometry(L.t), g = mergeGeometries([tg.base, tg.paint, tg.cabin, tg.roof].filter(Boolean)); g.userData.shared = true; return g; });
+  if (L.t) {
+    const rs = L.t === 1 ? rowSailParts(L.u[0]) : null;
+    return shared(`bp${L.t}.${rs ? L.u[0] : 0}`, () => { const tg = typeGeometry(L.t), g = mergeGeometries([tg.base, tg.paint, tg.cabin, tg.roof, rs?.mast, rs?.sail].filter(Boolean)); g.userData.shared = true; return g; });
+  }
   const lay = layoutOf(L), { cab, wh, mast } = lay, ci = L.p[0];
   return shared(`bp0|${lay.key}|${lay.roof}|${lay.top}`, () => {
     const list = [shared('base', baseGeometry), shared('hullPaint', hullPaintGeometry)];
@@ -966,7 +1087,7 @@ class Wake {
   }
   spawn(x, z, vx, vz, size, grow, dur, bright, yaw) {
     const p = this.parts[this.next];
-    Object.assign(p, { x, z, vx, vz, size, grow, dur, bright, yaw, life: 0 });
+    Object.assign(p, { x, z, vx, vz, size, grow, dur, bright, yaw, life: 0, env: this.world ? waveEnv(this.world, x, z) : 0 });
     this.next = (this.next + 1) % WAKE_MAX;
   }
   /** Shed foam from a boat moving at its shown speed (b.vis). */
@@ -993,6 +1114,7 @@ class Wake {
   }
   update(dt, t) {
     const m = this.mesh, y = SEA + 0.05 + Math.sin(t * 0.8) * 0.03; // ride on the water plane's gentle swell
+    const T = waveClock(), w = this.world;
     let any = false;
     this.parts.forEach((p, i) => {
       if (p.life >= p.dur) return;
@@ -1005,7 +1127,7 @@ class Wake {
       const s = done ? 0 : p.size + p.grow * k;
       const fade = done ? 0 : p.bright * (k < 0.1 ? k / 0.1 : (1 - k) ** 1.6);
       // snap to a 1/8 grid so the foam stays crisp and pixel-like as it drifts
-      m.setMatrixAt(i, _m.compose(_p.set(Math.round(p.x * 8) / 8, y, Math.round(p.z * 8) / 8), _q.setFromEuler(_e.set(0, p.yaw, 0)), _s.set(s, 1, s)));
+      m.setMatrixAt(i, _m.compose(_p.set(Math.round(p.x * 8) / 8, y + (w && p.env > 0 ? waveAt(w, p.x, p.z, T, p.env) : 0), Math.round(p.z * 8) / 8), _q.setFromEuler(_e.set(0, p.yaw, 0)), _s.set(s, 1, s)));
       m.setColorAt(i, _c.setRGB(fade * 0.9, fade * 0.97, fade));
     });
     if (any) { m.instanceMatrix.needsUpdate = true; m.instanceColor.needsUpdate = true; }
@@ -1041,7 +1163,9 @@ function flagMaterial(color) {
 
 /** What each upgrade does and costs (levels 1..max). Effects: see engineFactor / rudderFactor and applyLook. */
 export const UPGRADES = [
-  { key: 'engine', all: true, name: 'Engine', desc: 'Top speed +15% per level, and a taller chimney', cost: [{ wood: 6, stone: 4 }, { wood: 10, log: 4, stone: 8 }, { wood: 16, log: 8, stone: 14 }] },
+  { key: 'engine', all: true, name: 'Engine', desc: 'Top speed +15% per level, and a taller chimney', cost: [{ wood: 6, stone: 4 }, { wood: 10, log: 4, stone: 8 }, { wood: 16, log: 8, stone: 14 }],
+    // on the rowboat the same slot is a sail (same speed bonus), bigger with each level (ROW_SAIL)
+    row: { name: 'Sail', desc: 'Top speed +15% per level, and a bigger sail', cost: [{ stick: 4, leaves: 10, wood: 2 }, { stick: 6, leaves: 16, wood: 4 }, { stick: 8, leaves: 24, wood: 6, log: 2 }] } },
   { key: 'rudder', all: true, name: 'Rudder', desc: 'Turns 20% quicker per level', cost: [{ wood: 4, pebble: 4 }, { wood: 8, stone: 4 }] },
   { key: 'awning', name: 'Canvas awning', desc: 'Shade over the foredeck, in your canvas colour', cost: [{ stick: 6, leaves: 12 }] },
   { key: 'lights', name: 'String lights', desc: 'Warm little lights strung around the deck', cost: [{ stick: 6, wood: 2, berries: 4 }] },
@@ -1056,6 +1180,8 @@ const UPGRADE_GEO = {
   trim: [['trim', trimGeometry]],
   gear: [['gear', gearGeometry]],
 };
+/** Upgrade i as it applies to a boat of kind t (the rowboat's Engine is its Sail). */
+export const upgradeFor = (i, t) => (t === 1 && UPGRADES[i].row ? { ...UPGRADES[i], ...UPGRADES[i].row } : UPGRADES[i]);
 export const engineFactor = (b) => 1 + 0.15 * (b?.look?.u[0] ?? 0);
 export const rudderFactor = (b) => 1 + 0.2 * (b?.look?.u[1] ?? 0);
 
@@ -1070,6 +1196,7 @@ export class Boats {
     this.world = world; // to see how deep the water is under each boat
     this.list = new Map();
     this.wake = new Wake(scene);
+    this.wake.world = world; // the foam rides the swell
   }
   /** Add a boat or move one (and give it a look). `instant` jumps there (the local driver, or a new boat). */
   set(id, x, z, yaw, instant = false, look = undefined) {
@@ -1132,10 +1259,13 @@ export class Boats {
         return { pivot, o, sx };
       });
       tag(tm.base, 'hull'); tag(tm.paint, 'hull'); tag(tm.cabin, 'cabin'); tag(tm.roof, 'roof');
+      // the rowboat's sail upgrade: mast and rigging, and the sail in the canvas colour
+      const rowSail = { mast: mesh(null, m.base), sail: mesh(null, tint.canvas) };
+      tag(rowSail.mast, 'hull'); tag(rowSail.sail, 'hull');
       // everything that belongs to the cabin boat only (hidden on the other kinds)
       const sloopMeshes = [hullM, paintM, sloopGlow, flag, ...Object.values(sw), ...Object.values(parts).flat(), ...props.flat(), ...markers];
       this.scene.add(group);
-      b = { id, x, z, yaw, sx: x, sz: z, syaw: yaw, speed: 0, group, flag, tint, sw, parts, props, markers, hullM, paintM, sloopGlow, sloopMeshes, tm, oars, plates, plateMat, look: null, hull: HULLS[0], obs: layoutOf(null).obs, editing: false, seeH: 0, baseM: m.base };
+      b = { id, x, z, yaw, sx: x, sz: z, syaw: yaw, speed: 0, group, flag, tint, sw, parts, props, markers, hullM, paintM, sloopGlow, sloopMeshes, tm, rowSail, oars, plates, plateMat, look: null, hull: HULLS[0], obs: layoutOf(null).obs, editing: false, seeH: 0, baseM: m.base };
       this.list.set(id, b);
       instant = true;
       if (look === undefined) look = defaultLook();
@@ -1182,6 +1312,8 @@ export class Boats {
     b.tint.flag.color.setHex(col(3));
     const hl = (b.hull = hullOf(L)), tg = L.t ? typeGeometry(L.t) : null;
     for (const [k, o] of Object.entries(b.tm)) { const g = tg?.[k]; if (g) o.geometry = g; o.visible = !!g; }
+    const rs = L.t === 1 ? rowSailParts(L.u[0]) : null;
+    for (const [k, o] of Object.entries(b.rowSail)) { if (rs) o.geometry = rs[k]; o.visible = !!rs; }
     for (const oar of b.oars) { oar.pivot.visible = L.t === 1; oar.pivot.position.set(oar.sx * (hl.W - 0.02), hl.DECK + OAR.PIVOT_Y, OAR.PIVOT_Z); }
     // name plates on both quarters, on the hull band
     b.plates.forEach((p, i) => { const sx = i ? -1 : 1; p.position.set(sx * (hl.W + 0.03), L.t ? hl.DECK - 0.11 : mapY(0.3), L.t ? hl.STERN * 0.55 : -1.75); p.scale.setScalar(L.t === 1 ? 0.6 : 1); });
@@ -1364,7 +1496,26 @@ export class Boats {
         const want = Math.min(kd, Math.max(0, bed + kd + 0.04 - SEA));
         b.lift = (b.lift ?? want) + (want - (b.lift ?? want)) * (1 - Math.exp(-dt * 3));
       }
-      g.position.set(b.sx, SEA + bobY(b, t) + (b.lift ?? 0), b.sz);
+      // ride the swell (open water only, waves.js): sample it at the bow, stern and both sides; the hull's
+      // inertia smooths it, so a short wave rocks it less than a long one
+      let wh = 0, wp = 0, wr = 0, env = 0, bowRise = 0;
+      if (this.world) {
+        const hl = b.hull ?? HULLS[0], T = waveClock(), zb = hl.TIP * 0.75, zs = hl.STERN * 0.85, xw = hl.W;
+        env = waveEnv(this.world, b.sx, b.sz);
+        const at = (lx, lz) => { const [x, z] = toWorldXZ(b, lx, lz); return waveAt(this.world, x, z, T); };
+        const hb = at(0, zb), hs = at(0, zs), hp = at(-xw, 0), hr = at(xw, 0);
+        wh = (hb + hs + hp + hr) / 4;
+        wp = Math.atan2(hb - hs, zb - zs); // + = bow up
+        wr = Math.atan2(hr - hp, 2 * xw); // + = starboard up
+        bowRise = (hb - (b.hbPrev ?? hb)) / Math.max(dt, 1e-3); // the bow meeting a wave face (spray slaps)
+        b.hbPrev = hb;
+      }
+      const kw = 1 - Math.exp(-dt * 5);
+      b.wH = (b.wH ?? wh) + (wh - (b.wH ?? wh)) * kw;
+      b.wP = (b.wP ?? wp) + (wp - (b.wP ?? wp)) * kw;
+      b.wR = (b.wR ?? wr) + (wr - (b.wR ?? wr)) * kw;
+      b.wEnv = env; b.bowRise = bowRise;
+      g.position.set(b.sx, SEA + bobY(b, t) + (b.lift ?? 0) + b.wH, b.sz);
       // Heel out of turns and lift the bow with speed. Worked out from how the boat moves on this screen, which is
       // smooth for its driver; everyone else uses the driver's values from the network (np.h / np.l), because
       // deriving them from a replayed path (a derivative of a derivative) twitched.
@@ -1372,9 +1523,10 @@ export class Boats {
       let lean = THREE.MathUtils.clamp(b.visAcc * 0.03 + b.vis * 0.006, -0.09, 0.09);
       if (np && np.h != null) { heel = np.h; lean = np.l ?? lean; }
       b.heel = heel; b.lean = lean; // sent with the driver's boat updates
-      const roll = Math.sin(t * 1.1 + b.id % 3) * 0.028 * (1 + b.vis * 0.15) - heel;
-      const pitch = Math.sin(t * 0.9 + b.id % 5) * 0.018 - lean;
+      const roll = Math.sin(t * 1.1 + b.id % 3) * 0.028 * (1 + b.vis * 0.15) - heel + b.wR;
+      const pitch = Math.sin(t * 0.9 + b.id % 5) * 0.018 - lean - b.wP;
       g.rotation.set(pitch, b.syaw, roll, 'YXZ');
+      b.dyx = Math.sin(roll) * Math.cos(pitch); b.dyz = -Math.sin(pitch); // for deckY at a spot on deck
       if (b.look?.t === 1) this.row(b, dt);
       this.wake.emit(b, dt);
       this.spray(b, dt, t);
@@ -1411,8 +1563,10 @@ export class Boats {
     if (!fx || v < 1.1) return;
     const k = Math.min(1, v / hl.MAX_SPEED), s = hl.W / BOAT.W, astern = (b.visFwd ?? 0) < -0.3;
     const sn = Math.sin(b.syaw), cs = Math.cos(b.syaw), dir = astern ? -1 : 1;
-    const y = SEA + 0.04 + bobY(b, t);
-    const slap = 0.45 + 1.4 * Math.max(0, Math.sin(t * 2.3 + b.id % 11)) ** 3; // the bow meeting a wave
+    const y = SEA + 0.04 + bobY(b, t) + (b.wH ?? 0);
+    // the bow meeting a wave: on open water, when the swell lifts the bow; in calm water, a gentle rhythm
+    const calm = 0.45 + 1.4 * Math.max(0, Math.sin(t * 2.3 + b.id % 11)) ** 3, env = Math.min(1, b.wEnv ?? 0);
+    const slap = calm * (1 - env) + env * (0.25 + 2.2 * Math.min(1, Math.max(0, (b.bowRise ?? 0) * 3)));
     const lz = astern ? hl.STERN + 0.1 : hl.BOW0 + (hl.TIP - hl.BOW0) * 0.45;
     const fwdV = (b.visFwd ?? 0) * 0.5;
     b.sprayAcc ??= [0, 0];
@@ -1427,7 +1581,7 @@ export class Boats {
         const vx = side * cs * out + sn * (fwdV + back * dir), vz = -side * sn * out + cs * (fwdV + back * dir);
         fx.drop(wx, y, wz, vx, (1.1 + 2.7 * k) * (0.55 + Math.random() * 0.65) * Math.sqrt(s), vz, (0.045 + Math.random() * 0.045) * (0.6 + 0.4 * s));
         // the white water where the bow cuts in, peeling away along the hull
-        if (Math.random() < 0.5) fx.foamAt(wx, wz, vx * 0.35, vz * 0.35, (0.12 + Math.random() * 0.1) * s, 0.5 + Math.random() * 0.5, 0.4 + 0.35 * k, SEA + bobY(b, t) * 0.5);
+        if (Math.random() < 0.5) fx.foamAt(wx, wz, vx * 0.35, vz * 0.35, (0.12 + Math.random() * 0.1) * s, 0.5 + Math.random() * 0.5, 0.4 + 0.35 * k, SEA + bobY(b, t) * 0.5 + (b.wH ?? 0));
       }
     });
     if (!astern && k > 0.35 && Math.random() < dt * 30 * (k - 0.35)) { // churned water at the stern

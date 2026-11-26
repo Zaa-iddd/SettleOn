@@ -46,6 +46,9 @@ const REEF_COLORS = [0xff7a2a, 0x3a7ff0, 0xffd23a, 0x9a5ae0, 0xff6fa8, 0x2fd6b8,
 const FLOCKS = 4, FLOCK_MAX = 7;
 const BIRD_COLORS = [0xf3f0e8, 0x3a3944, 0x8a6a4a]; // gulls, swifts, sparrows
 const BIRD_SIZE = 1.8; // model scale (the model is a small, readable silhouette at this size)
+const BIRD_BEAT = [2.8, 5, 6]; // wingbeats a second: slow gulls, quicker swifts and sparrows (13+ Hz strobed at 60 fps)
+const BEAT_DOWN = 0.35; // share of a wingbeat spent on the (snappy) downstroke
+const ROLL_EVERY = 26, ROLL_SECS = 0.8; // each bird does a barrel roll about this often, taking this long
 const BIRD_RANGE = 46; // a flock leaves and later re-enters once it's this far from the player
 // height above the ground: low over open land so they cross the view up close (the camera looks down),
 // above the treetops over woods, and above the canopy over redwood forest
@@ -58,6 +61,95 @@ function striderGeometry() {
     parts.push(new THREE.BoxGeometry(0.11, 0.006, 0.008).rotateY(a).translate(x, -0.006, z));
   }
   return mergeGeometries(parts);
+}
+
+// A little bird (about 0.2 long, 0.62 wingspan), faces +z, in one merged geometry so a whole sky of birds
+// is one draw call. Per vertex: `color` is a shade multiplied by the flock colour (or, where `aKeep` is 1,
+// a fixed colour: beak and eyes), and `aWing` marks the body (0), inner wing (1) and outer wing (2).
+// The wings bend in the vertex shader (birdMaterial) from a per-instance `aFlap` = (shoulder, wrist) angle,
+// so animating a bird costs one matrix and two floats a frame.
+const SHOULDER = 0.03, WRIST = 0.15, WING_Y = 0.024, WING_TIP = 0.31;
+function birdGeometry() {
+  const parts = [];
+  const add = (g, shade, wing = 0, keep = null, shape = null) => {
+    g.deleteAttribute('uv');
+    const pos = g.attributes.position, n = pos.count;
+    if (shape) for (let i = 0; i < n; i++) { const p = shape(pos.getX(i), pos.getY(i), pos.getZ(i)); pos.setXYZ(i, p[0], p[1], p[2]); }
+    const col = new Float32Array(n * 3), kc = keep != null ? new THREE.Color(keep) : null;
+    for (let i = 0; i < n; i++) {
+      const s = typeof shade === 'function' ? shade(pos.getX(i), pos.getY(i), pos.getZ(i)) : shade;
+      col.set(kc ? [kc.r, kc.g, kc.b] : [s, s, s], i * 3);
+    }
+    g.setAttribute('color', new THREE.BufferAttribute(col, 3));
+    g.setAttribute('aWing', new THREE.BufferAttribute(new Float32Array(n).fill(wing), 1));
+    g.setAttribute('aKeep', new THREE.BufferAttribute(new Float32Array(n).fill(kc ? 1 : 0), 1));
+    g.computeVertexNormals();
+    parts.push(g);
+  };
+  const belly = (x, y) => (y < 0 ? 1.12 : 0.94);
+  add(new THREE.BoxGeometry(0.075, 0.062, 0.15), belly); // torso
+  add(new THREE.BoxGeometry(0.066, 0.058, 0.05).translate(0, 0.008, 0.085), belly); // chest
+  // head (a touch big, cartoon style), beak and eyes nod together on the neck joint (aWing 3)
+  add(new THREE.BoxGeometry(0.062, 0.058, 0.06).translate(0, 0.032, 0.13), 1, 3); // head
+  add(new THREE.BoxGeometry(0.018, 0.014, 0.036).translate(0, 0.024, 0.176), 1, 3, 0xf0a830); // beak
+  add(new THREE.BoxGeometry(0.066, 0.014, 0.012).translate(0, 0.043, 0.143), 1, 3, 0x15151c); // eyes (through the head)
+  // tail: a fan that widens toward its end, bobbing on its own joint (aWing 4)
+  add(new THREE.BoxGeometry(0.05, 0.01, 0.09).translate(0, 0.008, -0.115), 0.8, 4, null, (x, y, z) => [z < -0.12 ? x * 1.9 : x, y, z]);
+  for (const s of [-1, 1]) {
+    // inner wing: shoulder to wrist, a broad plate tapering a little
+    add(new THREE.BoxGeometry(WRIST - SHOULDER + 0.01, 0.012, 0.1).translate(s * (SHOULDER + WRIST) / 2, WING_Y, 0.01), 0.95, 1, null,
+      (x, y, z) => { const t = (Math.abs(x) - SHOULDER) / (WRIST - SHOULDER); return [x, y, z * (1 - 0.12 * t)]; });
+    // outer wing (the primaries): narrows to a swept-back point, darker toward the tip
+    add(new THREE.BoxGeometry(WING_TIP - WRIST, 0.01, 0.088, 2, 1, 1).translate(s * (WRIST + WING_TIP) / 2, WING_Y, 0.004),
+      (x) => 0.86 - 0.42 * Math.min(1, Math.max(0, (Math.abs(x) - WRIST) / (WING_TIP - WRIST))), 2, null,
+      (x, y, z) => { const t = Math.min(1, Math.max(0, (Math.abs(x) - WRIST) / (WING_TIP - WRIST))); return [x, y, z * (1 - 0.6 * t) - 0.055 * t]; });
+  }
+  return mergeGeometries(parts);
+}
+
+// The wing bend, shared by the bird material and its shadow depth material.
+const BIRD_GLSL = `
+  attribute float aWing;
+  attribute vec4 aFlap; // shoulder, wrist, tail, head angles
+  vec3 birdRotZ(vec3 v, float a) { float c = cos(a), s = sin(a); return vec3(v.x * c - v.y * s, v.x * s + v.y * c, v.z); }
+  vec3 birdRotX(vec3 v, float a) { float c = cos(a), s = sin(a); return vec3(v.x, v.y * c - v.z * s, v.y * s + v.z * c); }
+  // head and tail pitch on their joints; wings: mirror into the right wing, fold at the wrist,
+  // then at the shoulder, and mirror back
+  vec3 birdBend(vec3 v, bool isPoint) {
+    if (aWing < 0.5) return v;
+    if (aWing > 3.5) { vec3 j = isPoint ? vec3(0.0, 0.008, -0.07) : vec3(0.0); return birdRotX(v - j, aFlap.z) + j; }
+    if (aWing > 2.5) { vec3 j = isPoint ? vec3(0.0, 0.02, 0.1) : vec3(0.0); return birdRotX(v - j, aFlap.w) + j; }
+    float side = position.x < 0.0 ? -1.0 : 1.0;
+    v.x *= side;
+    vec3 wrist = isPoint ? vec3(${WRIST.toFixed(3)}, ${WING_Y.toFixed(3)}, 0.0) : vec3(0.0);
+    vec3 shoulder = isPoint ? vec3(${SHOULDER.toFixed(3)}, ${WING_Y.toFixed(3)}, 0.0) : vec3(0.0);
+    if (aWing > 1.5) v = birdRotZ(v - wrist, aFlap.y) + wrist;
+    v = birdRotZ(v - shoulder, aFlap.x) + shoulder;
+    v.x *= side;
+    return v;
+  }
+`;
+function bendBird(sh) {
+  sh.vertexShader = sh.vertexShader
+    .replace('#include <common>', `#include <common>\n${BIRD_GLSL}`)
+    .replace('#include <begin_vertex>', '#include <begin_vertex>\n  transformed = birdBend(transformed, true);');
+  if (sh.vertexShader.includes('#include <beginnormal_vertex>')) {
+    sh.vertexShader = sh.vertexShader.replace('#include <beginnormal_vertex>', '#include <beginnormal_vertex>\n  objectNormal = birdBend(objectNormal, false);');
+  }
+}
+function birdMaterial() {
+  const m = new THREE.MeshLambertMaterial({ vertexColors: true });
+  m.onBeforeCompile = (sh) => {
+    bendBird(sh);
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', '#include <common>\nattribute float aKeep;')
+      .replace('#include <color_vertex>', '#include <color_vertex>\n  vColor.rgb = mix(vColor.rgb, color.rgb, aKeep);');
+  };
+  m.customProgramCacheKey = () => 'bird';
+  const depth = new THREE.MeshDepthMaterial();
+  depth.onBeforeCompile = bendBird;
+  depth.customProgramCacheKey = () => 'bird-depth';
+  return [m, depth];
 }
 
 // A chunky little frog (about 0.2 long), built from vertex-coloured boxes. Faces +z.
@@ -171,24 +263,20 @@ export class Ambient {
     // ---------- birds: flocks that fly across, flapping and gliding, casting small shadows ----------
     this.flocks = Array.from({ length: FLOCKS }, (_, i) => ({
       n: 3 + Math.floor(rand() * (FLOCK_MAX - 2)), color: BIRD_COLORS[i % BIRD_COLORS.length],
-      active: false, wait: 1 + i * 2.5 + rand() * 3, x: 0, z: 0, y: 0, hx: 1, hz: 0, speed: 4, ph: rand() * 100,
+      active: false, wait: 1 + i * 2.5 + rand() * 3, x: 0, z: 0, y: 0, hx: 1, hz: 0, speed: 4, ph: rand() * 100, turn: 0,
+      beat: BIRD_BEAT[i % BIRD_BEAT.length], phases: Array.from({ length: FLOCK_MAX }, () => rand() * Math.PI * 2), glide: 0,
     }));
     const n = FLOCKS * FLOCK_MAX;
-    const body = mergeGeometries([
-      new THREE.BoxGeometry(0.07, 0.06, 0.2),
-      new THREE.BoxGeometry(0.06, 0.06, 0.06).translate(0, 0.02, 0.12), // head
-      new THREE.BoxGeometry(0.08, 0.015, 0.07).translate(0, 0, -0.12), // tail
-    ]);
-    const wing = new THREE.BoxGeometry(0.26, 0.012, 0.09).translate(0.13, 0, 0); // hinged at the body
-    const birdMat = new THREE.MeshLambertMaterial();
-    this.birdBody = instancedMesh(body, birdMat, n);
-    this.birdWingL = instancedMesh(wing, birdMat, n);
-    this.birdWingR = instancedMesh(wing, birdMat, n);
-    for (const m of [this.birdBody, this.birdWingL, this.birdWingR]) {
-      m.castShadow = true;
-      this.flocks.forEach((f, fi) => { for (let k = 0; k < FLOCK_MAX; k++) m.setColorAt(fi * FLOCK_MAX + k, c.setHex(f.color).multiplyScalar(0.92 + ((k * 37) % 10) / 60)); });
-      scene.add(m);
-    }
+    const geo = birdGeometry();
+    this.birdFlap = new THREE.InstancedBufferAttribute(new Float32Array(n * 4), 4);
+    this.birdFlap.setUsage(THREE.DynamicDrawUsage);
+    geo.setAttribute('aFlap', this.birdFlap);
+    const [birdMat, birdDepth] = birdMaterial();
+    this.birds = instancedMesh(geo, birdMat, n);
+    this.birds.customDepthMaterial = birdDepth;
+    this.birds.castShadow = true;
+    this.flocks.forEach((f, fi) => { for (let k = 0; k < FLOCK_MAX; k++) this.birds.setColorAt(fi * FLOCK_MAX + k, c.setHex(f.color).multiplyScalar(0.92 + ((k * 37) % 10) / 60)); });
+    scene.add(this.birds);
 
     // ---------- fish: schools under the surface; a body plus a wagging tail ----------
     this.fish = [];
@@ -380,7 +468,8 @@ export class Ambient {
         if (f.wait <= 0) this.spawnFlock(f, focus);
       } else {
         // drift along a gently wandering heading, rising over hills and forests (smoothly)
-        const turn = Math.sin(t * 0.3 + f.ph) * 0.12 * dt;
+        f.turn = Math.sin(t * 0.3 + f.ph) * 0.12;
+        const turn = f.turn * dt;
         [f.hx, f.hz] = [f.hx * Math.cos(turn) - f.hz * Math.sin(turn), f.hx * Math.sin(turn) + f.hz * Math.cos(turn)];
         f.x += f.hx * f.speed * dt;
         f.z += f.hz * f.speed * dt;
@@ -396,29 +485,45 @@ export class Ambient {
         const i = fi * FLOCK_MAX + k;
         if (!f.active || k >= f.n) {
           tmpM.compose(tmpP.set(0, -100, 0), tmpQ.identity(), zero);
-          this.birdBody.setMatrixAt(i, tmpM); this.birdWingL.setMatrixAt(i, tmpM); this.birdWingR.setMatrixAt(i, tmpM);
+          this.birds.setMatrixAt(i, tmpM);
           continue;
         }
         // loose V: the leader first, then pairs further back on each side
         const row = Math.ceil(k / 2), sideK = k === 0 ? 0 : k % 2 ? 1 : -1, q = f.ph + k * 1.9;
         const back = row * 1.2 + Math.sin(t * 0.7 + q) * 0.12, out = sideK * row * 1.05 + Math.sin(t * 0.5 + q * 2) * 0.1;
         const x = f.x - f.hx * back + f.hz * out, z = f.z - f.hz * back - f.hx * out;
-        const y = f.y + Math.sin(t * 1.3 + q) * 0.12 - row * 0.05;
-        // flap, with glides now and then
-        const gliding = Math.sin(t * 0.45 + q) < -0.35;
-        const flap = gliding ? 0.12 : Math.sin(t * (13 + (k % 3)) + q) * 0.85;
-        tmpQ.setFromEuler(tmpE.set(gliding ? 0 : -flap * 0.08, yaw, 0, 'YXZ'));
-        tmpM.compose(tmpP.set(x, y, z), tmpQ, tmpS.set(BIRD_SIZE, BIRD_SIZE, BIRD_SIZE));
-        this.birdBody.setMatrixAt(i, tmpM);
-        for (const [mesh, sign] of [[this.birdWingL, -1], [this.birdWingR, 1]]) {
-          const wingQ = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, sign < 0 ? Math.PI : 0, flap * -sign));
-          tmpQ.setFromEuler(tmpE.set(0, yaw, 0, 'YXZ')).multiply(wingQ);
-          tmpM.compose(tmpP.set(x, y + 0.01, z), tmpQ, tmpS.set(BIRD_SIZE, BIRD_SIZE, BIRD_SIZE));
-          mesh.setMatrixAt(i, tmpM);
-        }
+        // Cartoon wingbeat. The stroke phase runs unevenly: a snappy downstroke (35% of the beat) and a
+        // lazier upstroke, with cosine ease at both ends so the wings hang at the top and bottom. The
+        // shoulder sweeps big; the wrist follows through behind it (tips trail up on the way down, then
+        // fold right in on the way up); the head nods and the tail bobs a beat behind; the body squashes
+        // and stretches. Glides blend in smoothly with a gentle feather wobble.
+        const u = ((t * f.beat * (1 + (k % 3) * 0.06) + f.phases[k] / (Math.PI * 2)) % 1 + 1) % 1;
+        const phi = u < BEAT_DOWN ? Math.PI * u / BEAT_DOWN : Math.PI * (1 + (u - BEAT_DOWN) / (1 - BEAT_DOWN));
+        const cs = Math.cos(phi), sn = Math.sin(phi); // cs 1 = wings up, -1 = wings down; sn > 0 on the downstroke
+        let g = Math.min(1, Math.max(0, (-Math.sin(t * 0.45 + q) - 0.2) / 0.35));
+        g = g * g * (3 - 2 * g);
+        // now and then a happy barrel roll, wings tucked
+        const rollU = ((t + q * 7.3) / ROLL_EVERY) % 1, rollT = rollU < ROLL_SECS / ROLL_EVERY ? rollU * ROLL_EVERY / ROLL_SECS : -1;
+        const roll = rollT < 0 ? 0 : (k % 2 ? -1 : 1) * Math.PI * 2 * (rollT < 0.5 ? 4 * rollT ** 3 : 1 - (-2 * rollT + 2) ** 3 / 2);
+        const tuck = rollT < 0 ? 1 : 1 - Math.sin(Math.PI * rollT) * 0.85;
+        const a = (1 - g) * tuck;
+        const wob = Math.sin(t * 3.1 + q) * 0.06;
+        const shoulder = a * (0.12 + 0.98 * cs) + g * (0.09 + wob * 0.5) - (1 - tuck) * 0.5;
+        const wrist = a * (sn > 0 ? 0.5 * sn : 1.05 * sn) + g * wob + (1 - tuck) * 0.4;
+        const tail = a * 0.3 * Math.sin(phi - 0.9) + g * 0.1 * Math.sin(t * 1.7 + q);
+        const head = a * 0.2 * Math.cos(phi - 1.4) - g * 0.05;
+        this.birdFlap.setXYZW(i, shoulder, wrist, tail, head);
+        // the body pops up on the downstroke (and stretches), sinks and squashes as the wings come up,
+        // and banks into the flock's turns
+        const y = f.y + Math.sin(t * 1.3 + q) * 0.12 - row * 0.05 - a * cs * 0.04 * BIRD_SIZE;
+        const st = 1 + a * 0.13 * sn, sq = 1 / Math.sqrt(st);
+        tmpQ.setFromEuler(tmpE.set(-0.12 * a * cs, yaw, f.turn * 2.6 + roll, 'YXZ'));
+        tmpM.compose(tmpP.set(x, y, z), tmpQ, tmpS.set(BIRD_SIZE * sq, BIRD_SIZE * st, BIRD_SIZE * sq));
+        this.birds.setMatrixAt(i, tmpM);
       }
     });
-    this.birdBody.instanceMatrix.needsUpdate = this.birdWingL.instanceMatrix.needsUpdate = this.birdWingR.instanceMatrix.needsUpdate = true;
+    this.birds.instanceMatrix.needsUpdate = true;
+    this.birdFlap.needsUpdate = true;
   }
 
   // a random item of `list` within `reach` of (x, z)

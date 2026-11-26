@@ -14,6 +14,7 @@ import { CH } from '../shared/endless.js';
 
 const MAX_UP = 1.25; // two blocks and a bit (a quarter more than 1.0, at the user's request)
 const MAX_DOWN = 3.0;
+const FURNITURE_CLEAR = 0.17; // the character's radius, kept clear of furniture footprints
 export const SWIM_FLOOR = SEA - 0.55;
 const MAX_EXPANSIONS = 12000;
 const WIN = 96; // routes search a (2·WIN+1)² window around the midpoint of start and goal
@@ -83,6 +84,10 @@ export class PathFinder {
   }
   passable(ix, iz) {
     if (this.world.benches?.size && this.world.benches.has(cellKey(ix, iz))) return false; // a workbench stands there
+    return this.groundOpen(ix, iz);
+  }
+  // open ground, ignoring furniture
+  groundOpen(ix, iz) {
     if (this.endless) return !this._chunk(ix, iz).blocked[this._li(ix, iz)];
     return inWorld(ix, iz) && !this.blockedA[iz * WORLD + ix];
   }
@@ -137,7 +142,29 @@ export class PathFinder {
   /** Can the character stand there? Every tile it touches must be open, and no walk-under trunk on that corner. */
   halfOpen(qx, qz) {
     if (!(qx & 1) && !(qz & 1) && this.cornerBlocked(qx / 2, qz / 2)) return false;
-    return this.halfTiles(qx, qz).every(([x, z]) => this.passable(x, z));
+    return this.halfTiles(qx, qz).every(([x, z]) => this.passable(x, z) || this.besideFurniture(qx, qz, x, z));
+  }
+  /**
+   * Furniture blocks its tile for routes and whole-tile steps, but you may stand on that tile's edge or
+   * corner where the piece doesn't reach: its real footprint (`footprint(type)` → [x0, x1, z0, z1] in the
+   * tile, unrotated; set by main.js from the models) grown by the character's radius.
+   */
+  besideFurniture(qx, qz, ix, iz) {
+    if ((qx & 1) && (qz & 1)) return false; // never the middle of its tile
+    const b = this.footprint && this.world.benches?.get(cellKey(ix, iz));
+    if (!b || !this.groundOpen(ix, iz)) return false;
+    const f = this.footprint(b[3] ?? 0);
+    if (!f) return false;
+    const ox = qx / 2 - ix - 0.5, oz = qz / 2 - iz - 0.5; // where we'd stand, from the tile's centre (-0.5, 0 or 0.5)
+    // the footprint turned by its quarter turns (the model's rotation about y)
+    const r = ((b[2] % 4) + 4) % 4, c = [1, 0, -1, 0][r], sn = [0, 1, 0, -1][r];
+    let x0 = Infinity, x1 = -Infinity, z0 = Infinity, z1 = -Infinity;
+    for (const [x, z] of [[f[0], f[2]], [f[1], f[2]], [f[0], f[3]], [f[1], f[3]]]) {
+      const rx = x * c + z * sn, rz = -x * sn + z * c;
+      x0 = Math.min(x0, rx); x1 = Math.max(x1, rx); z0 = Math.min(z0, rz); z1 = Math.max(z1, rz);
+    }
+    const R = FURNITURE_CLEAR;
+    return !(ox > x0 - R && ox < x1 + R && oz > z0 - R && oz < z1 + R);
   }
   /** A half step from (qx, qz) by (dx, dz), each -1..1: same climb and drop limits as whole tiles, no corner cutting. */
   halfStepOk(qx, qz, dx, dz) {

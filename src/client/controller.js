@@ -51,7 +51,7 @@ export class GridController {
   homeOf(qx, qz, prefer) {
     let best = null, bf = -Infinity;
     for (const [x, z] of this.paths.halfTiles(qx, qz)) {
-      const f = this.paths.floorAt(x, z) + (prefer && x === prefer[0] && z === prefer[1] ? 1e-6 : 0);
+      const f = this.paths.floorAt(x, z) + (prefer && x === prefer[0] && z === prefer[1] ? 1e-6 : 0) - (this.paths.passable(x, z) ? 0 : 1e-3); // not furniture's tile
       if (f > bf) { bf = f; best = [x, z]; }
     }
     return best;

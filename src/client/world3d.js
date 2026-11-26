@@ -10,6 +10,7 @@ import { leafyTreeGeometry, pineTreeGeometry, redwoodGeometry, bushGeometry } fr
 import { Ambient, WIND } from './ambient.js';
 import { WORLD, SEA, K, toWorld, rng, cellKey, MIN_LEVEL, STEP } from '../shared/world.js';
 import { CH } from '../shared/endless.js';
+import { WAVE_GLSL, waveClock } from './waves.js';
 
 export const SKY = 0xa3d2ec; // a soft, slightly hazy blue
 
@@ -331,6 +332,7 @@ function terrainMaterial(heightTex) {
 
 // ---------- foliage ----------
 export const wind = { value: 0 };
+export const waveTime = { value: 0 }; // the swell's clock (waves.js waveClock), shared by every player
 
 // Lambert material whose vertices sway with the wind, more toward the top.
 function swayMaterial(color, strength, side = THREE.FrontSide, vertexColors = false) {
@@ -466,8 +468,6 @@ const LANTERN_LIGHTS = 4; // lantern lights: the local player + the 3 nearest ot
 const LANTERN_RANGE = 8, LANTERN_I = 2.2;
 const FIREFLY_LIGHTS = 4; // point lights shared by the fireflies nearest the player (each one costs every lit pixel)
 const FIREFLY_LIGHT_I = 0.4; // peak intensity of each, at full night (kept subtle)
-const PICKLE_LIGHTS = 4; // green point lights on the glowing sea pickles nearest the player (night only)
-const PICKLE_LIGHT_I = 1.6, PICKLE_RANGE = 3.2; // intensity at full night, and how far each one reaches
 
 // Redwoods near the player are cut away above head height (cone-shaped: the allowed height grows
 // with horizontal distance), with a dithered edge, so the camera can see under the canopy. The cut
@@ -547,10 +547,6 @@ const GEO = {
   cap: () => sharedGeo('cap', () => new THREE.CylinderGeometry(0.03, 0.085, 0.06, 6).translate(0, 0.12, 0)),
   seaweed: () => sharedGeo('seaweed', seaweedGeometry),
   seagrass: () => sharedGeo('seagrass', seagrassGeometry),
-  pickle1: () => sharedGeo('pickle1', () => pickleGeometry(1)),
-  pickle2: () => sharedGeo('pickle2', () => pickleGeometry(2)),
-  pickle3: () => sharedGeo('pickle3', () => pickleGeometry(3)),
-  pickle4: () => sharedGeo('pickle4', () => pickleGeometry(4)),
   // a loose pebble with a smaller one beside it (players pick these up)
   pebble: () => sharedGeo('pebble', () => mergeGeometries([
     new THREE.DodecahedronGeometry(0.13, 0).scale(1, 0.6, 0.85).translate(0, 0.06, 0),
@@ -656,46 +652,6 @@ function seagrassGeometry() {
   }
   return mergeGeometries(parts);
 }
-// sea pickles: n stubby tubes with darker rims around their open tops (the whole tube glows at night)
-function pickleGeometry(n) {
-  const parts = [], spots = [[0, 0, 0.16], [0.07, 0.05, 0.12], [-0.06, 0.05, 0.1], [0.02, -0.08, 0.13]];
-  for (let i = 0; i < n; i++) {
-    const [x, z, h] = spots[i];
-    const g = new THREE.CylinderGeometry(0.03, 0.036, h, 6).translate(0, h / 2, 0).rotateZ((i - 1.5) * 0.12).translate(x, 0, z);
-    g.deleteAttribute('uv');
-    parts.push(g);
-  }
-  return mergeGeometries(parts);
-}
-
-// Sea pickles: their night glow (emissive, set in applyDarkness) fades with depth (strong in the shallows, faint
-// down deep) and with distance from the player (uFocus, set every frame), so only the ones near you stand out.
-const pickleFade = /* js */ (depth, dist) => Math.max(0.08, 1 - Math.min(1, Math.max(0, (depth - 0.5) / 1.4))) * (1 - 0.94 * Math.min(1, Math.max(0, (dist - 6) / 12)));
-function pickleMaterial() {
-  const m = new THREE.MeshLambertMaterial({ color: 0x9db45a, emissive: 0x000000 });
-  m.userData.uFocus = { value: new THREE.Vector3() };
-  m.onBeforeCompile = (sh) => {
-    sh.uniforms.uFocus = m.userData.uFocus;
-    sh.vertexShader = sh.vertexShader
-      .replace('#include <common>', `#include <common>
-        varying vec3 vPickleW;`)
-      .replace('#include <worldpos_vertex>', `#include <worldpos_vertex>
-        vec4 pw = vec4(transformed, 1.0);
-        #ifdef USE_INSTANCING
-          pw = instanceMatrix * pw;
-        #endif
-        vPickleW = (modelMatrix * pw).xyz;`);
-    sh.fragmentShader = sh.fragmentShader
-      .replace('#include <common>', `#include <common>
-        varying vec3 vPickleW;
-        uniform vec3 uFocus;`)
-      .replace('vec3 totalEmissiveRadiance = emissive;', `vec3 totalEmissiveRadiance = emissive;
-        float pDepth = ${SEA.toFixed(2)} - vPickleW.y, pDist = distance(vPickleW.xz, uFocus.xz);
-        totalEmissiveRadiance *= max(0.08, 1.0 - clamp((pDepth - 0.5) / 1.4, 0.0, 1.0)) * (1.0 - 0.94 * clamp((pDist - 6.0) / 12.0, 0.0, 1.0));`);
-  };
-  return m;
-}
-
 // Lambert material that bobs with the water surface (same motion as the water plane in update())
 function bobMaterial(params) {
   const m = new THREE.MeshLambertMaterial(params);
@@ -910,14 +866,36 @@ const crateGeometry = () => boxModel((add) => {
   add(0.36, 0.28, 0.36, FW.WOOD, 0.08, 0.68, -0.06); // a smaller crate on top
   add(0.38, 0.05, 0.38, FW.DARK, 0.08, 0.8, -0.06);
 });
-const barrelGeometry = () => boxModel((add) => {
-  for (const ry of [0, Math.PI / 4]) {
-    add(0.46, 0.64, 0.46, FW.WOOD, 0, 0.32, 0, 0, 0, ry); // an octagonal body
-    add(0.52, 0.28, 0.52, FW.LIGHT, 0, 0.32, 0, 0, 0, ry); // bulging in the middle
-    for (const y of [0.1, 0.54]) add(0.5, 0.05, 0.5, 0x3a3532, 0, y, 0, 0, 0, ry); // iron hoops
-    add(0.4, 0.03, 0.4, FW.MID, 0, 0.655, 0, 0, 0, ry); // lid
+// a round barrel: curved staves of uneven tone bulging out in the middle, iron hoops and a lid
+function barrelGeometry() {
+  const parts = [], col = new THREE.Color(), H = 0.66, STAVES = 14;
+  const R = (y) => 0.235 + 0.05 * Math.sin(Math.PI * y / H); // the bulge
+  const push = (g, hex, mul = 1) => {
+    g = g.index ? g.toNonIndexed() : g;
+    col.setHex(hex).multiplyScalar(mul);
+    const n = g.attributes.position.count, c = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) c.set([col.r, col.g, col.b], i * 3);
+    g.setAttribute('color', new THREE.BufferAttribute(c, 3));
+    g.deleteAttribute('uv');
+    parts.push(g);
+  };
+  const profile = [];
+  for (let i = 0; i <= 8; i++) { const y = (i / 8) * H; profile.push(new THREE.Vector2(R(y), y)); }
+  const tones = [FW.WOOD, FW.LIGHT, FW.MID, FW.WOOD, FW.LIGHT, FW.WOOD, FW.MID];
+  for (let i = 0; i < STAVES; i++) { // each stave its own strip, so the tones read as planks
+    const step = (Math.PI * 2) / STAVES;
+    push(new THREE.LatheGeometry(profile, 2, i * step, step), tones[(i * 3) % tones.length], 0.94 + ((i * 7) % 5) * 0.03);
   }
-});
+  for (const y of [0.1, 0.33, 0.56]) { // iron hoops hugging the bulge
+    const h = y === 0.33 ? 0.035 : 0.045;
+    push(new THREE.CylinderGeometry(R(y + h / 2) + 0.012, R(y - h / 2) + 0.012, h, 28).translate(0, y, 0), 0x3a3532);
+  }
+  push(new THREE.CylinderGeometry(R(H) - 0.015, R(H) - 0.015, 0.02, 24).translate(0, H - 0.03, 0), FW.MID); // the lid, set in a little
+  push(new THREE.CylinderGeometry(0.03, 0.03, 0.025, 10).translate(0.08, H - 0.01, 0.05), FW.DARK); // a bung
+  const geo = mergeGeometries(parts);
+  for (const g of parts) g.dispose();
+  return geo;
+}
 const planterGeometry = () => boxModel((add) => {
   add(0.38, 0.32, 0.38, 0xc06a44, 0, 0.16, 0); // a terracotta pot
   add(0.44, 0.06, 0.44, 0xa8553a, 0, 0.33, 0);
@@ -1023,7 +1001,6 @@ export class WorldScene {
       cap: mat(0xd8452f),
       seaweed: swayMaterial(0xffffff, 0.1),
       seagrass: swayMaterial(0xffffff, 0.16),
-      pickle: pickleMaterial(), // glows at night (applyDarkness), dimmer deep down and far away
       coral: new THREE.MeshLambertMaterial({ vertexColors: true }),
       coralSway: swayMaterial(0xffffff, 0.12, THREE.FrontSide, true), // sea fans and anemones sway with the current
       seaRock: mat(0x7d8a72),
@@ -1267,6 +1244,7 @@ export class WorldScene {
     const yawScale = (sc) => m.makeRotationY(o.r * 6.283).scale(s.set(sc, sc, sc)).setPosition(o.x, o.y, o.z).clone();
     if (h.kind === 'bush') { geo = bushGeometry(); mats.push(yawScale(0.9 + o.r * 0.6)); } // same transforms as addFoliage
     else if (h.kind === 'pebble') { geo = GEO.pebble(); mats.push(yawScale(0.85 + o.r * 0.5)); }
+    else if (h.kind === 'rock') { geo = GEO.rock(); mats.push(m.makeRotationY(jitter(posKey(o), 5) * 6).scale(s.set(o.s, o.s * 0.75, o.s)).setPosition(o.x, o.y + o.s * 0.35, o.z).clone()); } // as in the rock mesh
     else if (h.kind === 'frog') { const fm = this.ambient.frogMesh; geo = fm.geometry; fm.getMatrixAt(o.i, m); mats.push(m.clone()); }
     else if (h.kind === 'bench') { // [ix, iz, r, type], as in setBenches
       geo = furnitureGeometry(o[3] ?? 0);
@@ -1371,8 +1349,48 @@ export class WorldScene {
     });
   }
 
+  /**
+   * Shake a tree (an axe hit): its instances (the detailed mesh and the low-detail shadow twin) sway about the
+   * trunk's base, away from (dx, dz), in a quick damped wobble. `amp` is the first swing in radians.
+   */
+  shakeTree(t, dx, dz, amp = 0.07) {
+    this.shakes ??= [];
+    this.shakes = this.shakes.filter((s) => { if (s.t !== t) return true; s.end(); return false; }); // a new hit restarts it
+    const m = new THREE.Matrix4(), p = new THREE.Vector3(), parts = [], M = this.mats;
+    this.scene.traverse((o) => {
+      if (!o.isInstancedMesh || (o.material !== M.leaf && o.material !== M.red)) return;
+      for (let j = 0; j < o.count; j++) {
+        o.getMatrixAt(j, m);
+        p.setFromMatrixPosition(m);
+        if (Math.abs(p.x - t.x) < 0.01 && Math.abs(p.z - t.z) < 0.01 && Math.abs(p.y - t.y) < 0.01) parts.push([o, j, m.clone()]);
+      }
+    });
+    if (!parts.length) return;
+    const len = Math.hypot(dx, dz) || 1;
+    const shake = {
+      t, parts, age: 0, dur: 0.75, amp,
+      axis: new THREE.Vector3(dz / len, 0, -dx / len), // tip away from the hit
+      end() { for (const [o, j, orig] of parts) { o.setMatrixAt(j, orig); o.instanceMatrix.needsUpdate = true; } },
+    };
+    this.shakes.push(shake);
+  }
+  updateShakes(dt) {
+    if (!this.shakes?.length) return;
+    const w = new THREE.Matrix4(), r = new THREE.Matrix4(), out = new THREE.Matrix4();
+    this.shakes = this.shakes.filter((s) => {
+      s.age += dt;
+      if (s.age >= s.dur) { s.end(); return false; }
+      const k = s.age / s.dur, ang = s.amp * Math.sin(k * Math.PI * 4.5) * (1 - k) ** 2;
+      const { x, y, z } = s.t;
+      w.makeTranslation(x, y, z).multiply(r.makeRotationAxis(s.axis, ang)).multiply(r.makeTranslation(-x, -y, -z));
+      for (const [o, j, orig] of s.parts) { o.setMatrixAt(j, out.multiplyMatrices(w, orig)); o.instanceMatrix.needsUpdate = true; }
+      return true;
+    });
+  }
+
   /** Island: hide the instances of a chopped tree, broken bush or picked pebble (the endless world rebuilds the chunk instead). */
   hideTree(t) {
+    if (this.shakes) this.shakes = this.shakes.filter((s) => Math.abs(s.t.x - t.x) > 0.01 || Math.abs(s.t.z - t.z) > 0.01); // don't put it back
     const m = new THREE.Matrix4(), p = new THREE.Vector3(), zero = new THREE.Matrix4().makeScale(0, 0, 0);
     this.scene.traverse((o) => {
       if (!o.isInstancedMesh || o === this.terrain || o === this.moteMesh || !o.frustumCulled) return;
@@ -1388,21 +1406,21 @@ export class WorldScene {
 
   // gather what's loaded: ambient life, fireflies and gems use these
   refreshLive() {
-    const flowers = [], reeds = [], trees = [], motes = [], gems = [], lilies = [], redwoods = [], bushes = [], pebbles = [], corals = [], pickles = [];
+    const flowers = [], reeds = [], trees = [], motes = [], gems = [], lilies = [], redwoods = [], bushes = [], pebbles = [], corals = [], rocks = [];
     for (const { data, gems: g } of this.chunks.values()) {
+      rocks.push(...data.rocks);
       bushes.push(...data.bushes);
       pebbles.push(...data.pebbles);
       flowers.push(...data.flowers);
       lilies.push(...data.lilies);
       corals.push(...(data.corals ?? []));
-      pickles.push(...(data.pickles ?? []));
       redwoods.push(...data.redwoods);
       reeds.push(...data.reeds);
       trees.push(...data.trees);
       motes.push(...data.motes);
       gems.push(...g);
     }
-    Object.assign(this.live, { flowers, reeds, trees, lilies, redwoods, bushes, pebbles, corals, pickles });
+    Object.assign(this.live, { flowers, reeds, trees, lilies, redwoods, bushes, pebbles, corals, rocks });
     this.gems = gems;
     this.setMotes(motes);
   }
@@ -1491,7 +1509,7 @@ export class WorldScene {
   // grass, ferns, reeds, bushes and mushrooms (fireflies are global: setMotes). With `lod`, everything
   // but bushes counts as small stuff, hidden in far chunks (see updateLod)
   addFoliage(target, d, lod = null) {
-    const { tufts, tallGrass, bushes, ferns, mushrooms, reeds, pebbles = [], seaweed = [], seaRocks = [], lilies = [], cairns = [], corals = [], seagrass = [], pickles = [] } = d;
+    const { tufts, tallGrass, bushes, ferns, mushrooms, reeds, pebbles = [], seaweed = [], seaRocks = [], lilies = [], cairns = [], corals = [], seagrass = [] } = d;
     const M = this.mats;
     const c = new THREE.Color();
     const add = (mesh) => { if (mesh) target.add(mesh); return mesh; };
@@ -1543,11 +1561,6 @@ export class WorldScene {
     small(tint(instanced(GEO.seagrass(), M.seagrass, seagrass, (m, g) => {
       m.makeRotationY(g.r * 6.283).scale(new THREE.Vector3(1, (0.22 + g.h * 0.32) * (0.7 + g.r * 0.6), 1)).setPosition(g.x, g.y, g.z);
     }, { shadows: false }), seagrass, 0x4f9a48, 0.4));
-    // sea pickles in clusters of 1–4 (one mesh per cluster size), glowing at night
-    for (let n = 1; n <= 4; n++) {
-      const items = pickles.filter((p) => p.n === n);
-      small(instanced(GEO['pickle' + n](), M.pickle, items, (m, p) => yawScale(m, p, 1.7 + p.r * 0.7), { shadows: false }));
-    }
     small(instanced(GEO.rock(), M.seaRock, seaRocks, (m, r) => {
       m.makeRotationY(r.r * 6.283).scale(new THREE.Vector3(r.s, r.s * 0.7, r.s)).setPosition(r.x, r.y + r.s * 0.2, r.z);
     }, { shadows: false }));
@@ -1619,13 +1632,6 @@ export class WorldScene {
       return { light, idx: -1, fade: 0 };
     });
     this.fireflyPick = 0;
-    this.pickleLights = Array.from({ length: PICKLE_LIGHTS }, () => {
-      const light = new THREE.PointLight(0x6dff8e, 0, PICKLE_RANGE, 1.6);
-      light.visible = false;
-      s.add(light);
-      return { light, p: null, fade: 0 };
-    });
-    this.picklePick = 0;
   }
 
   setMotes(list) {
@@ -1669,7 +1675,8 @@ export class WorldScene {
 
   buildWater() {
     // a big plane that follows the player (update), so it covers any endless ocean too
-    const geo = new THREE.PlaneGeometry(400, 400).rotateX(-Math.PI / 2);
+    // 2-unit quads so the open-water swell (waves.js) can lift its vertices; it's moved in whole quads (update)
+    const geo = new THREE.PlaneGeometry(400, 400, 200, 200).rotateX(-Math.PI / 2);
     // Sun glints are kept subtle: a dimmer, tighter highlight, gentler ripple normals, and a cap on the
     // reflected sun (a low sun used to light up a huge checkered glare across the sea).
     const wm = new THREE.MeshPhongMaterial({ color: 0x3f8fd6, specular: 0x8f8a80, shininess: 240, transparent: true, opacity: 0.74 });
@@ -1677,12 +1684,25 @@ export class WorldScene {
     wm.onBeforeCompile = (sh) => {
       sh.uniforms.uTime = wind;
       sh.uniforms.uHeights = { value: heightTex };
+      sh.uniforms.uWaveT = waveTime;
       sh.vertexShader = sh.vertexShader
-        .replace('#include <common>', '#include <common>\nvarying vec3 vWaterPos;')
-        .replace('#include <begin_vertex>', '#include <begin_vertex>\nvWaterPos = (modelMatrix * vec4(transformed, 1.0)).xyz;');
+        .replace('#include <common>', `#include <common>
+          varying vec3 vWaterPos;
+          uniform float uWaveT;
+          uniform sampler2D uHeights;
+          float wColH(vec2 cell) { return texture2D(uHeights, (mod(cell, ${HT.toFixed(1)}) + 0.5) / ${HT.toFixed(1)}).r; }
+          ${WAVE_GLSL}`)
+        // the swell: lift each vertex and tilt its normal (open water only; the envelope is 0 over the shallows)
+        .replace('#include <beginnormal_vertex>', `#include <beginnormal_vertex>
+          vec2 wP0 = (modelMatrix * vec4(position, 1.0)).xz;
+          vec3 wRaw = waveRaw(wP0) * waveEnv(wP0);
+          objectNormal = normalize(vec3(-wRaw.y, 1.0, -wRaw.z));`)
+        .replace('#include <begin_vertex>', '#include <begin_vertex>\ntransformed.y += wRaw.x;\nvWaveH = wRaw.x;\nvWaterPos = (modelMatrix * vec4(transformed, 1.0)).xyz;')
+        .replace('varying vec3 vWaterPos;', 'varying vec3 vWaterPos;\nvarying float vWaveH;');
       sh.fragmentShader = sh.fragmentShader
         .replace('#include <common>', `#include <common>
           varying vec3 vWaterPos;
+          varying float vWaveH;
           uniform float uTime;
           uniform sampler2D uHeights; // column heights ring buffer (see TERRAIN_GLSL)
           float wColH(vec2 cell) { return texture2D(uHeights, (mod(cell, ${HT.toFixed(1)}) + 0.5) / ${HT.toFixed(1)}).r; }
@@ -1730,6 +1750,9 @@ export class WorldScene {
             if (edge < 0.085) { wc = mix(wc, vec3(0.66, 0.90, 0.96), 0.85 * shallowT); wAlpha += 0.16 * shallowT; }
             else if (edge < 0.19) { wc = mix(wc, vec3(0.44, 0.76, 0.92), 0.35 * shallowT); wAlpha += 0.05 * shallowT; }
           }
+          // the swell (waves.js): troughs a little darker, crests a little lighter, so the rollers read as they pass
+          wc *= 1.0 + clamp(vWaveH, -0.4, 0.4) * 0.45;
+          wc = mix(wc, vec3(0.52, 0.80, 0.93), smoothstep(0.14, 0.34, vWaveH) * 0.3);
           vec2 fr = floor(fract(wcell) * 16.0) / 16.0; // texel-snapped position in the cell
           float shoreD = 1.0;
           if (wColH(cellI + vec2(1.0, 0.0)) >= ${SEA.toFixed(2)}) shoreD = min(shoreD, 0.9375 - fr.x);
@@ -1916,8 +1939,6 @@ export class WorldScene {
     const night = (this.night = Math.max(this.timeNight ?? 0, deep * 0.85));
     this.moteGlow.material.uniforms.uGlow.value = night * 0.45;
     this.moteMesh.material.color.setRGB(2.6, 2.4, 0.9).multiplyScalar(1 + night * 0.5);
-    // sea pickles light up after dusk: a soft green HDR glow that blooms through the water
-    this.mats.pickle.emissive.setRGB(0.45, 2.3, 0.6).multiplyScalar(night);
   }
 
   /** Move the firefly light pool onto the fireflies nearest the player (night only). */
@@ -1932,7 +1953,6 @@ export class WorldScene {
       this.fireflyLightsOn = on;
       for (const l of lights) l.light.visible = on;
       for (const l of this.lanternLights) l.visible = on;
-      for (const l of this.pickleLights) l.light.visible = on;
     }
     if (!on || night <= 0) { for (const l of lights) { l.light.intensity = 0; l.idx = -1; l.fade = 0; } return; }
     // re-pick the nearest fireflies a few times a second
@@ -1960,39 +1980,6 @@ export class WorldScene {
       const i = l.idx;
       l.light.position.set(this.motePos[i * 3], this.motePos[i * 3 + 1], this.motePos[i * 3 + 2]);
       l.light.intensity = FIREFLY_LIGHT_I * night * l.fade * (0.45 + 0.55 * this.moteTw[i]);
-    }
-  }
-
-  /** Light the sea pickles nearest the player with a small pool of soft green lights (night only, see updateFireflyLights). */
-  updatePickleLights(dt, focus, t) {
-    const night = this.night ?? 0, lights = this.pickleLights;
-    this.mats.pickle.userData.uFocus.value.copy(focus);
-    if (!this.fireflyLightsOn || night <= 0) { for (const l of lights) { l.light.intensity = 0; l.p = null; l.fade = 0; } return; }
-    this.picklePick -= dt;
-    if (this.picklePick <= 0) {
-      this.picklePick = 0.5;
-      const list = this.live?.pickles ?? [], best = [];
-      for (const p of list) {
-        const d = (p.x - focus.x) ** 2 + (p.z - focus.z) ** 2;
-        if (d > 24 * 24) continue;
-        if (best.length < lights.length) best.push([d, p]);
-        else if (d < best[best.length - 1][0]) best[best.length - 1] = [d, p];
-        else continue;
-        best.sort((a, b) => a[0] - b[0]);
-      }
-      const want = new Set(best.map((b) => b[1]));
-      const free = lights.filter((l) => !want.has(l.p));
-      for (const l of lights) want.delete(l.p);
-      for (const p of want) { const l = free.pop(); l.p = p; l.fade = 0; }
-      for (const l of free) l.p = null;
-    }
-    for (const l of lights) {
-      if (!l.p) { l.light.intensity = 0; continue; }
-      l.fade = Math.min(1, l.fade + dt * 2);
-      // just above the cluster, under the surface: lights the seabed, the plants around it and the water above
-      l.light.position.set(l.p.x, Math.min(l.p.y + 0.4, SEA - 0.1), l.p.z);
-      const fade = pickleFade(SEA - l.p.y, Math.hypot(l.p.x - focus.x, l.p.z - focus.z)); // same falloff as the glow
-      l.light.intensity = PICKLE_LIGHT_I * night * l.fade * fade * (0.85 + 0.15 * Math.sin(t * 1.3 + l.p.r * 20)); // a slow, gentle pulse
     }
   }
 
@@ -2056,6 +2043,7 @@ export class WorldScene {
     }
     this.ambient.update(t, dt, focus);
     this.effects.update(dt);
+    this.updateShakes(dt);
     this.atmosphere.update(t, dt, focus, this.night ?? 0);
 
     // zoomed out: push fog back, widen shadow coverage, fade the cloud layer in
@@ -2088,7 +2076,6 @@ export class WorldScene {
     this.moteMesh.instanceMatrix.needsUpdate = true;
     if (glowOn) gp.needsUpdate = gt.needsUpdate = true;
     this.updateFireflyLights(dt, focus);
-    this.updatePickleLights(dt, focus, t);
     // keep the shadow camera centered on the player, snapped to shadow texels to avoid shimmering
     const texel = (this.shadowHalf * 2) / SHADOW_MAP;
     const fx = Math.round(focus.x / texel) * texel, fz = Math.round(focus.z / texel) * texel;
@@ -2107,7 +2094,9 @@ export class WorldScene {
       else if (c.position.z < focus.z - 60) c.position.z += 120;
     }
     // the water plane follows the player (its ripples are in world space, so nothing slides)
-    this.water.position.set(focus.x, SEA + Math.sin(t * 0.8) * 0.03, focus.z);
+    // (in whole 2-unit quads, so the swell's vertices don't slide across the waves)
+    this.water.position.set(Math.round(focus.x / 2) * 2, SEA + Math.sin(t * 0.8) * 0.03, Math.round(focus.z / 2) * 2);
+    waveTime.value = waveClock();
     this.flames.forEach((f, k) => {
       f.scale.y = 0.8 + Math.abs(Math.sin(t * (7 + k * 3) + k)) * 0.5;
       f.rotation.y = t * (1 + k);
