@@ -10,7 +10,8 @@
 
 import { Server } from 'partyserver';
 import { cleanLook } from '../src/shared/boatlook.js';
-import { WORLD, WORLD_LIMIT, MAX_PLAYERS, PLAYER_COLORS, MAX_KIND, MAX_FURNITURE, MIN_LEVEL, cellKey, clockHour } from '../src/shared/world.js';
+import { WORLD, WORLD_LIMIT, MAX_PLAYERS, PLAYER_COLORS, MAX_KIND, MAX_FURNITURE, MAX_PICK, MIN_LEVEL, cellKey, clockHour } from '../src/shared/world.js';
+import { cleanLook as cleanPlayerLook, cleanWear } from '../src/shared/outfit.js';
 import { decodeMap, isEndlessMap, decodeEndless } from '../src/shared/mapfile.js';
 
 const SNAPSHOT_MS = 80; // ~12 position updates per second
@@ -41,7 +42,7 @@ export class Room extends Server {
   // Keep the object awake while people are connected: the snapshot timer needs it.
   static options = { hibernate: false };
 
-  /** @type {Map<string, { id: string, name: string, color: string, x: number, y: number, z: number, ry: number, a: number, rb?: number[]|null, conns: number }>} */
+  /** @type {Map<string, { id: string, name: string, color: string, look: object, wear: object, x: number, y: number, z: number, ry: number, a: number, rb?: number[]|null, conns: number }>} */
   players = new Map();
   /** connection id -> { conn, player, msgs, windowAt, lastMapAt, authing, closed, local } */
   conns = new Map();
@@ -113,7 +114,7 @@ export class Room extends Server {
   // ---------- sending ----------
 
   roster() {
-    return [...this.players.values()].map(({ id, name, color }) => ({ id, name, color }));
+    return [...this.players.values()].map(({ id, name, color, look, wear }) => ({ id, name, color, look, wear }));
   }
 
   /** Send to everyone who has joined (said hello), except one connection. */
@@ -256,11 +257,19 @@ export class Room extends Server {
         this.sendAll({ type: 'bench', id: player.id, ix, iz, r, t, on: !!on }, conn);
         return;
       }
-      // a player broke a bush (t 0), picked its berries (1), picked up a pebble (2) or mined a rock (3) on cell (ix, iz)
+      // a player put on or took off clothes: remember what they wear and tell everyone (the roster carries it)
+      case 'wear': {
+        player.wear = cleanWear(msg.wear);
+        this.sendAll({ type: 'roster', players: this.roster() });
+        return;
+      }
+      // a player broke a bush (t 0), picked its berries (1), picked up a pebble (2), mined a rock (3),
+      // harvested a cotton plant (4) or picked the flowers (5) on cell (ix, iz)
       case 'pick': {
         const { ix, iz, t } = msg;
-        if (![ix, iz, t].every(Number.isInteger) || !inLim(ix, iz) || t < 0 || t > 3) return;
-        this.put('picks', cellKey(ix, iz) * 4 + t, [ix, iz, t]);
+        if (![ix, iz, t].every(Number.isInteger) || !inLim(ix, iz) || t < 0 || t > MAX_PICK) return;
+        // keys of the first four kinds stay as stored by older versions; the newer kinds get their own range
+        this.put('picks', t <= 3 ? cellKey(ix, iz) * 4 + t : 1e13 + cellKey(ix, iz) * 2 + (t - 4), [ix, iz, t]);
         this.sendAll({ type: 'pick', id: player.id, ix, iz, t }, conn);
         return;
       }
@@ -306,6 +315,9 @@ export class Room extends Server {
       p = { id: user.id, name: cleanName(user.name), color, x: 0, y: -100, z: 0, ry: 0, a: 0, conns: 0 };
       this.players.set(user.id, p);
     }
+    // how they look (chosen in the menu) and what they wear: validated, with the default look for anything wrong
+    p.look = cleanPlayerLook(msg.look, user.id);
+    p.wear = cleanWear(msg.wear);
     p.conns++;
     c.player = p;
     const it = this.items;

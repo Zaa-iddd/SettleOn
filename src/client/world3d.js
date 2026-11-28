@@ -6,7 +6,7 @@ import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 import { Effects } from './effects.js';
 import { Atmosphere } from './atmosphere.js';
 import { boatGeometry } from './boat.js';
-import { leafyTreeGeometry, pineTreeGeometry, redwoodGeometry, bushGeometry } from './trees3d.js';
+import { leafyTreeGeometry, pineTreeGeometry, palmTreeGeometry, palmTrunkLocal, redwoodGeometry, bushGeometry } from './trees3d.js';
 import { Ambient, WIND } from './ambient.js';
 import { WORLD, SEA, K, toWorld, rng, cellKey, MIN_LEVEL, STEP } from '../shared/world.js';
 import { CH } from '../shared/endless.js';
@@ -433,7 +433,7 @@ function reedGeometry() {
   return mergeGeometries(blades);
 }
 
-const TREE_VARIANTS = 4, PINE_VARIANTS = 3, REDWOOD_VARIANTS = 3;
+const TREE_VARIANTS = 4, PINE_VARIANTS = 3, PALM_VARIANTS = 3, REDWOOD_VARIANTS = 3;
 
 // Tree canopies (and terrain, see terrainMaterial) open up around the local player: fragments in
 // front of the character and inside a circle around it on screen are discarded with a 4×4 Bayer
@@ -620,13 +620,53 @@ function sharedGeo(key, build) {
   if (!geoCache.has(key)) { const g = build(); g.userData.shared = true; geoCache.set(key, g); }
   return geoCache.get(key);
 }
+// A wild flower: slim stem, two leaves, an orange centre and five tilted petals. Petals carry aPetal = 1 and
+// take the instance colour (see flowerMaterial); the stem, leaves and centre keep their own colours.
+function flowerGeometry() {
+  const parts = [];
+  const add = (w, h, d, x, y, z, ry, tz, hex, petal) => {
+    const g = new THREE.BoxGeometry(w, h, d);
+    g.applyMatrix4(new THREE.Matrix4().compose(
+      new THREE.Vector3(x, y, z), new THREE.Quaternion().setFromEuler(new THREE.Euler(0, ry, tz, 'YZX')), new THREE.Vector3(1, 1, 1)));
+    const n = g.attributes.position.count, c = new THREE.Color(hex), col = [];
+    for (let i = 0; i < n; i++) col.push(c.r, c.g, c.b);
+    g.setAttribute('color', new THREE.Float32BufferAttribute(col, 3));
+    g.setAttribute('aPetal', new THREE.Float32BufferAttribute(new Array(n).fill(petal), 1));
+    parts.push(g);
+  };
+  add(0.014, 0.12, 0.014, 0, 0.06, 0, 0, 0, 0x4f9a3a, 0); // stem
+  add(0.06, 0.012, 0.026, 0.026, 0.04, 0, 0, 0.5, 0x5fae44, 0); // leaves, one each side
+  add(0.05, 0.012, 0.024, -0.022, 0.065, 0.004, Math.PI, 0.5, 0x4a8f34, 0);
+  const HY = 0.135;
+  add(0.036, 0.034, 0.036, 0, HY, 0, 0, 0, 0xe89a20, 0); // centre
+  for (let k = 0; k < 5; k++) { // petals
+    const a = (k / 5) * Math.PI * 2 + 0.3, r = 0.04;
+    add(0.052, 0.014, 0.04, Math.cos(a) * r, HY - 0.004, -Math.sin(a) * r, a, 0.3, 0xffffff, 1);
+  }
+  return mergeGeometries(parts);
+}
+function flowerMaterial() {
+  const m = swayMaterial(0xffffff, 0.3, THREE.FrontSide, true);
+  const base = m.onBeforeCompile;
+  m.onBeforeCompile = (sh) => {
+    base(sh);
+    sh.vertexShader = sh.vertexShader
+      .replace('#include <common>', '#include <common>\nattribute float aPetal;')
+      .replace('#include <color_vertex>', `vColor = vec4(color.rgb, 1.0);
+        #ifdef USE_INSTANCING_COLOR
+        vColor.rgb *= mix(vec3(1.0), instanceColor.rgb, aPetal);
+        #endif`);
+  };
+  m.customProgramCacheKey = () => 'sway:0.3:petal';
+  return m;
+}
 const GEO = {
   tuft: () => sharedGeo('tuft', tuftGeometry),
   tall: () => sharedGeo('tall', tallGrassGeometry),
   fern: () => sharedGeo('fern', fernGeometry),
   reed: () => sharedGeo('reed', reedGeometry),
   rock: () => sharedGeo('rock', () => new THREE.DodecahedronGeometry(1, 0)),
-  flower: () => sharedGeo('flower', () => new THREE.BoxGeometry(0.08, 0.14, 0.08).translate(0, 0.07, 0)),
+  flower: () => sharedGeo('flower', flowerGeometry),
   cattail: () => sharedGeo('cattail', () => new THREE.BoxGeometry(0.06, 0.13, 0.06)),
   berry: () => sharedGeo('berry', () => new THREE.BoxGeometry(0.06, 0.06, 0.06)),
   stem: () => sharedGeo('stem', () => new THREE.CylinderGeometry(0.025, 0.03, 0.1, 5).translate(0, 0.05, 0)),
@@ -638,6 +678,7 @@ const GEO = {
     new THREE.DodecahedronGeometry(0.13, 0).scale(1, 0.6, 0.85).translate(0, 0.06, 0),
     new THREE.DodecahedronGeometry(0.07, 0).scale(1, 0.7, 1).translate(0.16, 0.04, 0.06),
   ])),
+  cotton: () => sharedGeo('cotton', cottonGeometry),
   cairn: () => sharedGeo('cairn', () => mergeGeometries([
     new THREE.DodecahedronGeometry(0.17, 0).scale(1, 0.6, 1).translate(0, 0.08, 0),
     new THREE.DodecahedronGeometry(0.12, 0).scale(1, 0.65, 1).translate(0.02, 0.22, -0.01),
@@ -650,6 +691,35 @@ const GEO = {
     new THREE.BoxGeometry(0.05, 0.05, 0.05).translate(0, 0.09, 0),
   ])),
 };
+
+// ---------- cotton plant (gathered for Cotton Balls): a slim stalk, a few green leaves and white bolls in brown husks ----------
+function cottonGeometry() {
+  const parts = [], col = new THREE.Color();
+  const put = (g, hex, y0 = null) => { // flat-shaded part with one vertex colour (pale toward the top when y0 is given)
+    g = g.index ? g.toNonIndexed() : g;
+    g.deleteAttribute('uv');
+    const p = g.attributes.position, c = new Float32Array(p.count * 3);
+    for (let i = 0; i < p.count; i++) { col.setHex(hex); if (y0 !== null) col.multiplyScalar(0.86 + Math.min(0.14, Math.max(0, p.getY(i) - y0) * 1.2)); c.set([col.r, col.g, col.b], i * 3); }
+    g.setAttribute('color', new THREE.BufferAttribute(c, 3));
+    parts.push(g);
+  };
+  put(new THREE.BoxGeometry(0.035, 0.46, 0.035).translate(0, 0.23, 0), 0x5f8a3a);
+  // leaves: flat, angled up and out at different heights and turns
+  for (let k = 0; k < 6; k++) {
+    const leaf = new THREE.BoxGeometry(0.2, 0.02, 0.09).translate(0.11, 0, 0);
+    leaf.rotateZ(0.45 - (k % 2) * 0.15).rotateY(k * 1.1 + 0.3).translate(0, 0.09 + k * 0.05, 0);
+    put(leaf, k % 2 ? 0x4f9a3a : 0x5aa844);
+  }
+  // bolls: a brown husk with a fluffy white puff (three small lumps) bursting out of it
+  const bolls = [[0.1, 0.3, 0.03], [-0.09, 0.38, -0.05], [0.02, 0.47, 0.1], [-0.05, 0.27, 0.1], [0.06, 0.44, -0.09], [0, 0.52, 0]];
+  for (const [x, y, z] of bolls) {
+    put(new THREE.DodecahedronGeometry(0.045, 0).scale(1, 0.7, 1).translate(x, y - 0.035, z), 0x8a6a42);
+    put(new THREE.IcosahedronGeometry(0.075, 0).translate(x, y + 0.02, z), 0xfdfdf8, y - 0.06);
+    put(new THREE.IcosahedronGeometry(0.052, 0).translate(x + 0.045, y + 0.0, z + 0.015), 0xf3f1e6, y - 0.06);
+    put(new THREE.IcosahedronGeometry(0.052, 0).translate(x - 0.04, y + 0.03, z - 0.02), 0xffffff, y - 0.06);
+  }
+  return mergeGeometries(parts);
+}
 
 // ---------- coral reefs (waterLife in world.js): original low-poly corals ----------
 // Geometry is pale grey-to-white with darker bases (vertex colours); each instance gets its colour from
@@ -1075,7 +1145,7 @@ export class WorldScene {
       // redwoods: cut away near the player (see redwoodMaterial)
       red: redwoodMaterial(),
       rock: mat(0x9a958a),
-      flower: swayMaterial(0xffffff, 0.3),
+      flower: flowerMaterial(),
       tuft: swayMaterial(0xffffff, 0.3, THREE.FrontSide, true),
       tall: swayMaterial(0xffffff, 0.25, THREE.FrontSide, true),
       fern: swayMaterial(0xffffff, 0.25),
@@ -1092,6 +1162,7 @@ export class WorldScene {
       seaRock: mat(0x7d8a72),
       cairn: mat(0xa8a39a),
       pebble: mat(0xc2bdb1),
+      cotton: swayMaterial(0xffffff, 0.22, THREE.FrontSide, true),
       lily: bobMaterial({ color: 0xffffff }),
       lilyFlower: bobMaterial({ color: 0xffffff }),
     };
@@ -1100,7 +1171,7 @@ export class WorldScene {
     this.buildMotes();
     if (world.endless) {
       this.chunks = new Map(); // cellKey(cx, cz) -> { cx, cz, group, data, gems }
-      this.live = { flowers: [], reeds: [], trees: [], redwoods: [], lilies: [], corals: [] }; // what's loaded now (ambient life, chopping)
+      this.live = { flowers: [], reeds: [], trees: [], redwoods: [], lilies: [], corals: [], cotton: [], pebbles: [], bushes: [], rocks: [] }; // what's loaded now (ambient life, chopping)
     } else {
       this.terrain = this.terrainMesh(0, 0, WORLD, WORLD);
       scene.add(this.terrain);
@@ -1330,6 +1401,8 @@ export class WorldScene {
     const yawScale = (sc) => m.makeRotationY(o.r * 6.283).scale(s.set(sc, sc, sc)).setPosition(o.x, o.y, o.z).clone();
     if (h.kind === 'bush') { geo = bushGeometry(); mats.push(yawScale(0.9 + o.r * 0.6)); } // same transforms as addFoliage
     else if (h.kind === 'pebble') { geo = GEO.pebble(); mats.push(yawScale(0.85 + o.r * 0.5)); }
+    else if (h.kind === 'cotton') { geo = GEO.cotton(); mats.push(yawScale(0.9 + o.r * 0.4)); }
+    else if (h.kind === 'flower') { geo = GEO.flower(); mats.push(m.makeTranslation(o.x, o.y, o.z).clone()); }
     else if (h.kind === 'rock') { geo = GEO.rock(); mats.push(m.makeRotationY(jitter(posKey(o), 5) * 6).scale(s.set(o.s, o.s * 0.75, o.s)).setPosition(o.x, o.y + o.s * 0.35, o.z).clone()); } // as in the rock mesh
     else if (h.kind === 'frog') { const fm = this.ambient.frogMesh; geo = fm.geometry; fm.getMatrixAt(o.i, m); mats.push(m.clone()); }
     else if (h.kind === 'bench') { // [ix, iz, r, type], as in setBenches
@@ -1492,11 +1565,12 @@ export class WorldScene {
 
   // gather what's loaded: ambient life, fireflies and gems use these
   refreshLive() {
-    const flowers = [], reeds = [], trees = [], motes = [], gems = [], lilies = [], redwoods = [], bushes = [], pebbles = [], corals = [], rocks = [];
+    const flowers = [], reeds = [], trees = [], motes = [], gems = [], lilies = [], redwoods = [], bushes = [], pebbles = [], corals = [], rocks = [], cotton = [];
     for (const { data, gems: g } of this.chunks.values()) {
       rocks.push(...data.rocks);
       bushes.push(...data.bushes);
       pebbles.push(...data.pebbles);
+      cotton.push(...data.cotton);
       flowers.push(...data.flowers);
       lilies.push(...data.lilies);
       corals.push(...(data.corals ?? []));
@@ -1506,7 +1580,7 @@ export class WorldScene {
       motes.push(...data.motes);
       gems.push(...g);
     }
-    Object.assign(this.live, { flowers, reeds, trees, lilies, redwoods, bushes, pebbles, corals, rocks });
+    Object.assign(this.live, { flowers, reeds, trees, lilies, redwoods, bushes, pebbles, corals, rocks, cotton });
     this.gems = gems;
     this.setMotes(motes);
   }
@@ -1558,7 +1632,7 @@ export class WorldScene {
     const { trees, redwoods, rocks, flowers } = d;
     const M = this.mats;
     const add = (mesh) => { if (mesh) target.add(mesh); return mesh; };
-    const pines = trees.filter((t) => t.pine), leafy = trees.filter((t) => !t.pine);
+    const pines = trees.filter((t) => t.pine), palms = trees.filter((t) => t.palm), leafy = trees.filter((t) => !t.pine && !t.palm);
     // trees (trees3d.js): leafy trees and conifers, each in a few shape variants
     const addVariants = (list, count, makeGeo, material, salt, layer1) => {
       for (let v = 0; v < count; v++) {
@@ -1581,6 +1655,7 @@ export class WorldScene {
     };
     addVariants(leafy, TREE_VARIANTS, leafyTreeGeometry, M.leaf, 11);
     addVariants(pines, PINE_VARIANTS, pineTreeGeometry, M.leaf, 21);
+    addVariants(palms, PALM_VARIANTS, palmTreeGeometry, M.leaf, 41);
     addVariants(redwoods, REDWOOD_VARIANTS, redwoodGeometry, M.red, 13, true);
     add(instanced(GEO.rock(), M.rock, rocks, (m, r) => {
       m.makeRotationY(jitter(posKey(r), 5) * 6).scale(new THREE.Vector3(r.s, r.s * 0.75, r.s)).setPosition(r.x, r.y + r.s * 0.35, r.z);
@@ -1595,7 +1670,7 @@ export class WorldScene {
   // grass, ferns, reeds, bushes and mushrooms (fireflies are global: setMotes). With `lod`, everything
   // but bushes counts as small stuff, hidden in far chunks (see updateLod)
   addFoliage(target, d, lod = null) {
-    const { tufts, tallGrass, bushes, ferns, mushrooms, reeds, pebbles = [], seaweed = [], seaRocks = [], lilies = [], cairns = [], corals = [], seagrass = [] } = d;
+    const { tufts, tallGrass, bushes, ferns, mushrooms, reeds, pebbles = [], cotton = [], seaweed = [], seaRocks = [], lilies = [], cairns = [], corals = [], seagrass = [] } = d;
     const M = this.mats;
     const c = new THREE.Color();
     const add = (mesh) => { if (mesh) target.add(mesh); return mesh; };
@@ -1631,6 +1706,7 @@ export class WorldScene {
     small(instanced(GEO.cap(), M.cap, mushrooms, (m, mu) => yawScale(m, mu, 0.8 + mu.r * 0.6), { shadows: false }));
 
     small(tint(instanced(GEO.pebble(), M.pebble, pebbles, (m, p) => yawScale(m, p, 0.85 + p.r * 0.5), { shadows: false }), pebbles, 0xffffff, 0.16));
+    small(instanced(GEO.cotton(), M.cotton, cotton, (m, c) => yawScale(m, c, 0.9 + c.r * 0.4), { shadows: false })); // harvest them for Cotton Balls
     // trail markers: little stone cairns beside mountain trails
     add(instanced(GEO.cairn(), M.cairn, cairns, (m, c) => m.makeRotationY(c.r * 6.283).setPosition(c.x, c.y, c.z)));
     // coral reefs: one mesh per shape, each coral coloured from the reef palette (starfish their own)
@@ -2201,4 +2277,11 @@ export class WorldScene {
       gem.position.y = gem.userData.baseY + Math.sin(t * 2 + gem.position.x) * 0.06;
     }
   }
+}
+
+/** The point on a placed palm's trunk at height fraction u, in world space (the same transform addDecor gives its instance). */
+export function palmTrunk(t, u) {
+  const v = Math.floor(jitter(posKey(t), 41) * PALM_VARIANTS) % PALM_VARIANTS, yaw = jitter(posKey(t), 42) * 6;
+  const l = palmTrunkLocal(v, u), c = Math.cos(yaw), s = Math.sin(yaw);
+  return { x: t.x + (c * l.x + s * l.z) * t.s, y: t.y + l.y * t.s, z: t.z + (-s * l.x + c * l.z) * t.s };
 }

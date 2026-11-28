@@ -6,26 +6,18 @@
 // so you can always see where you are.
 
 import * as THREE from 'three';
+import { hashId, cleanLook, cleanWear, parseCloth } from '../shared/outfit.js';
 
-export const ANIM = { IDLE: 0, WALK: 1, RUN: 2, AIR: 3, SWIM: 4, ROW: 5 }; // ROW: at a rowboat's oars (ch.rowPhase)
+export const ANIM = { IDLE: 0, WALK: 1, RUN: 2, AIR: 3, SWIM: 4, ROW: 5, CLIMB: 6 }; // ROW: at a rowboat's oars (ch.rowPhase)
 // what the hand can hold (index 0 = empty): the two tools, then blocks (the network sends this index)
 // held-item index → id. Sent to others as the tens of the `a` code (the server allows up to 29).
 export const TOOLS = [null, 'shovel', 'pickaxe', 'dirt', 'stone', 'sand', 'snow', 'frog', 'axe', 'wood', 'log', 'workbench', 'stick', 'pebble', 'berries',
-  'leaves', 'wall', 'chair', 'table', 'bed', 'lamp', 'shelf', 'boat', 'rod'];
+  'leaves', 'wall', 'chair', 'table', 'bed', 'lamp', 'shelf', 'boat', 'rod', 'coconut', 'coconut_half'];
 const BLOCK_COLORS = { wall: [0x8a5730, 0xc08a56], dirt: [0x8d5c3a, 0x6fb33a], stone: [0x8e8c88, 0x8e8c88], sand: [0xe2cf92, 0xe2cf92], snow: [0xeef3f8, 0xeef3f8] };
 export const SWING_SECS = 0.38; // one tool swing: wind up over the head, then chop down
 
-const SKIN = [0xffdfc4, 0xf6c9a4, 0xe9b08a, 0xc68863, 0x8d5a3b];
-const HAIR = [0x5a3a24, 0x2b2220, 0xa8643a, 0xf0c869, 0xe58a5c, 0xc9a6e8, 0x7fb2e5, 0xf2a7c3];
-const STYLES = ['bangs', 'tuft', 'bow', 'strawhat', 'beanie'];
-const PANTS = 0x4a5578;
-const SHOES = 0x5a3a2a;
-
-function hashId(id) {
-  let h = 2166136261;
-  for (const ch of String(id)) { h ^= ch.charCodeAt(0); h = Math.imul(h, 16777619); }
-  return h >>> 0;
-}
+const UNDIES = 0xe9dfc4; // undershorts: what you wear until you craft clothes
+const SOLE = 0x4a3222;
 
 // ---------- materials ----------
 const solidCache = new Map();
@@ -69,6 +61,7 @@ function box(w, h, d, color, x = 0, y = 0, z = 0, shadow = true) {
   m.receiveShadow = true;
   const s = new THREE.Mesh(boxGeo(w, h, d), ghost(color));
   s.renderOrder = 20;
+  s.userData.ghost = true; // the menu preview hides these (it has no stencil)
   g.add(m, s);
   return g;
 }
@@ -81,77 +74,139 @@ function limb(w, h, d, color, tipColor, tipH) {
   return pivot;
 }
 
-export function makeCharacter(id, color) {
+export function makeCharacter(id, color, look = null, wear = null) {
   const h = hashId(id);
-  const skin = SKIN[h % SKIN.length];
-  const hair = HAIR[(h >>> 4) % HAIR.length];
-  const style = STYLES[(h >>> 9) % STYLES.length];
-  const shirt = new THREE.Color(color).getHex();
+  const L = cleanLook(look, id), W = cleanWear(wear);
+  const skin = L.skin, hair = L.hair, girl = L.g === 1;
+  const shirt = new THREE.Color(color).getHex(); // the undershirt: your player colour, so you can tell players apart
+  const worn = (slot) => parseCloth(W[slot]);
+  const tw = girl ? 0.24 : 0.26; // torso width: a little slimmer for girls
+  const ax = tw / 2 + 0.035; // where the arms hang
 
   const root = new THREE.Group();
   const body = new THREE.Group(); // bounces
   root.add(body);
 
-  // legs + shoes
-  const legL = limb(0.09, 0.08, 0.1, PANTS, SHOES, 0.05);
-  const legR = limb(0.09, 0.08, 0.1, PANTS, SHOES, 0.05);
+  // bare legs and feet (clothes go over them)
+  const legL = limb(0.09, 0.08, 0.1, skin, skin, 0.05);
+  const legR = limb(0.09, 0.08, 0.1, skin, skin, 0.05);
   legL.position.set(-0.065, 0.13, 0);
   legR.position.set(0.065, 0.13, 0);
 
-  // torso: shirt with a little white collar
+  // torso: a sleeveless undershirt and undershorts
   const torso = new THREE.Group();
   torso.position.y = 0.13;
-  torso.add(box(0.26, 0.2, 0.18, shirt, 0, 0.1, 0));
-  torso.add(box(0.27, 0.04, 0.19, PANTS, 0, 0.01, 0));
+  torso.add(box(tw, 0.2, 0.18, shirt, 0, 0.1, 0));
+  torso.add(box(tw + 0.01, 0.05, 0.19, UNDIES, 0, 0.01, 0));
   torso.add(box(0.14, 0.03, 0.03, 0xffffff, 0, 0.19, 0.09, false));
 
   // stubby arms with round-ish hands
-  const armL = limb(0.07, 0.11, 0.08, shirt, skin, 0.05);
-  const armR = limb(0.07, 0.11, 0.08, shirt, skin, 0.05);
-  armL.position.set(-0.165, 0.31, 0);
-  armR.position.set(0.165, 0.31, 0);
+  const armL = limb(0.07, 0.11, 0.08, skin, skin, 0.05);
+  const armR = limb(0.07, 0.11, 0.08, skin, skin, 0.05);
+  armL.position.set(-ax, 0.31, 0);
+  armR.position.set(ax, 0.31, 0);
 
   // big head
   const head = new THREE.Group();
   head.position.y = 0.33;
   head.add(box(0.46, 0.4, 0.4, skin, 0, 0.2, 0));
-  // eyes: tall and dark with a white sparkle, set low on the face
+  // eyes (the face style and eye colour), set low on the face
   const eyes = new THREE.Group();
   eyes.position.set(0, 0.15, 0.201);
-  for (const side of [-1, 1]) {
-    eyes.add(box(0.07, 0.11, 0.015, 0x2a1d1a, side * 0.1, 0, 0, false));
-    eyes.add(box(0.03, 0.03, 0.01, 0xffffff, side * 0.1 - 0.015, 0.03, 0.009, false));
-  }
+  buildEyes(eyes, L.face, L.eyes, girl);
   head.add(eyes);
   // rosy cheeks + tiny mouth
   head.add(box(0.07, 0.035, 0.01, 0xff9aa2, -0.16, 0.08, 0.202, false));
   head.add(box(0.07, 0.035, 0.01, 0xff9aa2, 0.16, 0.08, 0.202, false));
   head.add(box(0.04, 0.02, 0.01, 0x9a4a3a, 0, 0.07, 0.202, false));
+  const hat = worn('hat');
+  buildHair(head, L.hs, hair, shirt, !!hat);
+  buildFacialHair(head, L.fh, L.fc, skin);
 
-  // hair base: cap, back and bangs
-  head.add(box(0.5, 0.1, 0.44, hair, 0, 0.42, 0));
-  head.add(box(0.5, 0.3, 0.08, hair, 0, 0.27, -0.18));
-  head.add(box(0.5, 0.08, 0.06, hair, 0, 0.34, 0.19));
-  head.add(box(0.06, 0.22, 0.4, hair, -0.235, 0.27, 0));
-  head.add(box(0.06, 0.22, 0.4, hair, 0.235, 0.27, 0));
-
-  if (style === 'tuft') {
-    const tuft = box(0.06, 0.16, 0.06, hair, 0.04, 0.52, 0.02);
-    tuft.rotation.z = -0.5;
-    head.add(tuft);
-  } else if (style === 'bow') {
-    head.add(box(0.08, 0.08, 0.06, shirt, 0.17, 0.46, 0.05));
-    head.add(box(0.12, 0.1, 0.04, shirt, 0.08, 0.47, 0.05));
-    head.add(box(0.12, 0.1, 0.04, shirt, 0.26, 0.47, 0.05));
-  } else if (style === 'strawhat') {
-    head.add(box(0.72, 0.04, 0.66, 0xe8c66a, 0, 0.47, 0));
-    head.add(box(0.44, 0.14, 0.4, 0xf0d27a, 0, 0.55, 0));
-    head.add(box(0.45, 0.04, 0.41, shirt, 0, 0.5, 0));
-  } else if (style === 'beanie') {
-    head.add(box(0.52, 0.16, 0.46, shirt, 0, 0.48, 0));
-    head.add(box(0.53, 0.05, 0.47, 0xffffff, 0, 0.41, 0));
-    head.add(box(0.1, 0.1, 0.1, 0xffffff, 0, 0.6, 0));
-  }
+  // ---- clothes (crafted in game): each piece is drawn over the body parts it covers ----
+  const addTop = (c) => {
+    const hi = shade(c.hex, 0.22), lo = shade(c.hex, -0.22);
+    if (c.type === 'tee') {
+      torso.add(box(tw + 0.02, 0.17, 0.2, c.hex, 0, 0.105, 0));
+      torso.add(box(tw + 0.025, 0.025, 0.205, lo, 0, 0.035, 0));
+      torso.add(box(0.15, 0.03, 0.205, hi, 0, 0.185, 0, false));
+      for (const arm of [armL, armR]) arm.add(box(0.088, 0.065, 0.1, c.hex, 0, -0.032, 0));
+    } else if (c.type === 'sweater') {
+      torso.add(box(tw + 0.03, 0.2, 0.21, c.hex, 0, 0.1, 0));
+      torso.add(box(tw + 0.035, 0.035, 0.215, hi, 0, 0.02, 0));
+      torso.add(box(tw + 0.035, 0.03, 0.215, hi, 0, 0.12, 0, false));
+      torso.add(box(0.18, 0.05, 0.2, lo, 0, 0.205, 0, false));
+      for (const arm of [armL, armR]) {
+        arm.add(box(0.09, 0.115, 0.1, c.hex, 0, -0.0575, 0));
+        arm.add(box(0.092, 0.025, 0.102, hi, 0, -0.105, 0));
+      }
+    } else { // dress: a bodice, puffed sleeves and a flared skirt
+      torso.add(box(tw + 0.02, 0.17, 0.2, c.hex, 0, 0.115, 0));
+      torso.add(box(tw + 0.025, 0.03, 0.205, hi, 0, 0.065, 0, false)); // a sash
+      torso.add(box(0.15, 0.03, 0.205, lo, 0, 0.185, 0, false));
+      torso.add(box(tw + 0.1, 0.1, 0.27, c.hex, 0, 0.0, 0));
+      torso.add(box(tw + 0.17, 0.035, 0.34, lo, 0, -0.045, 0));
+      for (const arm of [armL, armR]) arm.add(box(0.1, 0.055, 0.115, c.hex, 0, -0.028, 0));
+    }
+  };
+  const addBottom = (c) => {
+    const hi = shade(c.hex, 0.22), lo = shade(c.hex, -0.25);
+    if (c.type === 'skirt') {
+      torso.add(box(tw + 0.02, 0.045, 0.2, lo, 0, 0.04, 0));
+      torso.add(box(tw + 0.09, 0.09, 0.26, c.hex, 0, -0.01, 0));
+      torso.add(box(tw + 0.15, 0.03, 0.32, hi, 0, -0.055, 0));
+      return;
+    }
+    torso.add(box(tw + 0.02, 0.055, 0.2, lo, 0, 0.025, 0));
+    const long = c.type === 'pants';
+    for (const leg of [legL, legR]) {
+      leg.add(box(0.105, long ? 0.088 : 0.048, 0.115, c.hex, 0, long ? -0.044 : -0.024, 0));
+      leg.add(box(0.11, 0.018, 0.12, hi, 0, long ? -0.08 : -0.042, 0, false)); // cuff
+    }
+  };
+  const addShoes = (c) => {
+    const lo = shade(c.hex, -0.28);
+    for (const leg of [legL, legR]) {
+      if (c.type === 'boots') {
+        leg.add(box(0.115, 0.115, 0.13, c.hex, 0, -0.065, 0));
+        leg.add(box(0.12, 0.025, 0.135, shade(c.hex, 0.25), 0, -0.012, 0, false));
+        leg.add(box(0.11, 0.05, 0.16, lo, 0, -0.1, 0.02));
+      } else {
+        leg.add(box(0.11, 0.06, 0.14, c.hex, 0, -0.1, 0.015));
+        leg.add(box(0.06, 0.012, 0.05, 0xffffff, 0, -0.07, 0.045, false)); // laces
+      }
+      leg.add(box(0.114, 0.015, c.type === 'boots' ? 0.165 : 0.145, SOLE, 0, -0.1275, c.type === 'boots' ? 0.02 : 0.015));
+    }
+  };
+  const addScarf = (c) => {
+    torso.add(box(tw + 0.03, 0.05, 0.21, c.hex, 0, 0.18, 0));
+    torso.add(box(0.09, 0.07, 0.04, shade(c.hex, -0.25), 0.07, 0.17, 0.105));
+    torso.add(box(0.07, 0.15, 0.03, c.hex, 0.07, 0.085, 0.112));
+    torso.add(box(0.072, 0.03, 0.032, shade(c.hex, 0.3), 0.07, 0.07, 0.113, false));
+  };
+  const addHat = (c) => {
+    const hi = shade(c.hex, 0.22), lo = shade(c.hex, -0.25);
+    if (c.type === 'cap') {
+      head.add(box(0.53, 0.11, 0.47, c.hex, 0, 0.5, 0));
+      head.add(box(0.34, 0.03, 0.17, lo, 0, 0.455, 0.3));
+      head.add(box(0.06, 0.06, 0.06, hi, 0, 0.575, 0, false));
+    } else if (c.type === 'beanie') {
+      head.add(box(0.53, 0.17, 0.47, c.hex, 0, 0.5, 0));
+      head.add(box(0.54, 0.06, 0.48, hi, 0, 0.43, 0));
+      head.add(box(0.11, 0.1, 0.11, hi, 0, 0.64, 0));
+    } else { // sun hat: a wide brim and a banded crown
+      head.add(box(0.8, 0.03, 0.74, c.hex, 0, 0.465, 0));
+      head.add(box(0.47, 0.15, 0.43, c.hex, 0, 0.55, 0));
+      head.add(box(0.48, 0.04, 0.44, shirt, 0, 0.49, 0, false));
+      head.add(box(0.82, 0.015, 0.76, lo, 0, 0.45, 0, false));
+    }
+  };
+  const t = worn('top'), b = worn('bottom'), s = worn('shoes'), n = worn('neck');
+  if (b) addBottom(b);
+  if (t) addTop(t);
+  if (s) addShoes(s);
+  if (n) addScarf(n);
+  if (hat) addHat(hat);
 
   body.add(legL, legR, torso, armL, armR, head);
 
@@ -171,12 +226,131 @@ export function makeCharacter(id, color) {
   armR.add(toolGrip);
   return {
     toolGrip, tool: 0, swingT: 0, swingHit: true, lantern, lanternOn: false,
-    root, body, legL, legR, armL, armR, head, eyes,
+    root, body, legL, legR, armL, armR, head, eyes, look: L, wear: W,
     phase: 0, blend: 0, nextBlink: 1 + (h % 300) / 100, blinkT: 0,
     // springs for cartoon follow-through: squash (1 = rest), forward lean, head lag
     sq: 1, sqV: 0, lean: 0, leanV: 0, headX: 0, headXV: 0,
     lastAnim: ANIM.IDLE, lastStep: 0, idleT: 0, hopT: 0, nextHop: 4 + (h % 400) / 100, seed: (h % 1000) / 100,
   };
+}
+
+/** A key that changes whenever the look or the clothes do (to know when a character must be rebuilt). */
+export const lookKey = (look, wear) => JSON.stringify([look, wear]);
+
+// lighten (k > 0) or darken (k < 0) a colour
+function shade(hex, k) {
+  const c = new THREE.Color(hex);
+  return (k > 0 ? c.lerp(new THREE.Color(0xffffff), k) : c.lerp(new THREE.Color(0x000000), -k)).getHex();
+}
+
+// the eyes, by face style: 0 classic (tall), 1 round, 2 sleepy, 3 happy (^ ^), 4 sparkle (big). Girls get lashes.
+function buildEyes(eyes, face, iris, girl) {
+  const DARK = 0x2a1d1a;
+  const spark = (x, y, s = 0.03) => eyes.add(box(s, s, 0.01, 0xffffff, x, y, 0.012, false));
+  for (const side of [-1, 1]) {
+    const x = side * 0.1;
+    if (face === 0) {
+      eyes.add(box(0.07, 0.11, 0.015, DARK, x, 0, 0, false));
+      eyes.add(box(0.045, 0.065, 0.012, iris, x, -0.015, 0.008, false));
+      spark(x - 0.015, 0.03);
+    } else if (face === 1) {
+      eyes.add(box(0.09, 0.09, 0.015, DARK, x, 0, 0, false));
+      eyes.add(box(0.06, 0.06, 0.012, iris, x, -0.008, 0.008, false));
+      spark(x - 0.017, 0.02, 0.026);
+    } else if (face === 2) {
+      eyes.add(box(0.08, 0.045, 0.015, DARK, x, -0.02, 0, false));
+      eyes.add(box(0.05, 0.022, 0.012, iris, x, -0.03, 0.008, false));
+      eyes.add(box(0.09, 0.018, 0.017, 0x3a2a24, x, 0.006, 0.002, false)); // a heavy lid
+    } else if (face === 3) {
+      for (const d of [-1, 1]) {
+        const bar = box(0.05, 0.02, 0.015, DARK, x + d * 0.021, 0, 0, false);
+        bar.rotation.z = -d * 0.75;
+        eyes.add(bar);
+      }
+    } else {
+      eyes.add(box(0.085, 0.14, 0.015, DARK, x, 0, 0, false));
+      eyes.add(box(0.06, 0.1, 0.012, iris, x, -0.012, 0.008, false));
+      spark(x - 0.018, 0.04, 0.036);
+      spark(x + 0.014, -0.03, 0.02);
+    }
+    if (girl) eyes.add(box(0.035, 0.016, 0.016, DARK, side * 0.147, face === 4 ? 0.065 : face === 3 ? 0.03 : 0.052, 0, false)); // a lash flick
+  }
+}
+
+// hair styles (head-local coordinates: the head box spans x ±0.23, y 0–0.4, z ±0.2). With a hat on, what would poke out
+// through it (tufts, spikes, buns, puffs) is left off.
+function buildHair(head, style, hair, ribbon, hat) {
+  if (style === 9) return; // bald
+  const add = (w, h, d, x, y, z, color = hair) => head.add(box(w, h, d, color, x, y, z));
+  add(0.5, 0.1, 0.44, 0, 0.42, 0); // cap
+  add(0.5, 0.3, 0.08, 0, 0.27, -0.18); // back
+  add(0.5, 0.08, 0.06, 0, 0.34, 0.19); // fringe
+  add(0.06, 0.22, 0.4, -0.235, 0.27, 0);
+  add(0.06, 0.22, 0.4, 0.235, 0.27, 0);
+  if (style === 1 && !hat) {
+    const tuft = box(0.06, 0.16, 0.06, hair, 0.04, 0.52, 0.02);
+    tuft.rotation.z = -0.5;
+    head.add(tuft);
+  } else if (style === 2 && !hat) {
+    for (const [x, lean, hgt] of [[-0.18, 0.5, 0.11], [-0.09, 0.25, 0.15], [0, 0, 0.17], [0.09, -0.25, 0.15], [0.18, -0.5, 0.11]]) {
+      const sp = box(0.075, hgt, 0.075, hair, x, 0.5 + hgt / 2 - 0.06, 0);
+      sp.rotation.z = lean;
+      head.add(sp);
+    }
+    for (const x of [-0.12, 0.12]) { const sp = box(0.07, 0.1, 0.05, hair, x, 0.4, 0.21); sp.rotation.x = 0.5; head.add(sp); }
+  } else if (style === 3) { // bob
+    add(0.5, 0.2, 0.08, 0, 0.07, -0.18);
+    add(0.06, 0.2, 0.3, -0.235, 0.1, -0.04);
+    add(0.06, 0.2, 0.3, 0.235, 0.1, -0.04);
+    add(0.5, 0.06, 0.06, 0, 0.31, 0.2); // thicker fringe
+  } else if (style === 4) { // long, over the shoulders
+    add(0.5, 0.5, 0.1, 0, 0.0, -0.19);
+    add(0.065, 0.34, 0.2, -0.245, 0.03, 0.02);
+    add(0.065, 0.34, 0.2, 0.245, 0.03, 0.02);
+  } else if (style === 5) { // ponytail
+    add(0.1, 0.07, 0.1, 0, 0.35, -0.25, ribbon);
+    add(0.12, 0.3, 0.1, 0, 0.18, -0.29);
+    add(0.09, 0.1, 0.08, 0, -0.01, -0.29);
+  } else if (style === 6) { // pigtails
+    for (const sx of [-1, 1]) {
+      add(0.1, 0.04, 0.1, sx * 0.3, 0.36, -0.02, ribbon);
+      add(0.11, 0.26, 0.11, sx * 0.3, 0.2, -0.02);
+      add(0.08, 0.08, 0.08, sx * 0.3, 0.04, -0.02);
+    }
+  } else if (style === 7 && !hat) { // bun
+    add(0.17, 0.15, 0.17, 0, 0.55, -0.08);
+    add(0.2, 0.03, 0.2, 0, 0.47, -0.08, ribbon);
+  } else if (style === 8) { // curly
+    if (!hat) add(0.58, 0.14, 0.52, 0, 0.47, 0);
+    add(0.1, 0.22, 0.42, -0.275, 0.3, 0);
+    add(0.1, 0.22, 0.42, 0.275, 0.3, 0);
+    add(0.58, 0.3, 0.12, 0, 0.3, -0.21);
+  }
+}
+
+// facial hair styles: 0 none, 1 stubble, 2 mustache, 3 goatee, 4 beard, 5 long beard, 6 mutton chops
+function buildFacialHair(head, style, color, skin) {
+  if (!style) return;
+  const add = (w, h, d, x, y, z, c = color, shadow = false) => head.add(box(w, h, d, c, x, y, z, shadow));
+  const mustache = () => { add(0.14, 0.03, 0.025, 0, 0.105, 0.205); add(0.03, 0.04, 0.025, -0.065, 0.088, 0.205); add(0.03, 0.04, 0.025, 0.065, 0.088, 0.205); };
+  if (style === 1) { // stubble: a darker shadow along the jaw
+    const c = new THREE.Color(skin).lerp(new THREE.Color(color), 0.4).getHex();
+    add(0.3, 0.055, 0.01, 0, 0.028, 0.203, c);
+    add(0.02, 0.12, 0.3, -0.232, 0.06, 0.04, c);
+    add(0.02, 0.12, 0.3, 0.232, 0.06, 0.04, c);
+  } else if (style === 2) mustache();
+  else if (style === 3) { mustache(); add(0.07, 0.065, 0.025, 0, 0.03, 0.205); }
+  else if (style === 4 || style === 5) {
+    mustache();
+    add(0.34, 0.07, 0.03, 0, 0.025, 0.205, color, true);
+    add(0.05, 0.16, 0.3, -0.24, 0.07, 0.04);
+    add(0.05, 0.16, 0.3, 0.24, 0.07, 0.04);
+    if (style === 5) { add(0.28, 0.16, 0.05, 0, -0.06, 0.19, color, true); add(0.16, 0.1, 0.05, 0, -0.17, 0.19, color, true); }
+  } else if (style === 6) {
+    mustache();
+    add(0.06, 0.2, 0.1, -0.21, 0.1, 0.16);
+    add(0.06, 0.2, 0.1, 0.21, 0.1, 0.16);
+  }
 }
 
 const LANTERN_GLOW = new THREE.MeshBasicMaterial({ color: new THREE.Color(2.6, 1.7, 0.6) });
@@ -292,6 +466,41 @@ export function animateCharacter(ch, anim, speed, dt, t) {
     const bite = Math.floor((p + 0.3) / (Math.PI * 2));
     if (ch.lastBite !== undefined && bite !== ch.lastBite && sn >= 0) ch.sqV -= 2.2;
     ch.lastBite = bite;
+  } else if (anim === ANIM.CLIMB) {
+    // cute shimmy up a palm (ch.climbPhase runs while moving, ch.climbMode 'up' | 'shake' | 'down'): an inchworm hug
+    // (reach up with alternating hands, squash and stretch on every pull, knees hugging the trunk, the body and
+    // head rocking side to side), a happy wiggle with one hand shaking the crown, then a wheee slide down
+    if (ch.climbMode === undefined) ch.climbPhase = (ch.climbPhase ?? 0) + dt * 9; // other players: no climb state is synced, just shimmy
+    const p = ch.climbPhase ?? 0, sn = Math.sin(p), cs = Math.cos(p), mode = ch.climbMode ?? 'up';
+    const half = Math.floor(p / Math.PI);
+    if (mode === 'up' && ch.lastClimbHalf !== undefined && half !== ch.lastClimbHalf) ch.sqV -= 3; // a little squash each pull
+    ch.lastClimbHalf = half;
+    bob = 0; twist = 0; stretch = 1; headYaw = 0;
+    if (mode === 'up') {
+      armL = -2.75 - sn * 0.4; armR = -2.75 + sn * 0.4;
+      armOut = 0.12; // hands wrapped around the trunk
+      legL = 0.95 + sn * 0.55; legR = 0.95 - sn * 0.55;
+      waddle = sn * 0.1; twist = sn * 0.1;
+      leanTarget = 0.1;
+      headTilt = -sn * 0.14;
+      stretch = 1 + Math.max(0, cs) * 0.09; // stretch up as it reaches
+    } else if (mode === 'shake') {
+      armL = -2.4; armR = -2.3 + Math.sin(t * 26) * 0.55; // one hand hugs, one shakes the crown
+      armOut = 0.2;
+      legL = 1.0 + Math.sin(t * 20) * 0.15; legR = 0.9 - Math.sin(t * 20) * 0.15;
+      waddle = Math.sin(t * 26) * 0.1;
+      leanTarget = 0.05;
+      headTilt = Math.sin(t * 13) * 0.16; // a happy head wobble
+      stretch = 1 + Math.sin(t * 26) * 0.03;
+    } else { // wheee: arms flung out, legs together, a little stretched
+      armL = -2.6 + Math.sin(t * 14) * 0.2; armR = -2.6 - Math.sin(t * 14) * 0.2;
+      armOut = 0.95;
+      legL = 0.25; legR = 0.25;
+      waddle = Math.sin(t * 9) * 0.07;
+      leanTarget = -0.05;
+      headTilt = Math.sin(t * 7) * 0.1;
+      stretch = 1.07;
+    }
   } else if (anim === ANIM.SWIM) {
     // big doggy paddle with a rolling body
     armL = -1.4 + Math.sin(ch.phase) * 1.0;
@@ -399,6 +608,13 @@ export function setTool(ch, tool) {
     ch.toolGrip.add(box(0.05, 0.05, 0.05, 0xe0334a, -0.02, 0, 0.06));
     ch.toolGrip.add(box(0.05, 0.05, 0.05, 0xe0334a, 0.03, 0.01, 0.09));
     ch.toolGrip.add(box(0.03, 0.02, 0.03, 0x4a8f30, 0, 0.04, 0.07));
+  } else if (TOOLS[tool] === 'coconut') { // a brown nut with three dark eyes
+    ch.toolGrip.add(box(0.11, 0.1, 0.11, 0x6e4a30, 0, 0, 0.08));
+    ch.toolGrip.add(box(0.03, 0.03, 0.02, 0x2a1a12, -0.02, 0.02, 0.14));
+    ch.toolGrip.add(box(0.03, 0.03, 0.02, 0x2a1a12, 0.02, 0.02, 0.14));
+  } else if (TOOLS[tool] === 'coconut_half') { // a brown cup of white flesh
+    ch.toolGrip.add(box(0.11, 0.06, 0.11, 0x6e4a30, 0, -0.02, 0.08));
+    ch.toolGrip.add(box(0.08, 0.02, 0.08, 0xf4efe2, 0, 0.02, 0.08));
   } else if (TOOLS[tool] === 'workbench') { // a tiny desk
     ch.toolGrip.add(box(0.17, 0.025, 0.11, 0xc08a56, 0, 0.03, 0.08));
     ch.toolGrip.add(box(0.15, 0.07, 0.09, 0x8a5a34, 0, -0.02, 0.08));

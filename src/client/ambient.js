@@ -728,7 +728,7 @@ export class Ambient {
       if (!t || Math.hypot(t.x - focus.x, t.z - focus.z) > 16) continue;
       Object.assign(l, {
         state: 'fall', x: t.x + (Math.random() - 0.5) * 0.7 * t.s, z: t.z + (Math.random() - 0.5) * 0.7 * t.s,
-        y: t.y + (0.8 + Math.random() * 0.6 + (t.pine ? 0 : LEAFY_LIFT)) * t.s, vy: -(0.25 + Math.random() * 0.25),
+        y: t.y + (0.8 + Math.random() * 0.6 + (t.pine ? 0 : t.palm ? 1.3 : LEAFY_LIFT)) * t.s, vy: -(0.25 + Math.random() * 0.25),
         spin: Math.random() * 10, spinRate: 2 + Math.random() * 4, sway: Math.random() * 10, t: 0, rest: 0,
       });
       return;

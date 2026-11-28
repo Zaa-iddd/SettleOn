@@ -19,7 +19,6 @@
           <button id="open-editor" class="btn" tabindex="-1">Map editor</button>
         </div>
         <div class="hud-buttons">
-          <button id="creative-btn" class="btn" tabindex="-1" title="Debug: every item, free building">Creative: off</button>
         </div>
       </div>
       <div id="area"></div>
@@ -90,6 +89,8 @@
           <dt>Aboard</dt><dd>click the deck with furniture or a decoration to place it (R turns it) · axe to take it back</dd>
           <dt>At the helm</dt><dd>W/S throttle · A/D steer</dd>
           <dt>Berries / fish</dt><dd>click to eat (fills hunger; a full belly heals)</dd>
+          <dt>Cotton / flowers</dt><dd>click with a free hand to harvest cotton or pick flowers (grind flowers into dyes)</dd>
+          <dt>Clothes</dt><dd>click them in hand to wear (or use the Wardrobe in your inventory) · dye them at a workbench</dd>
           <dt>Fishing Rod</dt><dd>hold on water, let go to cast · click when it bites · hold to reel, keep the needle in the green</dd>
           <dt>H</dt><dd>show / hide this</dd>
           <dt>Esc</dt><dd>pause menu</dd>
@@ -114,27 +115,33 @@
       <div id="inventory" hidden>
         <div class="inv-layout">
           <div class="inv-main">
-            <section class="inv-box">
+            <!-- one wooden panel: page tabs with icons stick out on the left, the Crafting tab on the right -->
+            <section class="inv-box inv-book">
+              <div class="inv-sidetabs" id="inv-tabs-left"></div>
+              <button id="inv-craft-toggle" class="inv-sidetab right" tabindex="-1"></button>
               <div class="inv-tab" id="inv-title">Backpack</div>
-              <div id="inv-bag" class="inv-grid"></div>
-              <p id="inv-nobag">No bag yet: only your hotbar can hold things. Craft a <b>Backpack</b> from sticks and leaves for 24 more slots.</p>
+              <div class="inv-page" data-page="bag">
+                <div id="inv-bag" class="inv-grid"></div>
+                <p id="inv-nobag">No bag yet: only your hotbar can hold things. Craft a <b>Backpack</b> from sticks and leaves for 24 more slots.</p>
+              </div>
+              <div class="inv-page" data-page="wear" hidden>
+                <div id="inv-wear"></div>
+                <p class="inv-note wear-note">Click clothes onto a slot, shift-click them in your bag, or click them in hand to put them on. Craft them from cotton at a workbench and dye them there.</p>
+              </div>
+              <div class="inv-page" id="inv-creative" data-page="creative" hidden>
+                <p class="inv-note">Every item · click: a stack · right-click: one</p>
+                <div id="inv-all"></div>
+                <button id="inv-clear" class="inv-btn" tabindex="-1">Empty inventory</button>
+              </div>
             </section>
             <section class="inv-box inv-barbox">
               <div class="inv-tab">Hotbar</div>
               <div id="inv-bar" class="inv-grid"></div>
             </section>
-            <section class="inv-box" id="inv-creative" hidden>
-              <div class="inv-tab">Creative</div>
-              <p class="inv-note">Every item · click: a stack · right-click: one</p>
-              <div id="inv-all"></div>
-              <button id="inv-clear" class="inv-btn" tabindex="-1">Empty inventory</button>
-            </section>
             <div id="inv-name"></div>
             <div class="inv-foot">
-              <button id="inv-craft-toggle" class="inv-tab inv-tabbtn" tabindex="-1">Crafting · C</button>
               <button id="inv-close" class="inv-tab inv-tabbtn" tabindex="-1">ESC · Close</button>
             </div>
-            <p class="inv-help">Click: pick up / put down · Right-click: half / one · Shift-click: move</p>
           </div>
           <section class="inv-box inv-craftbox" id="inv-craft-box">
             <div class="inv-tab" id="inv-craft-title">Crafting</div>
@@ -152,11 +159,20 @@
           <h1>SettleOn</h1>
           <p>a cozy island to explore together</p>
         </div>
+        <!-- your character, always on the left of the menu (src/client/appearance.js); drag to turn -->
+        <div id="menu-hero">
+          <canvas id="look-canvas" width="150" height="190"></canvas>
+          <button id="menu-look" class="btn">Customize</button>
+        </div>
         <div id="menu-main" class="panel menu-panel">
-          <button id="menu-play-single" class="btn big">Play singleplayer</button>
-          <button id="menu-play-multi" class="btn big">Multiplayer</button>
-          <button id="menu-editor" class="btn big">Map editor</button>
-          <button id="menu-settings" class="btn big">Settings</button>
+          <!-- icons are original pixel art drawn in menu.js (MENU_ICONS); Map editor and Settings are the smaller row -->
+          <button id="menu-play-single" class="btn big mbtn accent"><span class="mb-icon" data-icon="play"></span><span class="mb-text"><b>Play</b><small>Explore your own worlds</small></span></button>
+          <button id="menu-play-multi" class="btn big mbtn"><span class="mb-icon" data-icon="multi"></span><span class="mb-text"><b>Multiplayer</b><small>Join friends in a room</small></span></button>
+          <div class="mb-row">
+            <button id="menu-editor" class="btn mbtn small"><span class="mb-icon" data-icon="editor"></span><span class="mb-text"><b>Map editor</b><small>Sculpt an island</small></span></button>
+            <button id="menu-settings" class="btn mbtn small"><span class="mb-icon" data-icon="settings"></span><span class="mb-text"><b>Settings</b><small>Look and options</small></span></button>
+          </div>
+          <p class="menu-keys"><kbd>↑</kbd><kbd>↓</kbd> choose · <kbd>Enter</kbd> go · <kbd>Esc</kbd> back</p>
         </div>
         <!-- world select (Minecraft-style): saved worlds with a picture, type, seed and last played -->
         <div id="menu-single" class="panel menu-panel wide" hidden>
@@ -194,6 +210,16 @@
           <div class="menu-row">
             <button class="btn" data-go="menu-single">Cancel</button>
             <button id="delete-yes" class="btn danger">Delete</button>
+          </div>
+        </div>
+        <!-- character: gender, skin, face, hair and facial hair (src/client/appearance.js); clothes are crafted in game -->
+        <div id="menu-looks" class="panel menu-panel wide look-panel" hidden>
+          <h2>Your character</h2>
+          <div id="look-options"></div>
+          <p class="menu-note">Clothes aren't chosen here: craft them in game from cotton.</p>
+          <div class="menu-row">
+            <button id="look-random" class="btn">Randomize</button>
+            <button class="btn accent" data-go="menu-main">Done</button>
           </div>
         </div>
         <div id="menu-multi" class="panel menu-panel" hidden>

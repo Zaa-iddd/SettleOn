@@ -2,6 +2,9 @@
 // room sees the same island. The ground is a grid of 1×1 columns whose heights come in
 // steps of STEP, which gives a blocky, terraced look.
 
+import { FLOWER_COLORS } from './outfit.js';
+export { FLOWER_COLORS };
+
 export const WORLD = 96; // columns per side
 export const STEP = 0.5; // terrain height step
 export const SEA = 1.8; // water surface height
@@ -37,10 +40,18 @@ export const PILE_MAX = 6;
 // Height of a pile's top, which players stand on: one row of logs (n 1-3), two (4-5) or three (6).
 // Matches the log model in world3d.js (radius 0.165, rows 0.165·√3 apart).
 export const pileTop = (n) => 0.33 + (n >= 6 ? 2 : n >= 4 ? 1 : 0) * 0.165 * Math.sqrt(3);
-export const PICK = { BUSH: 0, BERRIES: 1, PEBBLE: 2, ROCK: 3 };
-export const pickKey = (ix, iz, t) => cellKey(ix, iz) * 4 + t;
+// COTTON: a cotton plant harvested (it's gone for good); FLOWER: the wild flowers on a cell picked.
+export const PICK = { BUSH: 0, BERRIES: 1, PEBBLE: 2, ROCK: 3, COTTON: 4, FLOWER: 5 };
+export const MAX_PICK = 5;
+export const pickKey = (ix, iz, t) => cellKey(ix, iz) * 8 + t;
 /** Apply picks to generated lists in place: `has(pickKey)` says what was taken. */
-export function applyPicks(has, bushes, pebbles) {
+export function applyPicks(has, bushes, pebbles, cotton = [], flowers = []) {
+  for (let i = cotton.length - 1; i >= 0; i--) {
+    if (has(pickKey(toCell(cotton[i].x), toCell(cotton[i].z), PICK.COTTON))) cotton.splice(i, 1);
+  }
+  for (let i = flowers.length - 1; i >= 0; i--) {
+    if (has(pickKey(toCell(flowers[i].x), toCell(flowers[i].z), PICK.FLOWER))) flowers.splice(i, 1);
+  }
   for (let i = bushes.length - 1; i >= 0; i--) {
     const b = bushes[i], ix = toCell(b.x), iz = toCell(b.z);
     if (has(pickKey(ix, iz, PICK.BUSH))) bushes.splice(i, 1);
@@ -52,6 +63,10 @@ export function applyPicks(has, bushes, pebbles) {
 }
 // Loose pebbles lie on 3% of land cells (6% on sand, rock and trails); players pick them up.
 export const pebbleChance = (k) => (k === K.SAND || k === K.ROCK || k === K.TRAIL ? 0.06 : k === K.GRASS || k === K.FOREST || k === K.DEEP || k === K.DIRT ? 0.03 : 0);
+// Cotton plants grow in patches on meadows (where a slow noise is high) and now and then on their own.
+// `field` is that noise (fbm(ix / COTTON_SCALE, iz / COTTON_SCALE, seed + COTTON_SEED, 2)), `roll` a 0..1 hash.
+export const COTTON_SCALE = 8, COTTON_SEED = 818, COTTON_T = 0.62;
+export const cottonChance = (k, field) => (k === K.GRASS || k === K.DIRT ? (field > COTTON_T ? 0.42 : 0.004) : 0);
 export const DEEP_SHARE = 0.16; // share of lowland grass/forest that becomes deep (redwood) forest
 export const VILLAGE_RADIUS = 7;
 export const TREE_SCALE = 1.5; // all trees (and their trunk collision) are this much bigger than the base models
@@ -59,6 +74,7 @@ export const TREE_SCALE = 1.5; // all trees (and their trunk collision) are this
 export const LEAFY_SPACING = 3.2;
 // Pine woods: a forest cell grows a pine only when its roll is below this (out of the 0.5 tree roll)
 export const PINE_CHANCE = 0.28;
+export const PALM_CHANCE = 0.1; // share of dry beach sand that grows a coconut palm
 // Pines are this much bigger than other trees, and keep at least PINE_SPACING cells from each other
 export const PINE_SCALE = 1.4, PINE_SPACING = 2.2;
 export const PINE_NEAR = [];
@@ -262,6 +278,9 @@ export function generateWorld(seed) {
     return (k === K.FOREST && r < PINE_CHANCE && hash2(ix, iz, seed + 904) < 0.7) || (k === K.ROCK && r < 0.03 && H(ix, iz) < 8);
   };
   const pineKeep = (ix, iz) => PINE_NEAR.every(([dx, dz]) => !pineCand(ix + dx, iz + dz) || hash2(ix + dx, iz + dz, seed + 915) > hash2(ix, iz, seed + 915));
+  // coconut palms: dry beach sand, spaced like leafy trees
+  const palmCand = (ix, iz) => inWorld(ix, iz) && clear(ix, iz) && kind(ix, iz) === K.SAND && hash2(ix, iz, seed + 900) >= 0.07 && hash2(ix, iz, seed + 930) < PALM_CHANCE;
+  const palmKeep = (ix, iz) => palmCand(ix, iz) && LEAFY_NEAR.every(([dx, dz]) => !palmCand(ix + dx, iz + dz) || hash2(ix + dx, iz + dz, seed + 916) > hash2(ix, iz, seed + 916));
   for (let iz = 1; iz < W - 1; iz++) {
     for (let ix = 1; ix < W - 1; ix++) {
       const k = kind(ix, iz);
@@ -285,6 +304,7 @@ export function generateWorld(seed) {
         else if (leafyKeep(ix, iz)) trees.push({ ix, iz, type: 'leafy', s: ts });
       } else if (k === K.GRASS && r < 0.05) { if (leafyKeep(ix, iz)) trees.push({ ix, iz, type: 'leafy', s: ts }); }
       else if (k === K.ROCK && r < 0.03 && y < 8) { if (pineKeep(ix, iz)) trees.push({ ix, iz, type: 'pine', s: ts * 0.8 * PINE_SCALE }); }
+      else if (k === K.SAND && palmKeep(ix, iz)) trees.push({ ix, iz, type: 'palm', s: ts });
       else if ((k === K.ROCK && r < 0.14) || (k === K.GRASS && r < 0.07) || (k === K.SAND && r < 0.07)) rocks.push({ ix, iz, s: rockS });
     }
   }
@@ -298,7 +318,7 @@ export function generateWorld(seed) {
  * all the procedural foliage, and collision obstacles. Deterministic from base.seed, so a map
  * looks the same for everyone. Keeps base.heights/base.kinds (no copy): the editor relies on that.
  * @param {{seed:number, heights:Float32Array, kinds:Uint8Array, camp:{ix:number,iz:number},
- *   ruins:{ix:number,iz:number}[], trees:{ix:number,iz:number,type:'leafy'|'pine'|'redwood',s:number}[],
+ *   ruins:{ix:number,iz:number}[], trees:{ix:number,iz:number,type:'leafy'|'pine'|'redwood'|'palm',s:number}[],
  *   rocks:{ix:number,iz:number,s:number}[]}} base
  */
 export function finishWorld(base) {
@@ -334,7 +354,7 @@ export function finishWorld(base) {
     if (t.type === 'redwood') {
       redwoods.push({ ix, iz, x: toWorld(ix) + (hash2(ix, iz, seed + 910) - 0.5) * 0.2, z: toWorld(iz) + (hash2(ix, iz, seed + 911) - 0.5) * 0.2, y: H(ix, iz), s: t.s });
     } else {
-      trees.push({ ix, iz, x: toWorld(ix) + (hash2(ix, iz, seed + 901) - 0.5) * 0.5, z: toWorld(iz) + (hash2(ix, iz, seed + 902) - 0.5) * 0.5, y: H(ix, iz), s: t.s, pine: t.type === 'pine' });
+      trees.push({ ix, iz, x: toWorld(ix) + (hash2(ix, iz, seed + 901) - 0.5) * 0.5, z: toWorld(iz) + (hash2(ix, iz, seed + 902) - 0.5) * 0.5, y: H(ix, iz), s: t.s, pine: t.type === 'pine', ...(t.type === 'palm' ? { palm: true } : null) });
     }
   }
   const rocks = base.rocks.filter((r) => inWorld(r.ix, r.iz)).map(({ ix, iz, s }) => ({
@@ -345,7 +365,6 @@ export function finishWorld(base) {
   const taken = new Set([...base.trees, ...base.rocks].map((o) => o.iz * W + o.ix));
   const clear = (ix, iz) => Math.hypot(camp.ix - ix, camp.iz - iz) > VR + 1 && ruins.every((p) => Math.hypot(p.ix - ix, p.iz - iz) > 4);
   const flowers = [];
-  const FLOWER_COLORS = [0xf2e15c, 0xf28cc0, 0xffffff, 0x9fb8ff, 0xff7a59];
   for (let iz = 1; iz < W - 1; iz++) {
     for (let ix = 1; ix < W - 1; ix++) {
       if (kind(ix, iz) !== K.GRASS || taken.has(iz * W + ix) || !clear(ix, iz)) continue;
@@ -387,7 +406,7 @@ export function finishWorld(base) {
   }
 
   // Foliage (decorative, walk-through): grass tufts, bushes, ferns, mushrooms, reeds
-  const tufts = [], tallGrass = [], bushes = [], ferns = [], mushrooms = [], reeds = [], motes = [], pebbles = [];
+  const tufts = [], tallGrass = [], bushes = [], ferns = [], mushrooms = [], reeds = [], motes = [], pebbles = [], cotton = [];
   const water = { lilies: [], seaweed: [], seaRocks: [], corals: [], seagrass: [] };
   const lush = { reeds, tallGrass, ferns, bushes, ...water }; // lists waterLife / bankLife add to
   const nearWater = (ix, iz) => [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => kind(ix + dx, iz + dz) === K.SEABED);
@@ -439,6 +458,8 @@ export function finishWorld(base) {
         reeds.push({ ...spot(ix, iz, 40, 0.6), cattail: roll(7) < 0.5 });
       }
       if (roll(45) < pebbleChance(k)) pebbles.push(spot(ix, iz, 140, 0.6));
+      // cotton plants (not where a tree or rock stands): fields on the meadows
+      if ((k === K.GRASS || k === K.DIRT) && !taken.has(iz * W + ix) && roll(46) < cottonChance(k, fbm(ix / COTTON_SCALE, iz / COTTON_SCALE, seed + COTTON_SEED, 2))) cotton.push(spot(ix, iz, 150, 0.5));
       if (k === K.ROCK && roll(8) < 0.3) tufts.push(spot(ix, iz, 50));
       if (k === K.DIRT && roll(0) < 0.5) tufts.push(spot(ix, iz, 0, 0.9)); // a stray tuft at a dirt patch's grassy edge
       if (k === K.SEABED) waterLife(ix, iz, H, kind, spot, roll, lush, seed);
@@ -526,13 +547,14 @@ export function finishWorld(base) {
       if (obs) { const j = obs.findIndex((o) => Math.abs(o.x - r.x) < 1e-6 && Math.abs(o.z - r.z) < 1e-6); if (j >= 0) obs.splice(j, 1); }
       return [r];
     }
-    const hit = (t === PICK.PEBBLE ? pebbles : bushes).filter((o) => toCell(o.x) === ix && toCell(o.z) === iz);
+    const list = t === PICK.PEBBLE ? pebbles : t === PICK.COTTON ? cotton : t === PICK.FLOWER ? flowers : bushes;
+    const hit = list.filter((o) => toCell(o.x) === ix && toCell(o.z) === iz);
     picks.set(key, [ix, iz, t]);
-    applyPicks((k) => k === key, bushes, pebbles);
+    applyPicks((k) => k === key, bushes, pebbles, cotton, flowers);
     return hit;
   };
   const pickList = () => [...picks.values()];
-  return { benches: new Map(), piles: new Map(), setPick, pickList, pebbles, setEdit, under, editsList, removeTree, choppedList, base, seed, heights, kinds, camp, ruins, trees, redwoods, cornerBlocks, rocks, flowers, tufts, tallGrass, bushes, ferns, mushrooms, reeds, motes, ...water, obstacles, H, kind };
+  return { benches: new Map(), piles: new Map(), setPick, pickList, pebbles, cotton, setEdit, under, editsList, removeTree, choppedList, base, seed, heights, kinds, camp, ruins, trees, redwoods, cornerBlocks, rocks, flowers, tufts, tallGrass, bushes, ferns, mushrooms, reeds, motes, ...water, obstacles, H, kind };
 }
 
 /**

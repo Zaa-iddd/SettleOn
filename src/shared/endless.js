@@ -12,8 +12,9 @@
 // Cells use the island's mapping (x = ix - WORLD/2 + 0.5); ix and iz may be negative.
 
 import {
-  WORLD, STEP, SEA, K, VILLAGE_RADIUS, TREE_SCALE, WORLD_LIMIT, LEAFY_NEAR, PINE_CHANCE, PINE_SCALE, PINE_NEAR, TALL_GRASS_T,
-  rng, hash2, fbm, smooth, toWorld, toCell, cellKey, keyX, keyZ, isForest, isDirt, FOREST_SCALE, waterLife, bankLife, pickKey, applyPicks, pebbleChance, PICK } from './world.js';
+  WORLD, STEP, SEA, K, VILLAGE_RADIUS, TREE_SCALE, WORLD_LIMIT, LEAFY_NEAR, PALM_CHANCE, PINE_CHANCE, PINE_SCALE, PINE_NEAR, TALL_GRASS_T,
+  rng, hash2, fbm, smooth, toWorld, toCell, cellKey, keyX, keyZ, isForest, isDirt, FOREST_SCALE, waterLife, bankLife, pickKey, applyPicks, pebbleChance, PICK,
+  FLOWER_COLORS, COTTON_SCALE, COTTON_SEED, cottonChance } from './world.js';
 
 export const CH = 16; // cells per chunk side
 const DEEP_T = 0.647; // fbm value above which lowland grass/forest becomes deep forest (~16%, like the island)
@@ -29,6 +30,8 @@ const TRAIL_MIN = 4.5, TRAIL_RANGE = 0.2, TRAIL_GRID = 8, TRAIL_WIDTH = 1.3;
 // Archipelago: big islands where fbm(/ISLAND_SCALE) passes SHELF_LO..HI, islets where fbm(/22) passes ISLET_LO..HI
 const ISLAND_SCALE = 150, SHELF_LO = 0.5, SHELF_HI = 0.61, ISLET_LO = 0.65, ISLET_HI = 0.79;
 // mid-sized islands between the big ones and the islets: fbm(/ISLE_SCALE) passing ISLE_LO..HI
+// fragmenting the big islands into an archipelago cluster: channels where fbm(/FRAG_SCALE) is below FRAG_LO..HI
+const FRAG_SCALE = 17, FRAG_LO = 0.36, FRAG_HI = 0.46;
 const ISLE_SCALE = 55, ISLE_LO = 0.62, ISLE_HI = 0.74;
 // Rivers: the winding line where a slow, domain-warped noise crosses 0.5 (so they never break), on the big
 // islands only, starting at the foot of the mountains. The channel is carved below the sea (water) and a
@@ -38,7 +41,6 @@ const RIVER_SCALE = 95, RIVER_WARP = 34;
 // shelf, then DROP_SLOPE more past SHELF_EDGE (the drop-off), down to SEABED_MIN
 const COAST_STEEP = 2.2, SHORE_RISE = 0.7, BED_NOISE = 1.4, SEABED_TOP = 2.0, SEABED_SLOPE = 5, SHELF_EDGE = 0.35, DROP_SLOPE = 10, SEABED_MIN = -6;
 const VR = VILLAGE_RADIUS;
-const FLOWER_COLORS = [0xf2e15c, 0xf28cc0, 0xffffff, 0x9fb8ff, 0xff7a59];
 const TERRAIN_CACHE = 2500; // chunks of heights/kinds kept (cheap)
 const CONTENT_CACHE = 220; // chunks of trees/foliage/paths kept (more than the scene keeps loaded)
 // neighbour offsets closer than 2.1 cells (redwood spacing)
@@ -53,7 +55,8 @@ function rawCell(seed, ix, iz) {
   // slow noise peaks; `islet` scatters small isles across the open sea. Land only rises where one of
   // them is up, so islands are separated by real stretches of water.
   const c = fbm(ix / ISLAND_SCALE, iz / ISLAND_SCALE, seed + 11, 4);
-  const shelf = smooth(SHELF_LO, SHELF_HI, c);
+  // the big landmasses are broken into a cluster of small islands close together: a mid-frequency noise cuts channels through them
+  const shelf = smooth(SHELF_LO, SHELF_HI, c) * smooth(FRAG_LO, FRAG_HI, fbm(ix / FRAG_SCALE, iz / FRAG_SCALE, seed + 211, 3));
   const islet = smooth(ISLET_LO, ISLET_HI, fbm(ix / 22, iz / 22, seed + 91, 3)) * 0.9;
   const isle = smooth(ISLE_LO, ISLE_HI, fbm(ix / ISLE_SCALE, iz / ISLE_SCALE, seed + 131, 3)) * 0.93;
   const land = Math.max(shelf, islet, isle);
@@ -379,6 +382,12 @@ export function createEndlessWorld(seed) {
       return (k === K.FOREST && r < 0.5 && hash2(ix, iz, seed + 904) >= 0.7) || (k === K.GRASS && r < 0.05);
     };
     const leafyKeep = (ix, iz) => LEAFY_NEAR.every(([dx, dz]) => !leafyCand(ix + dx, iz + dz) || hash2(ix + dx, iz + dz, seed + 914) > hash2(ix, iz, seed + 914));
+    // coconut palms stand on dry beach sand, PALM_CHANCE of it, spaced like leafy trees
+    const palmCand = (ix, iz) => {
+      if (!clear(ix, iz) || edited(ix, iz)) return false;
+      return kind(ix, iz) === K.SAND && hash2(ix, iz, seed + 900) >= 0.07 && hash2(ix, iz, seed + 930) < PALM_CHANCE;
+    };
+    const palmKeep = (ix, iz) => palmCand(ix, iz) && LEAFY_NEAR.every(([dx, dz]) => !palmCand(ix + dx, iz + dz) || hash2(ix + dx, iz + dz, seed + 916) > hash2(ix, iz, seed + 916));
     // pines keep PINE_SPACING apart (same rule as generateWorld)
     const pineCand = (ix, iz) => {
       if (!clear(ix, iz) || edited(ix, iz)) return false;
@@ -407,18 +416,19 @@ export function createEndlessWorld(seed) {
           else if (leafyKeep(ix, iz)) ob = { type: 'leafy', s: ts };
         } else if (k === K.GRASS && r < 0.05) { if (leafyKeep(ix, iz)) ob = { type: 'leafy', s: ts }; }
         else if (k === K.ROCK && r < 0.03 && y < 8) { if (pineKeep(ix, iz)) ob = { type: 'pine', s: ts * 0.8 * PINE_SCALE }; }
+        else if (k === K.SAND && palmKeep(ix, iz)) ob = { type: 'palm', s: ts };
         else if ((k === K.ROCK && r < 0.14) || (k === K.GRASS && r < 0.07) || (k === K.SAND && r < 0.07)) ob = { type: 'rock', s: rockS };
       }
       objMemo.set(ck, ob);
       return ob;
     }
-    const isTree = (ob) => ob && (ob.type === 'leafy' || ob.type === 'pine');
+    const isTree = (ob) => ob && (ob.type === 'leafy' || ob.type === 'pine' || ob.type === 'palm');
     // the grid vertex a tree at (ix, iz) tries to move its trunk onto
     const cornerOf = (ix, iz) => [ix + (hash2(ix, iz, seed + 920) < 0.5 ? 0 : 1), iz + (hash2(ix, iz, seed + 921) < 0.5 ? 0 : 1)];
 
     const trees = [], redwoods = [], rocks = [], flowers = [], corners = new Set();
-    const tufts = [], tallGrass = [], bushes = [], ferns = [], mushrooms = [], reeds = [], motes = [], pebbles = [];
-    const pond = { lilies: [], seaweed: [], seaRocks: [], corals: [], seagrass: [] };
+    const tufts = [], tallGrass = [], bushes = [], ferns = [], mushrooms = [], reeds = [], motes = [], pebbles = [], cotton = [];
+    const pond ={ lilies: [], seaweed: [], seaRocks: [], corals: [], seagrass: [] };
     const cairns = [];
     const lush = { reeds, tallGrass, ferns, bushes, ...pond }; // lists waterLife / bankLife add to
     const obstacles = new Map(); // cell key -> circles
@@ -447,7 +457,7 @@ export function createEndlessWorld(seed) {
           rocks.push(r);
           addObs(r.x, r.z, r.s * 0.9);
         } else {
-          const t = { ix, iz, x: toWorld(ix) + (hash2(ix, iz, seed + 901) - 0.5) * 0.5, z: toWorld(iz) + (hash2(ix, iz, seed + 902) - 0.5) * 0.5, y, s: ob.s, pine: ob.type === 'pine' };
+          const t = { ix, iz, x: toWorld(ix) + (hash2(ix, iz, seed + 901) - 0.5) * 0.5, z: toWorld(iz) + (hash2(ix, iz, seed + 902) - 0.5) * 0.5, y, s: ob.s, pine: ob.type === 'pine', ...(ob.type === 'palm' ? { palm: true } : null) };
           // walk-under: trunk onto a tile corner when the 4 tiles around it are dry, rock-free and
           // nearly level, and no earlier tree (row-major, as on the island) already took that corner
           const [vx, vz] = cornerOf(ix, iz);
@@ -537,6 +547,8 @@ export function createEndlessWorld(seed) {
         }
         if ((k === K.SAND || k === K.GRASS) && nearWater(ix, iz) && roll(6) < 0.55) reeds.push({ ...spot(ix, iz, 40, 0.6), cattail: roll(7) < 0.5 });
         if (roll(45) < pebbleChance(k)) pebbles.push(spot(ix, iz, 140, 0.6));
+        // cotton plants in fields on the meadows (same odds as finishWorld)
+        if ((k === K.GRASS || k === K.DIRT) && !objAt(ix, iz) && roll(46) < cottonChance(k, fbm(ix / COTTON_SCALE, iz / COTTON_SCALE, seed + COTTON_SEED, 2))) cotton.push(spot(ix, iz, 150, 0.5));
         if (k === K.ROCK && roll(8) < 0.3) tufts.push(spot(ix, iz, 50));
         if (k === K.DIRT && roll(0) < 0.5) tufts.push(spot(ix, iz, 0, 0.9)); // a stray tuft at a dirt patch's grassy edge
         // trail markers: a stone cairn now and then on the ground beside a trail
@@ -571,10 +583,10 @@ export function createEndlessWorld(seed) {
     }
 
     // what players took: generated above as usual, then left out (so nothing else shifts)
-    if (picksHere) applyPicks((k) => picksHere.has(k), bushes, pebbles);
+    if (picksHere) applyPicks((k) => picksHere.has(k), bushes, pebbles, cotton, flowers);
 
     return contentCache.set(key, {
-      cx, cz, pebbles, trees, redwoods, rocks, flowers, tufts, tallGrass, bushes, ferns, mushrooms, reeds, motes, ...pond, cairns,
+      cx, cz, pebbles, cotton, trees, redwoods, rocks, flowers, tufts, tallGrass, bushes, ferns, mushrooms, reeds, motes, ...pond, cairns,
       ruins, corners, floor, water, blocked, hasCamp,
     });
   }

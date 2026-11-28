@@ -236,6 +236,103 @@ function buildRedwood(variant) {
   return merge(parts);
 }
 
+// Coconut palms (after the user's pixel-art palm reference): a curved, ringed trunk and long arching feather
+// fronds, each a spine with pointed leaflets down both sides (light near the spine, dark toward the tips).
+const PALM_RING = [0x5a341e, 0xa06a3a, 0xcf9a5c].map((h) => new THREE.Color(h)); // dark groove, tan, lit tan
+const PALM_BANDS = [0x1f6a3a, 0x2f8a3c, 0x55b040, 0x86cf4e, 0xb6e26a].map((h) => new THREE.Color(h));
+const COCONUT = [0x3a2418, 0x573620, 0x7a4e2c].map((h) => new THREE.Color(h));
+
+/**
+ * Coconut palm variant (about 2.6 tall at s = 1): a slender curved trunk with bark rings and a flared base,
+ * 9–10 arching feather fronds with serrated pointed leaflets, a young upright frond and a few coconuts.
+ */
+export const palmTreeGeometry = (variant, lo = false) => cached(`palm${variant}${lo ? 'lo' : ''}`, () => detailed(lo, () => buildPalm(variant)));
+
+/** One feather frond from `top` heading at yaw `a`: arches up, then droops. Returns a vertex-coloured geometry. */
+function palmFrond(top, a, len, rise, droop, tone, rand) {
+  const stations = leafDetail < 1 ? 7 : 13, verts = [], norms = [], cols = [];
+  const dir = new THREE.Vector3(Math.cos(a), 0, Math.sin(a));
+  const spine = (u) => new THREE.Vector3(top.x + dir.x * len * u, top.y + 0.06 + rise * Math.sin(u * Math.PI * 0.62) * 1.2 - droop * u * u, top.z + dir.z * len * u);
+  const side = new THREE.Vector3(), tan = new THREE.Vector3(), n = new THREE.Vector3(), tip = new THREE.Vector3(), mid = new THREE.Vector3();
+  const tri = (p0, p1, p2, band) => {
+    for (const v of [p0, p1, p2, p0, p2, p1]) { verts.push(v.x, v.y, v.z); norms.push(n.x, n.y, n.z); cols.push(band.r, band.g, band.b); }
+  };
+  const pick = (shade) => PALM_BANDS[Math.max(0, Math.min(4, Math.floor(shade * 5)))];
+  for (let i = 0; i < stations; i++) {
+    const u0 = i / stations, u1 = (i + 1) / stations, p0 = spine(u0), p1 = spine(u1);
+    tan.subVectors(spine(Math.min(1, u1 + 0.05)), spine(Math.max(0, u0 - 0.05))).normalize();
+    side.crossVectors(tan, UP).normalize();
+    // long leaflets mid-frond, shrinking to a point at the end
+    const w = 0.5 * Math.sin(Math.PI * Math.min(1, 0.2 + u0 * 0.95)) * (1 - u0 * 0.3) * (0.9 + rand() * 0.2);
+    for (const sg of [-1, 1]) {
+      tip.copy(p0).lerp(p1, 0.6).addScaledVector(side, sg * w).addScaledVector(tan, w * 0.7);
+      tip.y -= w * (0.12 + 0.3 * u0); // leaflets hang down off the rib
+      mid.copy(p0).lerp(tip, 0.5).lerp(p1, 0.25); mid.y += 0.015;
+      n.copy(side).multiplyScalar(sg * 0.3).add(UP).normalize();
+      const shade = tone + 0.18 * (1 - u0) + (rand() - 0.5) * 0.18 + (dir.dot(SUN) * 0.1);
+      tri(p0, p1, mid, pick(shade + 0.12)); // light inner part
+      tri(p1, mid, tip, pick(shade - 0.12)); // darker pointed tip
+    }
+  }
+  // a pointed terminal leaflet along the spine
+  const e = spine(1), e0 = spine(0.92);
+  n.copy(UP);
+  tip.copy(e).addScaledVector(dir, 0.1); tip.y -= 0.07;
+  side.crossVectors(dir, UP).normalize().multiplyScalar(0.035);
+  tri(e0.clone().add(side), e0.clone().sub(side), tip, pick(tone - 0.05));
+  const g = new THREE.BufferGeometry();
+  g.setAttribute('position', new THREE.Float32BufferAttribute(verts, 3));
+  g.setAttribute('normal', new THREE.Float32BufferAttribute(norms, 3));
+  g.setAttribute('color', new THREE.Float32BufferAttribute(cols, 3));
+  return g;
+}
+
+/** Where the trunk of palm `variant` is at height fraction u (0 base … 1 crown), in the model's local space. */
+export function palmTrunkLocal(variant, u) {
+  const rand = rng(11000 + variant * 29);
+  const lean = rand() * Math.PI * 2, bend = 0.4 + rand() * 0.25, H = 2.2 + rand() * 0.3, ph = rand() * 6;
+  const off = bend * u * u + Math.sin(u * 5 + ph) * 0.03;
+  return { x: Math.cos(lean) * off, y: u * H, z: Math.sin(lean) * off };
+}
+
+function buildPalm(variant) {
+  const rand = rng(11000 + variant * 29);
+  const parts = [];
+  const lean = rand() * Math.PI * 2, bend = 0.4 + rand() * 0.25, H = 2.2 + rand() * 0.3, ph = rand() * 6;
+  const pts = [];
+  for (let i = 0; i <= 8; i++) {
+    const u = i / 8, off = bend * u * u + Math.sin(u * 5 + ph) * 0.03; // arcs over, with a slight wobble
+    pts.push(new THREE.Vector3(Math.cos(lean) * off, u * H, Math.sin(lean) * off));
+  }
+  const trunk = limb(pts, 0.125, 0.078, rand, 7, leafDetail < 1 ? 14 : 56, BARK);
+  // ringed bark: dark grooves between tan bands, lit on the sunny side
+  colorize(trunk, (p, nrm) => {
+    const f = ((p.y / 0.15) % 1 + 1) % 1;
+    return f < 0.3 ? PALM_RING[0] : nrm.dot(SUN) > 0.35 ? PALM_RING[2] : PALM_RING[1];
+  });
+  parts.push(trunk);
+  for (let i = 0; i < 3; i++) { // flared base
+    const a = (i / 3) * Math.PI * 2 + rand() * 0.8;
+    parts.push(limb([new THREE.Vector3(0, 0.2, 0), new THREE.Vector3(Math.cos(a) * 0.1, 0.05, Math.sin(a) * 0.1), new THREE.Vector3(Math.cos(a) * 0.19, -0.03, Math.sin(a) * 0.19)], 0.06, 0.02, rand, 5, 4, PALM_RING));
+  }
+  const top = pts[8];
+  // crown: fronds all round, the lower ones longer and drooping, upper ones shorter and lifted
+  const fronds = 9 + Math.floor(rand() * 2), a0 = rand() * Math.PI * 2;
+  for (let i = 0; i < fronds; i++) {
+    const a = a0 + (i / fronds) * Math.PI * 2 + (rand() - 0.5) * 0.25;
+    const low = i % 2; // alternate high and low fronds
+    parts.push(palmFrond(top, a, 1.3 + rand() * 0.25 - low * 0.12, 0.3 + (1 - low) * 0.25 + rand() * 0.1, 0.6 + low * 0.5 + rand() * 0.15, 0.5 - low * 0.12 + rand() * 0.12, rand));
+  }
+  parts.push(palmFrond(top, rand() * 6.28, 0.65, 0.55, 0.25, 0.72, rand)); // young frond standing up
+  const nuts = 2 + Math.floor(rand() * 3);
+  for (let i = 0; i < nuts; i++) { // coconuts under the crown
+    const a = rand() * Math.PI * 2, d = 0.07 + rand() * 0.04;
+    const g = new THREE.IcosahedronGeometry(0.075, 0).translate(top.x + Math.cos(a) * d, top.y - 0.05 - rand() * 0.06, top.z + Math.sin(a) * d);
+    parts.push(colorize(g, (p, nrm) => (nrm.dot(SUN) > 0.4 ? COCONUT[2] : nrm.y < -0.2 ? COCONUT[0] : COCONUT[1])));
+  }
+  return merge(parts);
+}
+
 /** Bush: one or two low leaf clusters in the same style (about 0.3 radius). */
 export const bushGeometry = () => cached('bush', buildBush);
 function buildBush() {

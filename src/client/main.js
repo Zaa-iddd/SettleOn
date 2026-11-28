@@ -20,8 +20,10 @@ import { Menu } from './menu.js';
 import { PLAYER_COLORS } from '../shared/world.js';
 import { PixelRenderer, TILT, PIXEL_PREF } from './pixelfx.js';
 import { partIcon } from './boaticons.js';
-import { WorldScene, DEFAULT_TIME, furnitureGeometry, logGeo, logOffset } from './world3d.js';
-import { makeCharacter, animateCharacter, ANIM, TOOLS, setTool, swingTool, SWING_SECS, setLantern } from './character.js';
+import { WorldScene, DEFAULT_TIME, furnitureGeometry, logGeo, logOffset, palmTrunk } from './world3d.js';
+import { makeCharacter, animateCharacter, ANIM, TOOLS, setTool, swingTool, SWING_SECS, setLantern, lookKey } from './character.js';
+import { loadLook, CharacterPreview } from './appearance.js';
+import { flowerKey, cleanLook as cleanPlayerLook } from '../shared/outfit.js';
 import { GridController, IMPACT_DROP } from './controller.js';
 import { Fishing } from './fishing.js';
 import { Drops } from './drops.js';
@@ -60,6 +62,7 @@ const game = {
   marker: null,
   ruinsFound: new Map(), // ruin id -> ruin
   lastSent: { x: 0, y: 0, z: 0, ry: 0, a: -1, at: 0 },
+  climb: null, // { t, key, age, sx, sz, from, shook, w }: climbing a palm (climbPalm)
   tool: 0, // held tool: 0 hand, 1 shovel, 2 pickaxe (TOOLS)
   digHits: new Map(), // cellKey -> hits so far (stone takes 2)
   pendingDig: null, // { ix, iz }: dig once we've walked next to it
@@ -78,7 +81,7 @@ function connect() {
   game.leaving = false;
   const room = String(identity.room).replace(/[^\w-]/g, '').slice(0, 64) || 'dev';
   socket = new PartySocket({ host: location.host, protocol: location.protocol === 'https:' ? 'wss' : 'ws', party: 'room', room });
-  socket.onopen = () => socket.send(JSON.stringify({ type: 'hello', room, ...identity.hello }));
+  socket.onopen = () => socket.send(JSON.stringify({ type: 'hello', room, ...identity.hello, look: loadLook(), wear: inventory.wear }));
   socket.onmessage = (e) => {
     const msg = JSON.parse(e.data);
     if (msg.type === 'welcome') onWelcome(msg);
@@ -391,21 +394,25 @@ function onRoster(players) {
 
 function ensureCharacter(id, p) {
   const scene = game.scene.scene;
+  const key = lookKey(p.look, p.wear) + p.color; // rebuilt when the look, the clothes or the colour change
   if (id === game.me) {
-    if (game.local?.color === p.color) return;
-    if (game.local) scene.remove(game.local.char.root);
-    game.local = { char: makeCharacter(id, p.color), color: p.color };
-    setTool(game.local.char, game.tool);
-    scene.add(game.local.char.root);
+    if (game.local?.key === key) return;
+    const old = game.local?.char;
+    if (old) scene.remove(old.root);
+    const char = makeCharacter(id, p.color, p.look, p.wear);
+    if (old) { char.root.position.copy(old.root.position); char.root.rotation.copy(old.root.rotation); }
+    game.local = { char, color: p.color, key };
+    setTool(char, game.tool);
+    scene.add(char.root);
     return;
   }
   const existing = game.remotes.get(id);
-  if (existing && existing.color === p.color) {
+  if (existing && existing.key === key) {
     existing.label.textContent = p.name;
     return;
   }
   if (existing) { scene.remove(existing.char.root); existing.label.remove(); }
-  const char = makeCharacter(id, p.color);
+  const char = makeCharacter(id, p.color, p.look, p.wear);
   char.root.visible = false;
   scene.add(char.root);
   const label = document.createElement('div');
@@ -415,7 +422,7 @@ function ensureCharacter(id, p) {
   label.hidden = true;
   $('labels').append(label);
   game.remotes.set(id, {
-    char, color: p.color, label, pos: new THREE.Vector3(), target: new THREE.Vector3(),
+    char, color: p.color, key, label, pos: new THREE.Vector3(), target: new THREE.Vector3(),
     ry: 0, targetRy: 0, a: ANIM.IDLE, speed: 0, seen: false,
   });
 }
@@ -516,6 +523,7 @@ function frame() {
   if (!game.world || !game.ctrl) return;
   // singleplayer pause: the world stands still, only the last view is drawn
   if (game.paused && game.mode === 'single') { pixel.render(game.scene.scene, camera); return; }
+  drawDoll(dt, t);
 
   const cam = game.cam;
   // aboard a boat you can zoom out further (BOAT_ZOOM); stepping ashore eases back inside the normal limit
@@ -544,6 +552,7 @@ function frame() {
   else if (!$('throttle').hidden) throttleHud(null);
   game.boats.update(dt, t, game.driving);
   if (game.ride) walkOnDeck(dt, t, k0, cam.yaw);
+  else if (game.climb) climbStep(dt);
   else if (!tryBoard(k0, cam.yaw, t)) game.ctrl.update(dt, screenToGrid(k0, cam.yaw));
   const c = game.ctrl;
   if (!c.moving && game.marker.visible && !game.marker.userData.bad) game.marker.visible = false;
@@ -561,6 +570,7 @@ function frame() {
   }
   // items on the ground: one Drops per world scene; walk up to them to pick them up
   if (game.drops?.scene !== game.scene.scene) { game.drops?.clear(); game.drops = new Drops(game.scene.scene); }
+  updateNuts(dt);
   game.drops.update(dt, t, {
     floor: dropFloor, player: game.local ? c.pos : null, night: game.scene.night ?? 0,
     add: (id, n) => inventory.add(id, n), onFull: () => toast('Your inventory is full'),
@@ -710,7 +720,7 @@ function groundPoint(px, py) {
 // Clicks don't move the character (movement is WASD/arrows only, at the user's request): with a
 // tool in hand, a click on a neighbouring tile uses it.
 function onTap(px, py, first) {
-  if (!game.world || !game.ctrl || editor.active || !first || inventory.isOpen) return;
+  if (!game.world || !game.ctrl || editor.active || !first || inventory.isOpen || game.climb) return;
   hideCtx();
   game.pendingAct = null;
   if (game.boatEdit) return editClick(px, py); // edit mode: a click picks a part of the boat
@@ -720,14 +730,16 @@ function onTap(px, py, first) {
     if (ITEMS[inventory.held?.id]?.furn) return placeOnDeck(px, py);
     if (TOOLS[game.tool] === 'axe') return takeFromDeck(px, py);
     if (ITEMS[inventory.held?.id]?.food) return eatHeld();
+    if (ITEMS[inventory.held?.id]?.cloth) return wearHeld();
     return;
   }
   const frog = frogAt(px, py);
   if (frog) return catchFrog(frog); // clicking a frog catches it, whatever is in hand
   const held = inventory.held;
-  if (held && ITEMS[held.id].throwable) return throwAt(px, py); // holding a frog: throw it there
+  if (held && ITEMS[held.id].throwable) return ITEMS[held.id].throwable === 'nut' ? throwNut(px, py) : throwAt(px, py); // a frog or a coconut in hand: throw it there
   const item = held && ITEMS[held.id];
   if (item?.boat) return launchBoat(px, py); // a boat in hand: put it in the water there
+  if (item?.cloth) return wearHeld(); // clothes in hand: put them on
   if (TOOLS[game.tool] === 'axe') { // a boat, furniture, then a log pile, then a tree, else wood blocks
     const boat = boatAt(px, py);
     if (boat) return takeBoat(boat);
@@ -741,13 +753,78 @@ function onTap(px, py, first) {
     const bench = benchAt(px, py);
     if (bench && bench[3] === 0) return useWorkbench(bench);
   }
+  if (canClimb(item)) { const palm = palmAt(px, py); if (palm) return climbPalm(palm); } // an empty hand climbs a palm
   const bush = bushAt(px, py);
   if (bush) return breakBush(bush); // a click breaks a bush, whatever is in hand
   const pebble = pebbleAt(px, py);
   if (pebble) return pickPebble(pebble);
+  if (handFree(item)) { // with a free hand: harvest cotton, pick flowers
+    const plant = cottonAt(px, py);
+    if (plant) return harvestCotton(plant);
+    const flower = flowerAt(px, py);
+    if (flower) return pickFlowers(flower);
+  }
   if (TOOLS[game.tool] === 'pickaxe') { const rock = rockAt(px, py); if (rock) return mineRock(rock); } // the pickaxe breaks rocks
   if (item &&(item.tool || item.block || item.place)) useToolAt(px, py); // a tool digs, a block or workbench is placed
   else if (item?.food) eatHeld(); // food in hand: a click eats one
+}
+
+// ---------- climbing palms and shaking coconuts down ----------
+// Click a coconut palm with an empty (or material) hand: walk to its trunk, climb it, shake the crown and slide
+// back down. 1–3 Coconuts drop. A palm has coconuts again COCONUT_REGROW seconds later (client-only, not synced).
+const COCONUT_REGROW = 180, CLIMB_UP = 1.5, CLIMB_SHAKE = 1.0, CLIMB_DOWN = 1.1, CLIMB_TOP = 0.82;
+const palmReady = new Map(); // cellKey -> clock time when the palm has coconuts again
+const canClimb = (item) => !item || !(item.tool || item.block || item.place || item.food || item.throwable || item.boat);
+const palmAt = (px, py) => treeAt(px, py, (t) => t.palm);
+const ease = (k) => k * k * (3 - 2 * k);
+function climbPalm(t) {
+  if (game.climb || game.ride || !game.local) return;
+  if (!inReach(t, () => { if (nearbyTrees(16).includes(t)) climbPalm(t); })) return;
+  const key = cellKey(t.ix, t.iz), c = game.ctrl;
+  if (clock.elapsedTime < (palmReady.get(key) ?? 0)) return toast('No ripe coconuts up there right now');
+  let sx = c.pos.x - t.x, sz = c.pos.z - t.z;
+  const len = Math.hypot(sx, sz) || 1;
+  sx /= len; sz /= len;
+  game.fishing?.cancel(fishCtx());
+  game.climb = { t, key, age: 0, sx, sz, from: { x: c.pos.x, y: c.pos.y, z: c.pos.z }, shook: false, w: game.world };
+  game.local.char.climbPhase = 0;
+  game.local.char.lastClimbHalf = undefined;
+}
+function climbStep(dt) {
+  const k = game.climb, c = game.ctrl;
+  if (!k || k.w !== game.world) { game.climb = null; return; }
+  k.age += dt;
+  const total = CLIMB_UP + CLIMB_SHAKE + CLIMB_DOWN;
+  const a = k.age;
+  const u = a < CLIMB_UP ? ease(a / CLIMB_UP) * CLIMB_TOP : a < CLIMB_UP + CLIMB_SHAKE ? CLIMB_TOP : CLIMB_TOP * (1 - ease(Math.min(1, (a - CLIMB_UP - CLIMB_SHAKE) / CLIMB_DOWN)));
+  if (a >= total) { // back on the ground where we started
+    c.pos.x = k.from.x; c.pos.y = k.from.y; c.pos.z = k.from.z;
+    c.anim = ANIM.IDLE;
+    game.climb = null;
+    return;
+  }
+  const t = k.t, p = palmTrunk(t, u), off = 0.2 * t.s, w = Math.min(1, u / 0.1);
+  c.pos.x = k.from.x + (p.x + k.sx * off - k.from.x) * w;
+  c.pos.z = k.from.z + (p.z + k.sz * off - k.from.z) * w;
+  c.pos.y = k.from.y + (p.y - t.y);
+  c.ry = Math.atan2(-k.sx, -k.sz);
+  c.anim = ANIM.CLIMB;
+  c.speed = 0;
+  const mode = a < CLIMB_UP ? 'up' : a < CLIMB_UP + CLIMB_SHAKE ? 'shake' : 'down';
+  game.local.char.climbMode = mode;
+  if (mode === 'up') game.local.char.climbPhase += dt * 9;
+  if (!k.shook && a >= CLIMB_UP + 0.3) { // up in the crown: shake it
+    k.shook = true;
+    const top = palmTrunk(t, 1), fx = game.scene.effects;
+    game.scene.shakeTree(t, -k.sx, -k.sz, 0.1);
+    fx.leafFall(top.x, top.y, top.z, 0.9 * t.s, 12, dropFloor);
+    swingTool(game.local.char);
+    if (clock.elapsedTime < (palmReady.get(k.key) ?? 0)) return;
+    palmReady.set(k.key, clock.elapsedTime + COCONUT_REGROW);
+    const n = 1 + Math.floor(Math.random() * 3);
+    dropItem('coconut', n, top.x + k.sx * 0.2, top.y - 0.2, top.z + k.sz * 0.2, 1.1);
+    toast(n === 1 ? 'A coconut falls!' : `${n} coconuts fall!`);
+  }
 }
 
 // ---------- bushes and pebbles ----------
@@ -854,6 +931,46 @@ function pickPebble(p) {
   if (game.mode === 'multi') send({ type: 'pick', ix, iz, t: PICK.PEBBLE });
   saveDigging();
 }
+// ---------- cotton plants and wild flowers (picks COTTON and FLOWER) ----------
+// With a free hand (nothing that digs, places, eats or is worn), a click on a cotton plant harvests it for 2-4 Cotton
+// Balls (the plant is gone for good, like a broken bush), and a click on wild flowers picks every flower on that tile.
+// Cotton makes clothes (RECIPES); flowers grind into dyes (Inventory.dyeRecipes). Both sync like other picks.
+const handFree = (item) => !item || !(item.tool || item.block || item.place || item.food || item.cloth || item.boat || item.throwable);
+const cottonAt = (px, py) => thingAt(nearby('cotton', 14), px, py, 0.25, Math.max(16, 240 / game.cam.dist));
+const flowerAt = (px, py) => thingAt(nearby('flowers', 14), px, py, 0.08, Math.max(12, 170 / game.cam.dist));
+function harvestCotton(p) {
+  const ix = toCell(p.x), iz = toCell(p.z), c = game.ctrl, now = clock.elapsedTime, w = game.world;
+  if (!inReach(p, () => { const q = onCell('cotton', ix, iz); if (q) harvestCotton(q); })) return;
+  if (now < game.nextDig) return;
+  game.nextDig = now + SWING_SECS + 0.05;
+  c.ry = Math.atan2(p.x - c.pos.x, p.z - c.pos.z);
+  if (game.local) swingTool(game.local.char);
+  setTimeout(() => {
+    const q = game.world === w && onCell('cotton', ix, iz);
+    if (!q) return;
+    game.scene.effects.impact(q.x, q.y + 0.3, q.z, 1.2, 'leaves');
+    applyPick(ix, iz, PICK.COTTON);
+    dropItem('cotton', 2 + Math.floor(Math.random() * 3), (q.x + c.pos.x) / 2, q.y + 0.35, (q.z + c.pos.z) / 2, 0.6); // tossed halfway to you, so it's always in reach
+    if (game.mode === 'multi') send({ type: 'pick', ix, iz, t: PICK.COTTON });
+    saveDigging();
+  }, SWING_SECS * 450);
+}
+function pickFlowers(f) {
+  const ix = toCell(f.x), iz = toCell(f.z), here = () => nearby('flowers', 6).filter((o) => toCell(o.x) === ix && toCell(o.z) === iz);
+  if (!inReach(f, () => { const q = onCell('flowers', ix, iz); if (q) pickFlowers(q); })) return;
+  const list = here();
+  if (!list.length) return;
+  const by = {}; // flowers on this tile, by colour
+  for (const o of list) by[flowerKey(o.c)] = (by[flowerKey(o.c)] ?? 0) + 1;
+  const at = list[0];
+  game.ctrl.ry = Math.atan2(at.x - game.ctrl.pos.x, at.z - game.ctrl.pos.z);
+  applyPick(ix, iz, PICK.FLOWER);
+  const c = game.ctrl, mx = (at.x + c.pos.x) / 2, mz = (at.z + c.pos.z) / 2; // tossed halfway to you, so it's always in reach
+  for (const [key, n] of Object.entries(by)) dropItem(`flower_${key}`, n, mx, at.y + 0.2, mz, 0.5);
+  if (game.mode === 'multi') send({ type: 'pick', ix, iz, t: PICK.FLOWER });
+  saveDigging();
+}
+
 // Rocks: the pickaxe breaks them (rockHits swings, by size) into Stone (rockStone), and sometimes a pebble.
 // A mined rock is a pick (PICK.ROCK): gone for good, synced and saved like a broken bush.
 const rockHits = (r) => (r.s < 0.38 ? 2 : 3);
@@ -888,7 +1005,7 @@ function applyPick(ix, iz, t) {
   if (w.endless) game.scene.refreshCell(ix, iz); // rebuilds that chunk without it
   else for (const o of hit) {
     if (t === PICK.ROCK) { game.scene.hideTree({ x: o.x, y: o.y + o.s * 0.35, z: o.z }); continue; } // the rock instance sits a little up
-    if (t !== PICK.PEBBLE) game.scene.hideBerries(o);
+    if (t === PICK.BUSH || t === PICK.BERRIES) game.scene.hideBerries(o);
     if (t !== PICK.BERRIES) game.scene.hideTree(o);
   }
   if (t === PICK.ROCK && game.paths) { game.paths.refresh(ix, iz); game.digVersion = (game.digVersion ?? 0) + 1; } // its tile is open now
@@ -904,12 +1021,12 @@ function hideCtx() { $('ctx-menu').hidden = true; }
 function onRight(px, py) {
   hideCtx();
   if (!game.world || !game.ctrl || editor.active || inventory.isOpen || (game.mode !== 'single' && game.mode !== 'multi')) return;
-  if (game.ride) { if (ITEMS[inventory.held?.id]?.food) eatHeld(); return; } // aboard: right-click only eats
+  if (game.ride) { if (ITEMS[inventory.held?.id]?.food) eatHeld(); else if (ITEMS[inventory.held?.id]?.cloth) wearHeld(); return; } // aboard: right-click only eats or dresses
   const wb = benchAt(px, py);
   if (wb && wb[3] === 0) return useWorkbench(wb); // right-clicking a workbench opens it too
   // a small menu: a boat can go back in your inventory, a bush can be searched for berries
   const boat = boatAt(px, py), b = boat ? null : bushAt(px, py);
-  if (!boat && !b) { if (ITEMS[inventory.held?.id]?.food) eatHeld(); return; } // nothing to right-click: eat what's in hand
+  if (!boat && !b) { if (ITEMS[inventory.held?.id]?.food) eatHeld(); else if (ITEMS[inventory.held?.id]?.cloth) wearHeld(); return; } // nothing to right-click: eat or wear what's in hand
 
   const el = $('ctx-menu'), btn = el.querySelector('button');
   el.style.left = `${px}px`;
@@ -940,19 +1057,20 @@ function fishCtx() {
 
 // ---------- chopping trees with the axe ----------
 const CHOP_REACH = 1.95;
-const TREE_WOOD = { leafy: 3, pine: 4, redwood: 8 }, TREE_HITS = { leafy: 3, pine: 3, redwood: 6 }, TREE_LEAVES = { leafy: 3, pine: 2, redwood: 4 };
-const treeType = (t) => (t.pine ? 'pine' : t.pine === false ? 'leafy' : 'redwood');
+const TREE_WOOD = { leafy: 3, pine: 4, redwood: 8, palm: 3 }, TREE_HITS = { leafy: 3, pine: 3, redwood: 6, palm: 3 }, TREE_LEAVES = { leafy: 3, pine: 2, redwood: 4, palm: 3 };
+const treeType = (t) => (t.palm ? 'palm' : t.pine ? 'pine' : t.pine === false ? 'leafy' : 'redwood');
 // trees near the player: the island's lists, or what's loaded in an endless world
 function nearbyTrees(range) {
   const w = game.world, src = w.endless ? game.scene.live : w, p = game.ctrl.pos;
   return [...src.trees, ...src.redwoods].filter((t) => Math.abs(t.x - p.x) < range && Math.abs(t.z - p.z) < range);
 }
 // the tree under the cursor: closest trunk (base to about head height) on screen
-function treeAt(px, py) {
+function treeAt(px, py, only = null) {
   let best = null, bd = Math.max(18, 260 / game.cam.dist);
   const a = new THREE.Vector3(), b = new THREE.Vector3();
   for (const t of nearbyTrees(16)) {
-    const tall = treeType(t) === 'redwood' ? 4 * t.s : 1.4 * t.s;
+    if (only && !only(t)) continue;
+    const tall = treeType(t) === 'redwood' ? 4 * t.s : (treeType(t) === 'palm' ? 1.8 : 1.4) * t.s;
     a.set(t.x, t.y + 0.15, t.z).project(camera);
     b.set(t.x, t.y + tall, t.z).project(camera);
     if (a.z > 1 || b.z > 1) continue;
@@ -985,7 +1103,7 @@ function chopTree(t) {
     const hits = (game.chopHits.get(key) ?? 0) + 1, last = hits >= TREE_HITS[type];
     game.scene.effects.impact(t.x, t.y + 0.45, t.z, 1.0, 'wood'); // chips fly
     // the tree shakes and leaves flutter down from the canopy
-    const cy = t.y + (type === 'redwood' ? 8 : type === 'pine' ? 1.1 : 1.1 + LEAFY_LIFT) * t.s, cr = (type === 'redwood' ? 1.6 : 0.65) * t.s;
+    const cy = t.y + (type === 'redwood' ? 8 : type === 'pine' ? 1.1 : type === 'palm' ? 2.3 : 1.1 + LEAFY_LIFT) * t.s, cr = (type === 'redwood' ? 1.6 : 0.65) * t.s;
     game.scene.effects.leafFall(t.x, cy, t.z, cr, last ? 40 : 10 + Math.floor(Math.random() * 6), dropFloor);
     if (!last) {
       game.chopHits.set(key, hits);
@@ -1070,6 +1188,47 @@ function throwAt(px, py) {
     const from = { x: c.pos.x + Math.sin(c.ry) * 0.25, y: c.pos.y + 0.75, z: c.pos.z + Math.cos(c.ry) * 0.25 };
     game.scene.ambient.throwFrog(from, { x: c.pos.x + dx, z: c.pos.z + dz }, c.pos);
   }, SWING_SECS * 400);
+}
+
+// A thrown coconut flies in an arc, spinning, and splits in two where it lands: two Coconut Halves (edible) pop out.
+const nuts = []; // in flight: { w, x0, y0, z0, x1, z1, age, dur, h, mesh }
+function throwNut(px, py) {
+  const p = groundPoint(px, py), c = game.ctrl, t = clock.elapsedTime;
+  if (!p || t < game.nextDig) return;
+  let dx = p.x - c.pos.x, dz = p.z - c.pos.z;
+  const d = Math.hypot(dx, dz);
+  if (d < 0.3) return;
+  if (d > THROW_RANGE) { dx *= THROW_RANGE / d; dz *= THROW_RANGE / d; }
+  c.ry = Math.atan2(dx, dz);
+  if (!inventory.takeHeld(1)) return;
+  game.nextDig = t + SWING_SECS + 0.05;
+  if (game.local) swingTool(game.local.char);
+  const w = game.world, len = Math.hypot(dx, dz);
+  setTimeout(() => { // let go mid-swing
+    if (game.world !== w || !game.scene) return;
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(0.17, 0.17, 0.17), new THREE.MeshLambertMaterial({ color: 0x6e4a30 }));
+    mesh.castShadow = true;
+    game.scene.scene.add(mesh);
+    nuts.push({ w, mesh, x0: c.pos.x + Math.sin(c.ry) * 0.25, y0: c.pos.y + 0.75, z0: c.pos.z + Math.cos(c.ry) * 0.25, x1: c.pos.x + dx, z1: c.pos.z + dz, age: 0, dur: 0.4 + 0.06 * len, h: 0.7 + 0.15 * len });
+  }, SWING_SECS * 400);
+}
+function updateNuts(dt) {
+  for (let i = nuts.length - 1; i >= 0; i--) {
+    const n = nuts[i];
+    if (n.w !== game.world) { n.mesh.parent?.remove(n.mesh); n.mesh.geometry.dispose(); n.mesh.material.dispose(); nuts.splice(i, 1); continue; }
+    n.age += dt;
+    const k = Math.min(1, n.age / n.dur), x = n.x0 + (n.x1 - n.x0) * k, z = n.z0 + (n.z1 - n.z0) * k, floor = dropFloor(x, z) + 0.1;
+    const y = n.y0 + (floor - n.y0) * k + Math.sin(k * Math.PI) * n.h;
+    n.mesh.position.set(x, y, z);
+    n.mesh.rotation.set(n.age * 14, n.age * 9, n.age * 6);
+    if (k < 1) continue;
+    // it lands and cracks open
+    n.mesh.parent?.remove(n.mesh); n.mesh.geometry.dispose(); n.mesh.material.dispose(); nuts.splice(i, 1);
+    const water = game.paths?.waterAt(toCell(x), toCell(z));
+    game.scene.effects.impact(x, floor, z, 1.5, water ? 'water' : 'wood');
+    dropItem('coconut_half', 2, x, floor + 0.2, z, 0.8);
+    toast('The coconut cracks open!');
+  }
 }
 
 // ---------- boats: launch, board, walk the deck, steer, step off ----------
@@ -1462,7 +1621,32 @@ function walkOnDeck(dt, t, keys, yaw) {
 
 // ---------- inventory ----------
 // The selected hotbar slot is what you hold: a shovel or pickaxe there is the tool.
-const inventory = new Inventory({ onChange: () => { syncTool(); saveInventory(); }, toast: (s) => toast(s) });
+const inventory = new Inventory({ onChange: () => { syncTool(); syncWear(); saveInventory(); }, toast: (s) => toast(s) });
+// the Wardrobe page shows you, dressed as you are, in a little live preview (appearance.js)
+const doll = new CharacterPreview($('inv-doll'), { camY: 0.62, dist: 2.25, aimY: 0.44 });
+function drawDoll(dt, t) {
+  if (!inventory.isOpen || inventory.page !== 'wear') return;
+  const me = game.roster?.get(game.me);
+  doll.set(me?.look ?? loadLook(), inventory.wear, me?.color ?? PLAYER_COLORS[0]);
+  doll.frame(dt, t);
+}
+// what you wear changed (clothes put on or taken off): show it on your character, and tell the room
+function syncWear() {
+  const key = JSON.stringify(inventory.wear);
+  if (key === game.wearKey) return;
+  game.wearKey = key;
+  if (game.mode === 'multi') send({ type: 'wear', wear: inventory.wear }); // the roster comes back with it
+  else if (game.mode === 'single' && game.scene) {
+    const me = game.roster.get(game.me);
+    if (me) { me.wear = { ...inventory.wear }; ensureCharacter(game.me, me); }
+  }
+}
+// click with clothes in hand (or right-click): put them on
+function wearHeld() {
+  const held = inventory.held;
+  if (!held || !inventory.wearFrom(inventory.selected)) return;
+  toast(`You put on the ${ITEMS[held.id].name}`);
+}
 function syncTool() {
   const held = inventory.held, before = game.tool;
   game.tool = held ? Math.max(0, TOOLS.indexOf(ITEMS[held.id].tool ?? held.id)) : 0; // a tool or a block in hand
@@ -1485,11 +1669,12 @@ function eatHeld() {
 // out of health: faint, and wake up by the campfire with full health (keeping your things)
 function faint(why) {
   if (!game.world || !game.ctrl) return;
+  game.climb = null;
   game.fishing?.cancel(fishCtx());
   if (game.boatEdit) setBoatEdit(false);
   if (game.driving === game.ride?.id) game.driving = null;
   game.ride = null;
-  game.pendingDig = game.pendingChop = game.pendingAct = game.pendingCatch = null;
+  game.pendingDig = game.pendingChop = game.pendingAct = game.pendingCatch = game.climb = null;
   const sp = spawnPoint(game.world, game.me);
   const [ix, iz] = game.paths.nearestOpen(toCell(sp.x), toCell(sp.z), 8) ?? [toCell(sp.x), toCell(sp.z)];
   placeController(ix, iz).ry = 0;
@@ -1508,6 +1693,8 @@ function loadInventory(key) {
   if (inventory.creative) inventory.setCreative(true); // a fresh inventory: creative still opens the bag
   vitals.load(key); // health and hunger go with the inventory
   syncTool();
+  game.wearKey = null;
+  syncWear(); // and so does what you wear
   if (inventory.slots.every((s) => !s)) toast('Break bushes for sticks and leaves, pick up pebbles, then craft (I)');
 }
 function saveInventory() {
@@ -1524,6 +1711,7 @@ function heldLabel() {
   if (held?.id === 'log') text += ` · place to stack, lying ${rot % 2 ? 'north-south' : 'east-west'} (R)`;
   if (held && ITEMS[held.id].furn) text += rot ? ` · turned ${rot * 90}° (R)` : ' · R turns it';
   if (held && ITEMS[held.id].food) text += ' · click to eat';
+  if (held && ITEMS[held.id].cloth) text += ' · click to wear';
   $('held-name').textContent = text;
 }
 // R: turn the furniture under the cursor, or else what's in hand
@@ -1687,10 +1875,17 @@ function hoverTarget(px, py) {
     const bench = benchAt(px, py);
     if (bench && bench[3] === 0) return { kind: 'bench', obj: bench }; // a workbench opens its crafting
   }
+  if (canClimb(item)) { const palm = palmAt(px, py); if (palm) return { kind: 'palm', obj: palm }; }
   const bush = bushAt(px, py);
   if (bush) return { kind: 'bush', obj: bush };
   const pebble = pebbleAt(px, py);
   if (pebble) return { kind: 'pebble', obj: pebble };
+  if (handFree(item)) {
+    const plant = cottonAt(px, py);
+    if (plant) return { kind: 'cotton', obj: plant };
+    const flower = flowerAt(px, py);
+    if (flower) return { kind: 'flower', obj: flower };
+  }
   if (TOOLS[game.tool] === 'pickaxe') { const rock = rockAt(px, py); if (rock) return { kind: 'rock', obj: rock }; }
   return null;
 }
@@ -1706,9 +1901,9 @@ function updateOutline() {
   // highlight what a click would act on (frogs, bushes, pebbles, workbenches; with the axe furniture
   // and log piles), with a hand cursor; trees under the axe get the trunk box below
   const target = hover && !inventory.isOpen && game.ctrl ? hoverTarget(hover[0], hover[1]) : null;
-  game.scene.setHighlight(target && target.kind !== 'tree' ? target : null, clock.elapsedTime, game.cam.dist);
+  game.scene.setHighlight(target && target.kind !== 'tree' && target.kind !== 'palm' ? target : null, clock.elapsedTime, game.cam.dist);
   $('view').style.cursor = target ? 'pointer' : '';
-  if (target && target.kind !== 'tree') return;
+  if (target && target.kind !== 'tree' && target.kind !== 'palm') return;
   if (game.ride || item?.boat) return;
   if (!item || !(item.tool || item.block || item.place) || !hover || inventory.isOpen) return;
   // the axe over a tree: outline its trunk
@@ -2401,7 +2596,7 @@ function startSingle(map) {
   resetSession();
   game.mode = 'single';
   game.me = 'solo';
-  game.roster = new Map([[game.me, { id: game.me, name: myName(), color: PLAYER_COLORS[0] }]]);
+  game.roster = new Map([[game.me, { id: game.me, name: myName(), color: PLAYER_COLORS[0], look: cleanPlayerLook(loadLook(), game.me), wear: null }]]);
   game.saveName = map?.name && getSave(map.name) ? map.name : null;
   game.stateKey = game.saveName ? `save:${game.saveName}` : null;
   // the world's own game mode (worlds from before modes keep the browser-wide toggle)
@@ -2411,6 +2606,7 @@ function startSingle(map) {
   if (game.saveName) setMeta(game.saveName, { played: Date.now() });
   game.playStart = game.thumbAt = clock.elapsedTime;
   loadInventory(game.saveName ? `save:${game.saveName}` : null);
+  game.roster.get(game.me).wear = { ...inventory.wear }; // what you wore in this world
   onRoster([...game.roster.values()]);
   $('loading').hidden = true;
   if (map) toast(`Welcome to ${map.name}`);
@@ -2789,14 +2985,11 @@ $('edit-banner').addEventListener('click', (e) => {
 const CREATIVE_KEY = 'settleon.creative';
 function setCreative(on, quiet = false) {
   inventory.setCreative(on);
-  $('creative-btn').classList.toggle('on', on);
-  $('creative-btn').textContent = `Creative: ${on ? 'on' : 'off'}`;
   const worldMode = settings?.local.has('creative') && game.mode === 'single' && game.saveName;
   if (worldMode) setMeta(game.saveName, { mode: on ? 'creative' : 'survival' });
   else { try { localStorage.setItem(CREATIVE_KEY, on ? '1' : '0'); } catch {} }
   if (!quiet) toast(on ? 'Creative mode: every item in your inventory (I), building is free' : (worldMode ? 'Survival mode' : 'Creative mode off'));
 }
-$('creative-btn').addEventListener('click', (e) => { e.currentTarget.blur(); settings.set('creative', !inventory.creative); });
 
 // ---------- settings (settings.js): from the title screen and the pause menu ----------
 const settings = (() => {

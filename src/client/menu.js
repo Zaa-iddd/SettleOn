@@ -5,12 +5,58 @@ import * as THREE from 'three';
 import { generateWorld } from '../shared/world.js';
 import { encodeMap, cloneBase, blankBase, endlessMap, decodeMap, decodeEndless, isEndlessMap } from '../shared/mapfile.js';
 import { WorldScene, setEditorView } from './world3d.js';
+import { CharacterPanel } from './appearance.js';
 import { saveNames, getSave, putSave, deleteSave, renameSave, freeName, getMeta, setMeta, saveOptions, esc } from './saves.js';
 
 const $ = (id) => document.getElementById(id);
-const PANELS = ['menu-main', 'menu-single', 'menu-edit', 'menu-delete', 'menu-multi', 'menu-create'];
+
+// ---------- menu icons: original 16×16 pixel art, drawn once into data URLs (outlined like the item icons) ----------
+// `paint(x, y)` gives a CSS colour or null; a dark outline is added around whatever is painted.
+function drawIcon(paint) {
+  const grid = Array.from({ length: 16 }, (_, y) => Array.from({ length: 16 }, (_, x) => paint(x, y)));
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = 16;
+  const ctx = cv.getContext('2d');
+  for (let y = 0; y < 16; y++) {
+    for (let x = 0; x < 16; x++) {
+      const near = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dy]) => grid[y + dy]?.[x + dx]);
+      const c = grid[y][x] ?? (near ? '#1e1612' : null);
+      if (c) { ctx.fillStyle = c; ctx.fillRect(x, y, 1, 1); }
+    }
+  }
+  return cv.toDataURL();
+}
+// from rows of letters (centred) and a palette
+const maskIcon = (rows, pal) => drawIcon((x, y) => {
+  const r = rows[y - Math.floor((16 - rows.length) / 2)];
+  return r ? pal[r[x - Math.floor((16 - r.length) / 2)]] ?? null : null;
+});
+const MENU_ICONS = {
+  // a little island with a palm tree in the sea
+  play: () => maskIcon([
+    '....gg..gg....', '..ggGGggGGgg..', '.gG..gGGg..Gg.', '......tg......', '......t.......', '.....t........',
+    '.....t........', '..ssssssssss..', '.ssSssssssSss.', 'wwwwwwwwwwwwww', 'bbwbbbbbbbbwbb',
+  ], { g: '#6fc04a', G: '#3f8a35', t: '#9a6336', s: '#ecd48e', S: '#d0b46c', w: '#8fdcef', b: '#3f8fd0' }),
+  // two friends side by side
+  multi: () => maskIcon([
+    '..hhhh........', '.hhhhhh..HHHH.', '.hsssss.HHHHHH', '.sesses.SSSSSH', '.sssss..SeSSeS', '..ccc...SSSSS.',
+    '.ccccc...DDD..', '.ccccc..DDDDD.', '.ccccc..DDDDD.',
+  ], { h: '#5a3a24', s: '#f6c9a4', e: '#2a1d1a', c: '#e8554e', H: '#f0c869', S: '#e9b08a', D: '#3d8bfd' }),
+  // a grass block with a shovel stuck in it
+  editor: () => maskIcon([
+    '..........mm', '.........mMm', '........hmm.', '.......hh...', '......hh....', 'GGGGGhhGGG..',
+    'gGgggggggGg.', 'dddhddddddd.', 'ddDdddddDdd.', 'ddddddDdddd.', 'dDddddddddd.', 'ddddDddddDd.',
+  ], { m: '#dfe5ea', M: '#9aa4ad', h: '#b07a48', G: '#8fd04f', g: '#5fa32f', d: '#8d5c3a', D: '#6a4329' }),
+  // a brass gear: eight teeth, lit from the top left
+  settings: () => drawIcon((x, y) => {
+    const dx = x - 7.5, dy = y - 7.5, r = Math.hypot(dx, dy), a = Math.atan2(dy, dx);
+    if (r < 2.3 || r > (Math.cos(a * 8) > 0.35 ? 7.4 : 5.6)) return null;
+    return dx + dy < -3 ? '#ffe8a0' : dx + dy > 4 ? '#9a6a18' : '#e0b040';
+  }),
+};
+const PANELS = ['menu-main', 'menu-looks', 'menu-single', 'menu-edit', 'menu-delete', 'menu-multi', 'menu-create'];
 // Esc in a panel goes back to its parent
-const BACK = { 'menu-single': 'menu-main', 'menu-multi': 'menu-main', 'menu-create': 'menu-single', 'menu-edit': 'menu-single', 'menu-delete': 'menu-single' };
+const BACK = { 'menu-looks': 'menu-main', 'menu-single': 'menu-main', 'menu-multi': 'menu-main', 'menu-create': 'menu-single', 'menu-edit': 'menu-single', 'menu-delete': 'menu-single' };
 
 // turn free text into a seed: numbers are used as-is, anything else is hashed
 export function seedFrom(text) {
@@ -47,6 +93,7 @@ export class Menu {
     this.yaw = 0;
     this.selected = null; // the highlighted world in the world list
     this.panel = 'menu-main';
+    this.looks = new CharacterPanel({ toast: (m) => this.toast(m) });
     this.bindUI();
   }
 
@@ -55,6 +102,7 @@ export class Menu {
     document.body.classList.add('in-menu');
     $('menu').hidden = false;
     $('loading').hidden = true;
+    this.looks.open();
     this.go(panel);
     if (!this.scene) {
       this.world = generateWorld(Math.floor(Math.random() * 2 ** 31));
@@ -87,6 +135,7 @@ export class Menu {
   go(id) {
     this.panel = id;
     for (const p of PANELS) $(p).hidden = p !== id;
+    if (id === 'menu-main') $('menu-play-single').focus({ preventScroll: true });
     if (id === 'menu-single') this.renderWorlds();
     if (id === 'menu-multi') {
       $('multi-room').value = this.defaultRoom;
@@ -199,12 +248,21 @@ export class Menu {
     this.scene.update(t, dt, focus, 20);
     setEditorView();
     pixel.render(this.scene.scene, this.camera);
+    this.looks.frame(dt, t); // your character, on the left of every menu screen
   }
 
   bindUI() {
     for (const b of document.querySelectorAll('[data-go]')) b.onclick = () => this.go(b.dataset.go);
+    window.addEventListener('keydown', (e) => { // arrow keys move through the main menu's buttons
+      if (!this.active || this.panel !== 'menu-main' || (e.key !== 'ArrowDown' && e.key !== 'ArrowUp')) return;
+      const bs = [...document.querySelectorAll('#menu-main .mbtn')], i = bs.indexOf(document.activeElement);
+      bs[(i + (e.key === 'ArrowDown' ? 1 : bs.length - 1)) % bs.length].focus();
+      e.preventDefault();
+    });
+    for (const el of document.querySelectorAll('#menu-main .mb-icon[data-icon]')) el.innerHTML = `<img alt="" draggable="false" src="${MENU_ICONS[el.dataset.icon]()}" />`;
     $('menu-play-single').onclick = () => this.go('menu-single');
     $('menu-play-multi').onclick = () => this.go('menu-multi');
+    $('menu-look').onclick = () => this.go('menu-looks');
     $('menu-settings').onclick = () => this.onSettings();
     $('menu-editor').onclick = () => {
       const base = cloneBase(generateWorld(Math.floor(Math.random() * 2 ** 31)).base);

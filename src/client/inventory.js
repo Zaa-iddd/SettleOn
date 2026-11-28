@@ -1,4 +1,5 @@
 import { FISH, fishArt } from './fishing.js';
+import { FLOWERS, DYES, CLOTHES, NATURAL, WEAR_SLOTS, WEAR_LABELS, clothId, parseCloth, cleanWear } from '../shared/outfit.js';
 
 // Minecraft-style inventory: an 8-slot hotbar (keys 1-8). The 24-slot bag only exists once you've
 // crafted a Backpack (sticks and leaves). I or Tab opens the inventory screen with hand crafting;
@@ -125,6 +126,42 @@ const TOOL_ART = {
     '.....oeeeEo.....',
     '.....oeEEEo.....',
     '......oooo......',
+    '................',
+  ],
+  coconut: [
+    '................',
+    '................',
+    '................',
+    '......oooo......',
+    '....ooBBBBoo....',
+    '...oBBLLBBBBo...',
+    '..oBBLwLBBBBbo..',
+    '..oBBLLBBBBBbo..',
+    '..oBBBBBBBpBbo..',
+    '..oBBBBBBpppbo..',
+    '..oBBBBBBBpbbo..',
+    '...oBBBBBbbbo...',
+    '....oobbbboo....',
+    '......oooo......',
+    '................',
+    '................',
+  ],
+  coconut_half: [
+    '................',
+    '................',
+    '................',
+    '................',
+    '..oooooooooooo..',
+    '.oBBBBBBBBBBBBo.',
+    '.oBWWWWWWWWWWBo.',
+    '.oBWWWWWWWWWWBo.',
+    '..oBWWWWWWWWBo..',
+    '..oBBWWWWWWBBo..',
+    '...oBBBWWBBBo...',
+    '....ooBBBBoo....',
+    '......oooo......',
+    '................',
+    '................',
     '................',
   ],
   bag: [ // the inventory button
@@ -565,6 +602,69 @@ function wallArt() {
   return rows;
 }
 
+// ---------- cotton, flowers, dyes and clothes (outfit.js): icons drawn from small masks ----------
+// A mask is a few rows of letters (centred on the 16×16 icon); an outline is drawn around whatever is filled.
+const mixHex = (a, b, k) => {
+  const ch = (s) => Math.round(((a >> s) & 255) * (1 - k) + ((b >> s) & 255) * k);
+  return (ch(16) << 16) | (ch(8) << 8) | ch(0);
+};
+const cssHex = (n) => `#${n.toString(16).padStart(6, '0')}`;
+function maskArt(rows, pal) {
+  const oy = Math.floor((16 - rows.length) / 2);
+  const grid = Array.from({ length: 16 }, () => new Array(16).fill(null));
+  rows.forEach((r, y) => { const rx = Math.floor((16 - r.length) / 2); [...r].forEach((ch, x) => { if (pal[ch]) grid[oy + y][rx + x] = pal[ch]; }); });
+  const out = grid.map((r) => r.slice());
+  for (let y = 0; y < 16; y++) {
+    for (let x = 0; x < 16; x++) {
+      if (grid[y][x]) continue;
+      if ((y > 0 && grid[y - 1][x]) || (y < 15 && grid[y + 1][x]) || (x > 0 && grid[y][x - 1]) || (x < 15 && grid[y][x + 1])) out[y][x] = '#1e1612';
+    }
+  }
+  return out;
+}
+const CLOTH_MASKS = {
+  cap: ['....######......', '..##llllll##....', '.##llllll####...', '.###########d...', '.###########dd..', '.dddddddddddddd.', '........dddddddd'],
+  beanie: ['......aa......', '.....aaaa.....', '......##......', '....######....', '..##llll####..', '.###lll######.', '.############.', '.aaaaaaaaaaaa.', '.aaaaaaaaaaaa.'],
+  sunhat: ['.....######.....', '....##llll##....', '....########....', '....aaaaaaaa....', '.llllllllllllll.', 'llllllllllllllll', '.dddddddddddddd.'],
+  tee: ['..###......###..', '.####.dddd.####.', '#####......#####', '####.######.####', '###..######..###', '.....######.....', '.....######.....', '.....#l####.....', '.....######.....', '.....dddddd.....'],
+  sweater: ['..###......###..', '.####.aaaa.####.', '#####......#####', '#####.####.#####', '####..####..####', '####..#l##..####', '####..####..####', 'aaaa..####..aaaa', '......####......', '......aaaa......'],
+  dress: ['...##....##...', '...##dddd##...', '...########...', '....######....', '....aaaaaa....', '...########...', '..##########..', '.############.', '##############', 'dddddddddddddd'],
+  pants: ['..aaaaaaaaaa..', '..##########..', '..##########..', '..####..####..', '..####..####..', '..####..####..', '..####..####..', '..dddd..dddd..'],
+  shorts: ['..aaaaaaaaaa..', '..##########..', '..##########..', '..####..####..', '..####..####..', '..dddd..dddd..'],
+  skirt: ['...aaaaaaaa...', '...########...', '..##########..', '..##########..', '.############.', '.############.', '##############', 'dddddddddddddd'],
+  shoes: ['.####....####.', '.####....####.', '.#l##....#l##.', '######..######', '######..######', 'ssssss..ssssss'],
+  boots: ['.aaaa....aaaa.', '.####....####.', '.####....####.', '.####....####.', '.#l##....#l##.', '######..######', 'dddddd..dddddd', 'ssssss..ssssss'],
+  scarf: ['..############..', '.##aa##aa##aa##.', '.##############.', '..####....####..', '......####......', '......#aa#......', '......####......', '......#aa#......', '.....######.....'],
+};
+const clothArt = (type, hex) => maskArt(CLOTH_MASKS[type], {
+  '#': cssHex(hex), l: cssHex(mixHex(hex, 0xffffff, 0.3)), d: cssHex(mixHex(hex, 0, 0.3)), a: cssHex(mixHex(hex, 0xffffff, 0.5)), s: '#4a3222',
+});
+const flowerArt = (hex) => maskArt([
+  '.....ppp.....', '...pppPppp...', '..pppPcccPpp.', '...ppPcccPp..', '....pppPppp..', '.....ppp.g...', '.......g.....', '.......gg....', '....gg.g.....', '.....ggg.....', '.......g.....',
+], { p: cssHex(hex), P: cssHex(mixHex(hex, 0xffffff, 0.45)), c: '#f2b632', g: '#4f9a3a' });
+const dyeArt = (hex) => maskArt([
+  '....kkkk....', '....kkkk....', '.....gg.....', '....gggg....', '...gllllg...', '..gl####lg..', '..g######g..', '..g##dd###g..', '..gddddddg..', '...gggggg...',
+], { k: '#8a5a34', g: '#cfe3ea', '#': cssHex(hex), l: cssHex(mixHex(hex, 0xffffff, 0.45)), d: cssHex(mixHex(hex, 0, 0.3)) });
+const COTTON_ART = maskArt([
+  '....ww.ww....', '...wwwwwww...', '..wwwWwwwww..', '..wwwwwwwWw..', '...wwnwwwww..', '....bbbbbb...', '.....bbbb....',
+], { w: '#fbfbf6', W: '#ffffff', n: '#dcd8c8', b: '#7a4a2a' });
+
+const WEAR_ITEMS = {};
+for (const c of CLOTHES) {
+  for (const dye of [null, ...DYES]) {
+    const hex = dye ? dye.hex : NATURAL;
+    WEAR_ITEMS[clothId(c.type, dye?.key)] = {
+      name: `${dye ? `${dye.name} ` : ''}${c.name}`, stack: 1, cloth: true, slot: c.slot, variant: !!dye,
+      get art() { return clothArt(c.type, hex); }, // drawn once: iconURL caches it
+    };
+  }
+}
+const DYE_ITEMS = Object.fromEntries([
+  ['cotton', { name: 'Cotton Ball', stack: 64, art: COTTON_ART }], // harvested from cotton plants; what clothes are made of
+  ...FLOWERS.map((f) => [`flower_${f.key}`, { name: f.name, stack: 64, flower: f.key, art: flowerArt(f.hex) }]),
+  ...DYES.map((d) => [`dye_${d.key}`, { name: `${d.name} Dye`, stack: 64, dye: d.key, art: dyeArt(d.hex) }]),
+]);
+
 export const ITEMS = {
   // `block`: this item can be placed (main.js turns it into a ground kind)
   shovel: { name: 'Shovel', stack: 1, tool: 'shovel', art: TOOL_ART.shovel },
@@ -575,6 +675,8 @@ export const ITEMS = {
   leaves: { name: 'Leaves', stack: 64, art: TOOL_ART.leaves }, // from broken bushes and chopped trees
   backpack: { name: 'Backpack', stack: 1, unlock: true, art: TOOL_ART.backpack }, // never held: crafting it unlocks the bag
   pebble: { name: 'Pebble', stack: 64, art: TOOL_ART.pebble }, // picked up off the ground; for crafting tools
+  coconut: { name: 'Coconut', stack: 16, throwable: 'nut', art: TOOL_ART.coconut }, // shaken down from palms; click to throw it: it splits in two
+  coconut_half: { name: 'Coconut Half', stack: 16, food: 3, art: TOOL_ART.coconut_half }, // what's left after a throw; edible
   berries: { name: 'Berries', stack: 64, food: 2, art: TOOL_ART.berries }, // found on bushes; edible (food = hunger points, vitals.js)
   // furniture (`furn`): placed on a tile, see FURNITURE in world.js and main.js
   workbench: { name: 'Workbench', stack: 16, place: true, furn: true, art: TOOL_ART.workbench },
@@ -602,6 +704,8 @@ export const ITEMS = {
   wood: { name: 'Planks', stack: 64, art: TOOL_ART.planks }, // a crafting material (not placeable); the id stays 'wood' for old saves
   wall: { name: 'Wooden Wall', stack: 64, block: true, art: wallArt() },
   snow: { name: 'Snow', stack: 64, block: true, art: blockArt({ base: '#eef3f8', light: '#ffffff', dark: '#c3cfdc', speck: '#d7e1ec', speck2: '#ffffff' }) },
+  ...DYE_ITEMS,
+  ...WEAR_ITEMS,
 };
 
 // What can be crafted: `n` of `out` for the items in `cost`. `at` 'hand' recipes are in the
@@ -631,6 +735,8 @@ export const RECIPES = [
   { out: 'rowboat', n: 1, at: 'bench', cost: { wood: 6, stick: 4 } },
   { out: 'boat', n: 1, at: 'bench', cost: { wood: 12, log: 4, leaves: 4 } },
   { out: 'pirate', n: 1, at: 'bench', cost: { wood: 24, log: 8, leaves: 16, stone: 6 } }, // stone for the cannons
+  // clothes, from Cotton Balls (outfit.js CLOTHES). Dyes and dyeing are worked out from what you carry (Inventory.dyeRecipes)
+  ...CLOTHES.map((c) => ({ out: c.type, n: 1, at: 'bench', cost: c.cost })),
 ];
 
 // draw each icon once into a data URL
@@ -655,6 +761,7 @@ export function iconURL(id) {
 
 const $ = (id) => document.getElementById(id);
 
+const WEAR_HINT = { hat: 'cap', top: 'tee', bottom: 'pants', shoes: 'shoes', neck: 'scarf' }; // empty wardrobe slots show these, faded
 const CRAFT_KEY = 'settleon.craftpanel'; // is the crafting panel shown beside the inventory ('0' = hidden)
 
 export class Inventory {
@@ -668,7 +775,10 @@ export class Inventory {
     this.station = 'hand'; // where the inventory screen was opened: 'hand' or 'bench'
     this.selected = 0;
     this.cursor = null; // stack held by the mouse while the inventory is open
+    this.wear = cleanWear(null); // what's worn, slot -> clothing item id (see outfit.js)
+    this.list = []; // the recipes shown now (buildCraft)
     this.isOpen = false;
+    this.page = 'bag'; // the tab shown on the left: 'bag', 'wear' or 'creative'
     this.buildDOM();
     this.reset();
   }
@@ -679,6 +789,7 @@ export class Inventory {
     this.hasBag = false;
     this.selected = 0;
     this.cursor = null;
+    this.wear = cleanWear(null);
     this.render();
   }
 
@@ -735,7 +846,24 @@ export class Inventory {
   }
   canCraft(r) { return Object.entries(r.cost).every(([id, n]) => this.count(id) >= n); }
   /** The recipes on offer where the screen was opened (the backpack drops out once you have one). */
-  recipes() { return RECIPES.filter((r) => (r.at === 'hand' || this.station === 'bench') && !(ITEMS[r.out].unlock && this.hasBag)); }
+  recipes() { return [...RECIPES.filter((r) => (r.at === 'hand' || this.station === 'bench') && !(ITEMS[r.out].unlock && this.hasBag)), ...this.dyeRecipes()]; }
+  /**
+   * Recipes that depend on what you carry, so the list stays short: grind a flower you hold into two dyes of its
+   * colour (leaves make green), and, at a workbench, dye a piece of clothing you hold with a dye you hold.
+   */
+  dyeRecipes() {
+    const out = [], held = new Set(this.slots.filter(Boolean).map((s) => s.id));
+    for (const f of FLOWERS) if (held.has(`flower_${f.key}`)) out.push({ out: `dye_${f.key}`, n: 2, at: 'hand', dyn: true, cost: { [`flower_${f.key}`]: 1 } });
+    if (held.has('leaves')) out.push({ out: 'dye_green', n: 2, at: 'hand', dyn: true, cost: { leaves: 3 } });
+    if (this.station === 'bench') {
+      for (const id of held) {
+        const c = parseCloth(id);
+        if (!c) continue;
+        for (const d of DYES) if (d.key !== c.dye && held.has(`dye_${d.key}`)) out.push({ out: clothId(c.type, d.key), n: 1, at: 'bench', dyn: true, cost: { [id]: 1, [`dye_${d.key}`]: 1 } });
+      }
+    }
+    return out;
+  }
   /** Craft a recipe once, if the ingredients are there and the result fits. */
   craft(r) {
     if (!this.canCraft(r)) return;
@@ -749,6 +877,45 @@ export class Inventory {
     this.render();
     this.onChange();
   }
+
+  // ---------- clothes ----------
+  /** Put on the clothing in slot i of the inventory; what was worn there takes its place. Returns false if it isn't clothing. */
+  wearFrom(i) {
+    const s = this.slots[i], c = s && parseCloth(s.id);
+    if (!c) return false;
+    const old = this.wear[c.slot];
+    this.wear[c.slot] = s.id;
+    this.slots[i] = old ? { id: old, count: 1 } : null;
+    this.render();
+    this.onChange();
+    return true;
+  }
+  /** Take off what's worn in `slot` and put it back in the inventory. */
+  unwear(slot) {
+    const id = this.wear[slot];
+    if (!id) return;
+    if (this.add(id, 1) > 0) return this.toast('Your inventory is full');
+    this.wear[slot] = null;
+    this.render();
+    this.onChange();
+  }
+  /** Click on a wardrobe slot with the mouse: put the stack on the cursor on, or pick what's worn up. */
+  clickWear(slot) {
+    const cur = this.cursor, c = cur && parseCloth(cur.id);
+    if (cur && (!c || c.slot !== slot)) return this.toast(c ? `That goes in the ${WEAR_LABELS[c.slot].toLowerCase()} slot` : "That can't be worn");
+    if (cur) {
+      const old = this.wear[slot];
+      this.wear[slot] = cur.id;
+      this.cursor = cur.count > 1 ? { id: cur.id, count: cur.count - 1 } : null;
+      if (old) { if (this.cursor) { if (this.add(old, 1) > 0) this.toast('Your inventory is full'); } else this.cursor = { id: old, count: 1 }; }
+    } else if (this.wear[slot]) {
+      this.cursor = { id: this.wear[slot], count: 1 };
+      this.wear[slot] = null;
+    }
+    this.render();
+    this.onChange();
+  }
+
 
   /** Creative mode (debug): the inventory screen offers every item, the bag is open, and placing is free. */
   setCreative(on) {
@@ -767,6 +934,7 @@ export class Inventory {
     document.body.classList.add('inv-open'); // the regular hotbar, bars and held name step aside
     $('inv-craft-title').textContent = station === 'bench' ? 'Workbench' : 'Crafting';
     this.showCraft(station === 'bench' || this.craftOpen()); // a workbench always shows its recipes
+    this.showPage();
     this.buildCraft();
     this.render();
   }
@@ -775,7 +943,17 @@ export class Inventory {
   showCraft(on) {
     $('inv-craft-box').hidden = !on;
     $('inv-craft-toggle').classList.toggle('on', on);
-    $('inv-craft-toggle').textContent = on ? 'Hide crafting · C' : 'Crafting · C';
+    $('inv-craft-toggle').title = on ? 'Hide crafting (C)' : 'Crafting (C)';
+  }
+  // the page tabs on the left of the panel: which page is shown, its title, and whether the Creative tab exists
+  showPage() {
+    if (this.page === 'creative' && !this.creative) this.page = 'bag';
+    for (const el of document.querySelectorAll('.inv-page')) el.hidden = el.dataset.page !== this.page;
+    for (const el of document.querySelectorAll('#inv-tabs-left .inv-sidetab')) {
+      el.classList.toggle('on', el.dataset.page === this.page);
+      if (el.dataset.page === 'creative') el.hidden = !this.creative;
+    }
+    $('inv-title').textContent = { bag: 'Backpack', wear: 'Wardrobe', creative: 'Creative' }[this.page];
   }
   toggleCraft() {
     if (!this.isOpen) return;
@@ -793,7 +971,7 @@ export class Inventory {
   }
 
   // ---------- saving ----------
-  toJSON() { return { v: 2, sel: this.selected, bag: this.hasBag, slots: this.slots.map((s) => (s ? [s.id, s.count] : 0)) }; }
+  toJSON() { return { v: 2, sel: this.selected, bag: this.hasBag, wear: this.wear, slots: this.slots.map((s) => (s ? [s.id, s.count] : 0)) }; }
   fromJSON(o) {
     if (!o || !Array.isArray(o.slots)) return false;
     const ok = (e) => Array.isArray(e) && ITEMS[e[0]] && !ITEMS[e[0]].unlock && Number.isInteger(e[1]) && e[1] >= 1;
@@ -806,6 +984,7 @@ export class Inventory {
       for (const e of o.slots) if (ok(e)) this.add(e[0], Math.min(e[1], ITEMS[e[0]].stack));
     }
     this.selected = Number.isInteger(o.sel) ? Math.max(0, Math.min(HOTBAR - 1, o.sel)) : 0;
+    this.wear = cleanWear(o.wear);
     this.render();
     return true;
   }
@@ -814,6 +993,7 @@ export class Inventory {
   clickSlot(i, button, shift) {
     const s = this.slots[i], max = (id) => ITEMS[id].stack;
     if (i >= this.size) return; // the bag needs a backpack
+    if (shift && s && !this.cursor && parseCloth(s.id)) return void this.wearFrom(i); // shift-click clothes to put them on
     if (shift && s && !this.cursor) { // quick-move between hotbar and bag
       if (!this.hasBag) return;
       const range = i < HOTBAR ? [HOTBAR, SLOTS] : [0, HOTBAR];
@@ -892,14 +1072,34 @@ export class Inventory {
       c.style.top = `${e.clientY}px`;
       const el = e.target.closest?.('.inv-slot');
       const s = el ? this.slots[Number(el.dataset.slot)] : null;
-      if (el || !e.target.closest?.('.craft')) $('inv-name').textContent = s ? ITEMS[s.id].name : '';
+      if ((el || !e.target.closest?.('.craft')) && !el?.classList.contains('wear-slot')) $('inv-name').textContent = s ? ITEMS[s.id].name : '';
+    });
+    // the wardrobe: one slot per kind of clothing (click with clothes on the cursor to put them on, shift-click to take off)
+    // Laid out like a dressing doll: head and neck slots on the left of a live preview of you (main.js draws it in
+    // #inv-doll), body and feet on the right. Empty slots show a faint picture of what goes there.
+    const wear = $('inv-wear');
+    const cell = (slot) => `<div class="wear-cell"><div class="inv-slot wear-slot" data-wear="${slot}"><img alt="" draggable="false" /><span class="count"></span></div><span>${WEAR_LABELS[slot]}</span></div>`;
+    wear.innerHTML = `<div class="wear-col">${['hat', 'neck', 'top'].map(cell).join('')}</div>`
+      + '<canvas id="inv-doll" width="110" height="140" title="Drag to turn"></canvas>'
+      + `<div class="wear-col">${['bottom', 'shoes'].map(cell).join('')}</div>`;
+    wear.addEventListener('mousedown', (e) => {
+      const el = e.target.closest('.wear-slot');
+      if (!el) return;
+      e.preventDefault();
+      if (e.shiftKey && !this.cursor) this.unwear(el.dataset.wear); else this.clickWear(el.dataset.wear);
+    });
+    wear.addEventListener('contextmenu', (e) => e.preventDefault());
+    wear.addEventListener('mousemove', (e) => {
+      const el = e.target.closest?.('.wear-slot');
+      const id = el && this.wear[el.dataset.wear];
+      $('inv-name').textContent = id ? ITEMS[id].name : '';
     });
     this.buildCraft();
     // creative mode: every item as a button (click: a full stack, right click: one), and a way to start over
     const all = $('inv-all');
     all.innerHTML = '';
     for (const [id, it] of Object.entries(ITEMS)) {
-      if (it.unlock) continue; // the backpack isn't carried (creative opens the bag anyway)
+      if (it.unlock || it.variant) continue; // the backpack isn't carried (creative opens the bag anyway); dyed clothes are made by dyeing
       const el = document.createElement('button');
       el.className = 'inv-pick';
       el.tabIndex = -1;
@@ -913,17 +1113,33 @@ export class Inventory {
       el.addEventListener('mouseenter', () => { $('inv-name').textContent = it.name; });
       all.append(el);
     }
+    // tabs with icons: pages on the left, Crafting on the right
+    const tabs = $('inv-tabs-left');
+    tabs.innerHTML = '';
+    for (const [page, icon, label] of [['bag', 'bag', 'Backpack'], ['wear', 'tee', 'Wardrobe'], ['creative', 'crate', 'Creative']]) {
+      const b = document.createElement('button');
+      b.className = 'inv-sidetab';
+      b.tabIndex = -1;
+      b.dataset.page = page;
+      b.title = label;
+      b.innerHTML = `<img alt="${label}" draggable="false" src="${iconURL(icon)}" />`;
+      b.addEventListener('click', () => { b.blur(); this.page = page; this.showPage(); });
+      tabs.append(b);
+    }
+    $('inv-craft-toggle').innerHTML = `<img alt="Crafting" draggable="false" src="${iconURL('workbench')}" />`;
     $('inv-craft-toggle').addEventListener('click', (e) => { e.currentTarget.blur(); this.toggleCraft(); });
+    $('inv-bar').title = 'Click: pick up / drop · Right-click: half / one · Shift-click: quick move';
     $('inv-close').addEventListener('click', (e) => { e.currentTarget.blur(); this.close(); });
     $('inv-clear').addEventListener('click', (e) => { e.currentTarget.blur(); this.slots.fill(null); this.cursor = null; this.render(); this.onChange(); });
   }
 
   // crafting: one row per recipe on offer (the result, its name, and the ingredients), lit when you have them
   buildCraft() {
-    const craft = $('inv-craft');
+    const craft = $('inv-craft'), scroll = craft.scrollTop;
     craft.innerHTML = '';
-    this.recipes().forEach((r) => {
-      const i = RECIPES.indexOf(r);
+    this.list = this.recipes().map((r, i) => ({ r, i, ok: this.canCraft(r) })).sort((a, b) => (b.ok - a.ok) || (a.i - b.i)).map((x) => x.r); // what you can make now comes first
+    this.dynSig = this.list.filter((r) => r.dyn).map((r) => r.out + Object.keys(r.cost)).join();
+    this.list.forEach((r, i) => {
       const el = document.createElement('button');
       el.className = 'craft';
       el.tabIndex = -1;
@@ -936,7 +1152,8 @@ export class Inventory {
       el.addEventListener('mouseenter', () => { $('inv-name').textContent = el.title; });
       craft.append(el);
     });
-    $('inv-craft-hint').textContent = this.station === 'bench' ? '' : 'Tools, walls and furniture are made at a workbench: place one and click it.';
+    craft.scrollTop = scroll;
+    $('inv-craft-hint').textContent = this.station === 'bench' ? '' : 'More recipes at a workbench';
   }
 
   render() {
@@ -947,14 +1164,22 @@ export class Inventory {
       el.title = s ? ITEMS[s.id].name : '';
     };
     $('inv-bag').hidden = !this.hasBag;
-    $('inv-creative').hidden = !this.creative;
+    this.showPage();
     $('inv-nobag').hidden = this.hasBag;
-    document.querySelectorAll('.inv-slot').forEach((el) => {
+    document.querySelectorAll('.wear-slot').forEach((el) => {
+      const slot = el.dataset.wear, id = this.wear[slot];
+      paint(el, id ? { id, count: 1 } : null);
+      el.title = id ? `${ITEMS[id].name} (shift-click to take off)` : WEAR_LABELS[slot];
+      el.classList.toggle('empty', !id);
+      if (!id) { const img = el.querySelector('img'); img.src = iconURL(WEAR_HINT[slot]); img.hidden = false; } // a faint picture of what goes here
+    });
+    if (this.isOpen && this.dyeRecipes().map((r) => r.out + Object.keys(r.cost)).join() !== this.dynSig) this.buildCraft(); // what you carry changed what can be made
+    document.querySelectorAll('.inv-slot[data-slot]').forEach((el) => {
       const i = Number(el.dataset.slot);
       paint(el, this.slots[i]);
       el.classList.toggle('selected', i === this.selected && i < HOTBAR);
     });
-    document.querySelectorAll('#inv-craft .craft').forEach((el) => el.classList.toggle('off', !this.canCraft(RECIPES[Number(el.dataset.recipe)])));
+    document.querySelectorAll('#inv-craft .craft').forEach((el) => el.classList.toggle('off', !this.canCraft(this.list[Number(el.dataset.recipe)])));
     document.querySelectorAll('#inv-craft .craft-item').forEach((el) => el.classList.toggle('short', this.count(el.dataset.id) < Number(el.dataset.n)));
     paint($('inv-cursor'), this.cursor);
     $('inv-cursor').hidden = !this.cursor;
