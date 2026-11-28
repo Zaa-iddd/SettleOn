@@ -1121,7 +1121,52 @@ const chestGeometry = () => { // base and closed lid together: the placement pre
 };
 export const chestParts = () => ({ base: sharedGeo('chestBase', chestBaseGeometry), lid: sharedGeo('chestLid', chestLidGeometry) });
 
-const FURN_BUILD = [workbenchGeometry, chairGeometry, tableGeometry, bedGeometry, lampGeometry, shelfGeometry, crateGeometry, barrelGeometry, planterGeometry, flowerboxGeometry, seatGeometry, pennantGeometry, chestGeometry];
+// a dye barrel: a wide, squat open vat of bulging staves and iron hoops, filled to the brim with swirls of every
+// dye colour, a paddle leaning in it and a freshly dyed pink cloth hung over the rim to dry
+function dyeBarrelGeometry() {
+  const parts = [], col = new THREE.Color(), H = 0.56, STAVES = 16;
+  const R = (y) => 0.3 + 0.04 * Math.sin(Math.PI * y / H);
+  const push = (g, hex, mul = 1) => {
+    g = g.index ? g.toNonIndexed() : g;
+    col.setHex(hex).multiplyScalar(mul);
+    const n = g.attributes.position.count, c = new Float32Array(n * 3);
+    for (let i = 0; i < n; i++) c.set([col.r, col.g, col.b], i * 3);
+    g.setAttribute('color', new THREE.BufferAttribute(c, 3));
+    g.deleteAttribute('uv');
+    parts.push(g);
+  };
+  const box = (w, h, d, hex, x, y, z, rx = 0, rz = 0) => { const g = new THREE.BoxGeometry(w, h, d); if (rx) g.rotateX(rx); if (rz) g.rotateZ(rz); push(g.translate(x, y, z), hex); };
+  const profile = [];
+  for (let i = 0; i <= 8; i++) { const y = (i / 8) * H; profile.push(new THREE.Vector2(R(y), y)); }
+  const tones = [FW.WOOD, FW.LIGHT, FW.MID, FW.WOOD, FW.LIGHT, FW.MID];
+  for (let i = 0; i < STAVES; i++) {
+    const step = (Math.PI * 2) / STAVES;
+    push(new THREE.LatheGeometry(profile, 2, i * step, step), tones[(i * 5) % tones.length], 0.94 + ((i * 7) % 5) * 0.03);
+  }
+  for (const y of [0.08, 0.28, 0.5]) push(new THREE.CylinderGeometry(R(y + 0.022) + 0.012, R(y - 0.022) + 0.012, 0.045, 32).translate(0, y, 0), 0x3a3532);
+  push(new THREE.TorusGeometry(R(H) - 0.005, 0.022, 4, 32).rotateX(Math.PI / 2).translate(0, H, 0), FW.DARK); // the rim
+  // the dye: wedges of colour swirling around the middle, with lighter bubbles
+  const DYE = [0xe0405a, 0xf08a30, 0xf2c94c, 0x5fae4a, 0x3f86d0, 0x8a5ac0];
+  const lr = R(H) - 0.02, ly = H - 0.035;
+  DYE.forEach((hex, i) => {
+    const a = (i / DYE.length) * Math.PI * 2;
+    push(new THREE.CircleGeometry(lr, 5, a, (Math.PI * 2) / DYE.length).rotateX(-Math.PI / 2).rotateY(0.4 * i).translate(0, ly, 0), hex);
+  });
+  push(new THREE.CircleGeometry(0.09, 10).rotateX(-Math.PI / 2).translate(0.02, ly + 0.003, -0.01), 0xf4e8f8); // a pale swirl in the middle
+  for (const [x, z, s, hex] of [[0.12, 0.08, 0.035, 0xffb0c0], [-0.14, 0.05, 0.03, 0xffe7a0], [0.05, -0.16, 0.028, 0xa8d0ff], [-0.06, -0.08, 0.022, 0xc8f0b0]]) box(s, 0.012, s, hex, x, ly + 0.006, z);
+  // a wooden paddle leaning in the dye
+  box(0.04, 0.62, 0.04, FW.LIGHT, 0.12, ly + 0.2, -0.06, 0.25, -0.42);
+  box(0.1, 0.14, 0.025, FW.MID, 0.02, ly - 0.02, -0.03, 0.25, -0.42);
+  // a pink cloth drying over the front of the rim
+  box(0.24, 0.03, 0.12, 0xe0607e, -0.04, H + 0.01, R(H) - 0.03);
+  box(0.24, 0.2, 0.025, 0xe86f8c, -0.04, H - 0.09, R(H) + 0.03);
+  box(0.24, 0.025, 0.03, 0xc8506c, -0.04, H - 0.2, R(H) + 0.035); // a darker wet hem
+  const geo = mergeGeometries(parts);
+  for (const g of parts) g.dispose();
+  return geo;
+}
+
+const FURN_BUILD = [workbenchGeometry, chairGeometry, tableGeometry, bedGeometry, lampGeometry, shelfGeometry, crateGeometry, barrelGeometry, planterGeometry, flowerboxGeometry, seatGeometry, pennantGeometry, chestGeometry, dyeBarrelGeometry];
 /** The model for a furniture type (index into FURNITURE; shared, never disposed). Also the placement preview. */
 export const furnitureGeometry = (t) => sharedGeo(`furn${t}`, FURN_BUILD[t] ?? workbenchGeometry);
 export const LAMP_TYPE = 4, CHEST_TYPE = 12;

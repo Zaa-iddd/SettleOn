@@ -22,6 +22,24 @@ const TOOL_PALETTE = { o: '#1e1612', H: '#b07a48', h: '#7a4f2c', m: '#dfe5ea', M
   e: '#e0334a', E: '#a81f38', // + berry reds
   c: '#f3e6c8', Y: '#ffd860', O: '#ffa63a' }; // + bed linen and lamp glow
 const TOOL_ART = {
+  dyebarrel: [ // an open vat of swirling dyes with a paddle
+    '...........Ll...',
+    '.oooooooooolLoo.',
+    '.oeeeOOYYGGuuuo.',
+    '.oBBBBBBBBBBBBo.',
+    '.oRRrRRrRRrRRro.',
+    '.oMMMMMMMMMMMMo.',
+    '.oRRrRRrRRrRRro.',
+    '.oRRrRRrRRrRRro.',
+    '.oRRrRRrRRrRRro.',
+    '.oMMMMMMMMMMMMo.',
+    '.oRRrRRrRRrRRro.',
+    '.oRRrRRrRRrRRro.',
+    '.oBBBBBBBBBBBBo.',
+    '.oooooooooooooo.',
+    '................',
+    '................',
+  ],
   chest: [ // a plank chest with a dark frame and an iron latch (after the user's reference)
     '................',
     '................',
@@ -713,6 +731,7 @@ export const ITEMS = {
   seat: { name: 'Bench', stack: 16, place: true, furn: true, art: TOOL_ART.seat },
   pennant: { name: 'Pennant Pole', stack: 16, place: true, furn: true, art: TOOL_ART.pennant },
   chest: { name: 'Chest', stack: 16, place: true, furn: true, art: TOOL_ART.chest }, // stores 24 stacks (main.js useChest)
+  dyebarrel: { name: 'Dye Barrel', stack: 16, place: true, furn: true, art: TOOL_ART.dyebarrel }, // dyes clothes (main.js useDyeBarrel)
   boat: { name: 'Cabin Boat', stack: 1, boat: true, hull: 0, art: TOOL_ART.boat }, // launched on open water (main.js), then walked on and sailed
   rod: { name: 'Fishing Rod', stack: 1, tool: 'rod', art: TOOL_ART.rod }, // cast, wait for the bite, reel in (fishing.js)
   ...Object.fromEntries(FISH.map((f) => [f.id, { name: f.name, stack: 16, fish: true, food: f.food, art: fishArt(f) }])), // what you catch
@@ -753,6 +772,7 @@ export const RECIPES = [
   { out: 'seat', n: 1, at: 'bench', cost: { wood: 4, stick: 2 } },
   { out: 'pennant', n: 1, at: 'bench', cost: { stick: 3, leaves: 4, berries: 1 } },
   { out: 'chest', n: 1, at: 'bench', cost: { wood: 6, pebble: 1 } }, // the pebble is its latch
+  { out: 'dyebarrel', n: 1, at: 'bench', cost: { wood: 5, stone: 1, leaves: 2 } },
   { out: 'rod', n: 1, at: 'bench', cost: { stick: 3, leaves: 2, pebble: 1 } },
   { out: 'rowboat', n: 1, at: 'bench', cost: { wood: 6, stick: 4 } },
   { out: 'boat', n: 1, at: 'bench', cost: { wood: 12, log: 4, leaves: 4 } },
@@ -820,6 +840,7 @@ export class Inventory {
     this.list = []; // the recipes shown now (buildCraft)
     this.filter = { craft: { cat: 'all', q: '' }, all: { cat: 'all', q: '' } }; // the filter tabs and search of each list
     this.chest = null; // the open chest's slots (openChest), or null
+    this.onCraft = opts.onCraft ?? null; // (recipe): something was just crafted (main.js: a splash at the dye barrel)
     this.onDrop = opts.onDrop ?? null; // (id, n): items dropped from the inventory screen land on the ground (main.js)
     this.isOpen = false;
     this.page = 'bag'; // the tab shown on the left: 'bag', 'wear' or 'creative'
@@ -928,22 +949,26 @@ export class Inventory {
   }
   canCraft(r) { return Object.entries(r.cost).every(([id, n]) => this.count(id) >= n); }
   /** The recipes on offer where the screen was opened (the backpack drops out once you have one). */
-  recipes() { return [...RECIPES.filter((r) => (r.at === 'hand' || this.station === 'bench') && !(ITEMS[r.out].unlock && this.hasBag)), ...this.dyeRecipes()]; }
+  recipes() {
+    if (this.station === 'dye') return this.dyeRecipes(); // a dye barrel only dyes
+    return [...RECIPES.filter((r) => (r.at === 'hand' || this.station === 'bench') && !(ITEMS[r.out].unlock && this.hasBag)), ...this.dyeRecipes()];
+  }
   /**
    * Recipes that depend on what you carry, so the list stays short: grind a flower you hold into two dyes of its
-   * colour (leaves make green), and, at a workbench, dye a piece of clothing you hold with a dye you hold.
+   * colour (leaves make green), and, at a dye barrel, dye a piece of clothing you hold with a dye you hold
+   * (the dyed pieces come first there).
    */
   dyeRecipes() {
     const out = [], held = new Set(this.slots.filter(Boolean).map((s) => s.id));
-    for (const f of FLOWERS) if (held.has(`flower_${f.key}`)) out.push({ out: `dye_${f.key}`, n: 2, at: 'hand', dyn: true, cost: { [`flower_${f.key}`]: 1 } });
-    if (held.has('leaves')) out.push({ out: 'dye_green', n: 2, at: 'hand', dyn: true, cost: { leaves: 3 } });
-    if (this.station === 'bench') {
+    if (this.station === 'dye') {
       for (const id of held) {
         const c = parseCloth(id);
         if (!c) continue;
-        for (const d of DYES) if (d.key !== c.dye && held.has(`dye_${d.key}`)) out.push({ out: clothId(c.type, d.key), n: 1, at: 'bench', dyn: true, cost: { [id]: 1, [`dye_${d.key}`]: 1 } });
+        for (const d of DYES) if (d.key !== c.dye && held.has(`dye_${d.key}`)) out.push({ out: clothId(c.type, d.key), n: 1, at: 'dye', dyn: true, cost: { [id]: 1, [`dye_${d.key}`]: 1 } });
       }
     }
+    for (const f of FLOWERS) if (held.has(`flower_${f.key}`)) out.push({ out: `dye_${f.key}`, n: 2, at: 'hand', dyn: true, cost: { [`flower_${f.key}`]: 1 } });
+    if (held.has('leaves')) out.push({ out: 'dye_green', n: 2, at: 'hand', dyn: true, cost: { leaves: 3 } });
     return out;
   }
   /** Craft a recipe once, if the ingredients are there and the result fits. */
@@ -956,6 +981,7 @@ export class Inventory {
       this.buildCraft();
       this.toast('You made a backpack: 24 more slots!');
     } else if (this.add(r.out, r.n) > 0) { this.slots = before; this.toast('Your inventory is full'); }
+    else this.onCraft?.(r);
     this.render();
     this.onChange();
   }
@@ -1014,11 +1040,11 @@ export class Inventory {
     this.isOpen = true;
     $('inventory').hidden = false;
     document.body.classList.add('inv-open'); // the regular hotbar, bars and held name step aside
-    $('inv-craft-title').textContent = station === 'bench' ? 'Workbench' : 'Crafting';
+    $('inv-craft-title').textContent = { bench: 'Workbench', dye: 'Dye Barrel' }[station] ?? 'Crafting';
     $('inv-chest-box').hidden = station !== 'chest';
     if (station !== 'chest') this.chest = null;
     if (station === 'chest' && this.page === 'creative') this.page = 'bag';
-    this.showCraft(station === 'bench' || (station !== 'chest' && this.craftOpen())); // a workbench always shows its recipes; a chest hides them
+    this.showCraft(station === 'bench' || station === 'dye' || (station !== 'chest' && this.craftOpen())); // a workbench or dye barrel always shows its recipes; a chest hides them
     this.showPage();
     this.buildCraft();
     this.render();
@@ -1316,7 +1342,7 @@ export class Inventory {
     });
     this.applyCraftFilter();
     craft.scrollTop = scroll;
-    $('inv-craft-hint').textContent = this.station === 'bench' ? '' : 'More recipes at a workbench';
+    $('inv-craft-hint').textContent = { bench: '', dye: 'Carry clothes and a dye to recolour them. Grind flowers (or leaves) into dyes.' }[this.station] ?? 'More recipes at a workbench';
   }
 
   render() {

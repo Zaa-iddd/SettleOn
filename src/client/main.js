@@ -2,7 +2,7 @@ import '@fontsource/pixelify-sans/400.css';
 import '@fontsource/pixelify-sans/700.css';
 import * as THREE from 'three';
 import PartySocket from 'partysocket';
-import { finishWorld, spawnPoint, groundAt, toCell, toWorld, WORLD, SEA, STEP, K, cellKey, keyX, keyZ, PICK, isWood, PILE_MAX, FURNITURE, CHEST, CHEST_SLOTS, clockHour } from '../shared/world.js';
+import { finishWorld, spawnPoint, groundAt, toCell, toWorld, WORLD, SEA, STEP, K, cellKey, keyX, keyZ, PICK, isWood, PILE_MAX, FURNITURE, CHEST, CHEST_SLOTS, DYE_BARREL, clockHour } from '../shared/world.js';
 import { createEndlessWorld } from '../shared/endless.js';
 import { decodeMap, isEndlessMap, decodeEndless, endlessMap, encodeMap, cleanEdits, cleanChops, cleanBenches, cleanPicks, cleanPiles, cleanBoats, cleanChests } from '../shared/mapfile.js';
 import { WAVE_DIR, waveAt } from './waves.js';
@@ -23,7 +23,7 @@ import { partIcon } from './boaticons.js';
 import { WorldScene, DEFAULT_TIME, furnitureGeometry, logGeo, logOffset, palmTrunk } from './world3d.js';
 import { makeCharacter, animateCharacter, ANIM, TOOLS, setTool, swingTool, SWING_SECS, setLantern, lookKey } from './character.js';
 import { loadLook, CharacterPreview } from './appearance.js';
-import { flowerKey, cleanLook as cleanPlayerLook } from '../shared/outfit.js';
+import { flowerKey, parseCloth, cleanLook as cleanPlayerLook } from '../shared/outfit.js';
 import { GridController, IMPACT_DROP } from './controller.js';
 import { Fishing } from './fishing.js';
 import { Drops } from './drops.js';
@@ -1636,7 +1636,7 @@ function walkOnDeck(dt, t, keys, yaw) {
 
 // ---------- inventory ----------
 // The selected hotbar slot is what you hold: a shovel or pickaxe there is the tool.
-const inventory = new Inventory({ onChange: () => { syncTool(); syncWear(); saveInventory(); }, toast: (s) => toast(s), onDrop: (id, n) => dropFromPlayer(id, n) });
+const inventory = new Inventory({ onChange: () => { syncTool(); syncWear(); saveInventory(); }, toast: (s) => toast(s), onDrop: (id, n) => dropFromPlayer(id, n), onCraft: (r) => dyeSplash(r) });
 // the Wardrobe page shows you, dressed as you are, in a little live preview (appearance.js)
 const doll = new CharacterPreview($('inv-doll'), { camY: 0.62, dist: 2.25, aimY: 0.44 });
 function drawDoll(dt, t) {
@@ -2239,8 +2239,24 @@ function useWorkbench(b) {
   inventory.open('bench');
 }
 // ---------- chests: store things (world.chests: cellKey -> CHEST_SLOTS slots, synced and saved) ----------
-const usable = (b) => !!b && (b[3] === 0 || b[3] === CHEST); // a click opens these
-const useFurniture = (b) => (b[3] === CHEST ? useChest(b) : useWorkbench(b));
+const usable = (b) => !!b && (b[3] === 0 || b[3] === CHEST || b[3] === DYE_BARREL); // a click opens these
+const useFurniture = (b) => (b[3] === CHEST ? useChest(b) : b[3] === DYE_BARREL ? useDyeBarrel(b) : useWorkbench(b));
+// a dye barrel: walk up to it, then the inventory screen opens with its dyeing recipes (inventory.js dyeRecipes)
+function useDyeBarrel(b) {
+  const o = { x: toWorld(b[0]), z: toWorld(b[1]) }, key = cellKey(b[0], b[1]);
+  if (!inReach(o, () => { const q = game.world.benches.get(key); if (q?.[3] === DYE_BARREL) useDyeBarrel(q); })) return;
+  game.ctrl.ry = Math.atan2(o.x - game.ctrl.pos.x, o.z - game.ctrl.pos.z);
+  hideCtx();
+  game.dyeAt = [b[0], b[1]];
+  inventory.open('dye');
+}
+// dipping clothes (or grinding a dye) at a dye barrel: a little splash out of the vat
+function dyeSplash(r) {
+  if (inventory.station !== 'dye' || !game.dyeAt || !game.world) return;
+  const [ix, iz] = game.dyeAt;
+  game.scene.effects.splash(toWorld(ix), game.world.H(ix, iz) + 0.56, toWorld(iz), parseCloth(r.out) ? 0.35 : 0.18);
+  if (game.local) swingTool(game.local.char);
+}
 const chestOut = (slots) => slots.map((st) => (st ? [st.id, st.count] : 0));
 // from the wire or a save: unknown items are dropped
 const chestIn = (arr) => Array.from({ length: CHEST_SLOTS }, (_, i) => {
