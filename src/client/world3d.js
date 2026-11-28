@@ -1085,10 +1085,46 @@ const pennantGeometry = () => boxModel((add) => { // a pennant on a pole
   add(0.14, 0.05, 0.022, 0xf4efe4, 0.16, 1.56, 0); // a white stripe
 });
 
-const FURN_BUILD = [workbenchGeometry, chairGeometry, tableGeometry, bedGeometry, lampGeometry, shelfGeometry, crateGeometry, barrelGeometry, planterGeometry, flowerboxGeometry, seatGeometry, pennantGeometry];
+// a storage chest (after the user's pixel chest reference): plank sides in warm brown, dark corner posts and rims,
+// and an iron latch on the front. The base and the lid are separate models so the lid can swing open on its hinge.
+const CHEST_C = { BODY: 0xb07a48, LIGHT: 0xc9945c, LID: 0xa06a3c, FRAME: 0x5a3418, SEAM: 0x6e4428, IRON: 0x9aa0a6, IRON_DK: 0x5e646c, HOLE: 0x22222a, INSIDE: 0x3a2414 };
+export const CHEST_HINGE = [0.4, -0.25]; // the lid's hinge: height and z (the back of the base)
+const chestBaseGeometry = () => boxModel((add) => {
+  add(0.68, 0.36, 0.46, CHEST_C.BODY, 0, 0.21, 0);                     // the box
+  for (const y of [0.15, 0.27]) for (const z of [-1, 1]) add(0.66, 0.014, 0.005, CHEST_C.SEAM, 0, y, z * 0.2325); // plank seams, front and back
+  for (const y of [0.15, 0.27]) for (const x of [-1, 1]) add(0.005, 0.014, 0.44, CHEST_C.SEAM, x * 0.3425, y, 0);  // and on the sides
+  for (const sx of [-1, 1]) for (const sz of [-1, 1]) add(0.06, 0.4, 0.06, CHEST_C.FRAME, sx * 0.33, 0.2, sz * 0.22); // corner posts
+  add(0.72, 0.05, 0.5, CHEST_C.FRAME, 0, 0.025, 0);                    // bottom rim
+  add(0.72, 0.035, 0.5, CHEST_C.FRAME, 0, 0.3825, 0);                  // top rim
+  add(0.6, 0.012, 0.38, CHEST_C.INSIDE, 0, 0.398, 0);                  // the dark inside, seen when it's open
+  add(0.13, 0.12, 0.02, CHEST_C.IRON_DK, 0, 0.33, 0.252);              // the lock plate
+  add(0.11, 0.1, 0.022, CHEST_C.IRON, 0, 0.33, 0.253);
+  add(0.024, 0.045, 0.01, CHEST_C.HOLE, 0, 0.32, 0.266);               // keyhole
+});
+// the lid, built around its hinge (y 0 at the base's top, z 0 at the back), front toward +z
+const chestLidGeometry = () => boxModel((add) => {
+  add(0.68, 0.15, 0.46, CHEST_C.LID, 0, 0.085, 0.25);
+  add(0.66, 0.03, 0.44, CHEST_C.LIGHT, 0, 0.17, 0.25);                 // a rounded-looking top board
+  for (const z of [0.16, 0.34]) add(0.66, 0.006, 0.012, CHEST_C.SEAM, 0, 0.186, z); // planks on top
+  add(0.66, 0.012, 0.005, CHEST_C.SEAM, 0, 0.09, 0.4825);              // a seam across the front
+  add(0.72, 0.035, 0.5, CHEST_C.FRAME, 0, 0.0175, 0.25);               // lid rim
+  for (const sx of [-1, 1]) for (const z of [0.03, 0.47]) add(0.06, 0.17, 0.06, CHEST_C.FRAME, sx * 0.33, 0.085, z); // corner posts
+  add(0.1, 0.11, 0.02, CHEST_C.IRON_DK, 0, 0.03, 0.505);               // the hasp, hanging over the lock plate
+  add(0.08, 0.09, 0.022, CHEST_C.IRON, 0, 0.03, 0.506);
+  for (const x of [-0.2, 0.2]) add(0.09, 0.05, 0.02, CHEST_C.IRON_DK, x, 0.01, -0.005); // hinges
+});
+const chestGeometry = () => { // base and closed lid together: the placement preview, hover outline, icons and footprint
+  const base = chestBaseGeometry(), lid = chestLidGeometry().translate(0, CHEST_HINGE[0], CHEST_HINGE[1]);
+  const geo = mergeGeometries([base, lid]);
+  base.dispose(); lid.dispose();
+  return geo;
+};
+export const chestParts = () => ({ base: sharedGeo('chestBase', chestBaseGeometry), lid: sharedGeo('chestLid', chestLidGeometry) });
+
+const FURN_BUILD = [workbenchGeometry, chairGeometry, tableGeometry, bedGeometry, lampGeometry, shelfGeometry, crateGeometry, barrelGeometry, planterGeometry, flowerboxGeometry, seatGeometry, pennantGeometry, chestGeometry];
 /** The model for a furniture type (index into FURNITURE; shared, never disposed). Also the placement preview. */
 export const furnitureGeometry = (t) => sharedGeo(`furn${t}`, FURN_BUILD[t] ?? workbenchGeometry);
-export const LAMP_TYPE = 4;
+export const LAMP_TYPE = 4, CHEST_TYPE = 12;
 /** The glowing part of a furniture type (the lamp's panes), or null. */
 export const furnitureGlowGeometry = (t) => (t === LAMP_TYPE ? sharedGeo('lampGlow', lampGlowGeometry) : null);
 
@@ -1467,6 +1503,7 @@ export class WorldScene {
   setBenches(benches) {
     for (const mesh of this.benchMeshes ?? []) { this.scene.remove(mesh); mesh.dispose(); }
     this.benchMeshes = [];
+    this.chestLids = null;
     const byType = new Map();
     for (const b of benches.values()) { const t = b[3] ?? 0; if (!byType.has(t)) byType.set(t, []); byType.get(t).push(b); }
     if (!byType.size) return;
@@ -1485,12 +1522,70 @@ export class WorldScene {
       this.scene.add(mesh);
     };
     for (const [t, list] of byType) {
+      if (t === CHEST_TYPE) { this.buildChests(list); build(chestParts().base, this.benchMat, list, true); continue; }
       build(furnitureGeometry(t), this.benchMat, list, true);
       if (t === LAMP_TYPE) {
         this.lampGlowMat ??= new THREE.MeshBasicMaterial({ color: new THREE.Color(1.9, 1.05, 0.32) }); // warm amber, still bright enough to bloom
         build(sharedGeo('lampGlow', lampGlowGeometry), this.lampGlowMat, list, false);
       }
     }
+  }
+
+  /**
+   * Chest lids: one instanced mesh for every chest's lid, each turned on its hinge by its own spring (see
+   * setChestOpen / updateChests). The spring state lives in this.lids (cellKey -> { a, v, open }) so it survives
+   * rebuilds of the furniture meshes.
+   */
+  buildChests(list) {
+    this.lids ??= new Map();
+    const mesh = new THREE.InstancedMesh(chestParts().lid, this.benchMat, list.length);
+    mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    mesh.castShadow = true;
+    mesh.receiveShadow = true;
+    const keys = list.map(([ix, iz]) => cellKey(ix, iz));
+    this.chestLids = { mesh, list, keys };
+    list.forEach((_, i) => this.poseLid(i));
+    mesh.computeBoundingSphere();
+    this.benchMeshes.push(mesh);
+    this.scene.add(mesh);
+  }
+  poseLid(i) {
+    const { mesh, list, keys } = this.chestLids, [ix, iz, r] = list[i], a = this.lids.get(keys[i])?.a ?? 0;
+    const m = (this._lm ??= new THREE.Matrix4()), h = (this._lh ??= new THREE.Matrix4());
+    m.makeRotationY(r * Math.PI / 2).setPosition(toWorld(ix), this.world.H(ix, iz), toWorld(iz));
+    h.makeRotationX(-a).setPosition(0, CHEST_HINGE[0], CHEST_HINGE[1]); // hinged at the back: a positive angle lifts the front
+    mesh.setMatrixAt(i, m.multiply(h));
+    mesh.instanceMatrix.needsUpdate = true;
+  }
+  /** Open or close the chest on cell (ix, iz): its lid swings there (and bounces a little). */
+  setChestOpen(ix, iz, open) {
+    this.lids ??= new Map();
+    const key = cellKey(ix, iz), st = this.lids.get(key) ?? { a: 0, v: 0, open: false };
+    if (open && !st.open) st.v += 2.5; // a little pop as the latch lets go
+    st.open = open;
+    this.lids.set(key, st);
+  }
+  updateChests(dt) {
+    if (!this.lids?.size) return;
+    const OPEN = 1.95; // about 112°: thrown back past upright
+    for (const [key, st] of this.lids) {
+      const target = st.open ? OPEN : 0;
+      // a bouncy spring: snappy to open with an overshoot, and the lid thuds shut with a small rebound
+      const k = st.open ? 70 : 90, c = st.open ? 7 : 6;
+      st.v += ((target - st.a) * k - st.v * c) * dt;
+      st.a += st.v * dt;
+      if (st.a < 0) { st.a = 0; if (st.v < -1.2) { st.v *= -0.28; st.thud = true; } else st.v = 0; } // it can't sink into the box
+      if (st.a > 2.25) { st.a = 2.25; st.v = Math.min(0, st.v); }
+      if (!st.open && st.a === 0 && st.v === 0) this.lids.delete(key);
+      const i = this.chestLids?.keys.indexOf(key) ?? -1;
+      if (i >= 0) this.poseLid(i);
+    }
+  }
+  /** True once per lid that has just banged shut (main.js puffs a little dust). */
+  takeThuds() {
+    const out = [];
+    for (const [key, st] of this.lids ?? []) if (st.thud) { st.thud = false; out.push(key); }
+    return out;
   }
 
   /** Island: hide the berries on a bush (picked, or the bush was broken). */
@@ -2212,6 +2307,7 @@ export class WorldScene {
     this.ambient.update(t, dt, focus);
     this.effects.update(dt);
     this.updateShakes(dt);
+    this.updateChests(dt);
     this.atmosphere.update(t, dt, focus, this.night ?? 0, this.timeNight ?? 0);
 
     // zoomed out: push fog back, widen shadow coverage, fade the cloud layer in

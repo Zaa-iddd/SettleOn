@@ -1,4 +1,5 @@
 import { FISH, fishArt } from './fishing.js';
+import { CHEST_SLOTS } from '../shared/world.js';
 import { FLOWERS, DYES, CLOTHES, NATURAL, WEAR_SLOTS, WEAR_LABELS, clothId, parseCloth, cleanWear } from '../shared/outfit.js';
 
 // Minecraft-style inventory: an 8-slot hotbar (keys 1-8). The 24-slot bag only exists once you've
@@ -12,6 +13,7 @@ import { FLOWERS, DYES, CLOTHES, NATURAL, WEAR_SLOTS, WEAR_LABELS, clothId, pars
 // The selected hotbar slot is what you hold (a shovel or pickaxe works as the tool, see main.js).
 
 export const HOTBAR = 8, BAG = 24, SLOTS = HOTBAR + BAG; // slots 0-7 are the hotbar, 8-31 the bag (needs a backpack)
+const CHEST_BASE = 100; // slot numbers of an open chest's slots (see Inventory.get)
 
 // 16×16 icons. Tools are drawn from strings; blocks are generated from a few colours.
 const TOOL_PALETTE = { o: '#1e1612', H: '#b07a48', h: '#7a4f2c', m: '#dfe5ea', M: '#9aa4ad', d: '#6b737c',
@@ -20,6 +22,24 @@ const TOOL_PALETTE = { o: '#1e1612', H: '#b07a48', h: '#7a4f2c', m: '#dfe5ea', M
   e: '#e0334a', E: '#a81f38', // + berry reds
   c: '#f3e6c8', Y: '#ffd860', O: '#ffa63a' }; // + bed linen and lamp glow
 const TOOL_ART = {
+  chest: [ // a plank chest with a dark frame and an iron latch (after the user's reference)
+    '................',
+    '................',
+    '..oooooooooooo..',
+    '.oLLLLLLLLLLLLo.',
+    '.oBRRRRRRRRRRBo.',
+    '.oBrrrrrrrrrrBo.',
+    '.ooooommmmooooo.',
+    '.oBRRomddmoRRBo.',
+    '.oBRRRmppmRRRBo.',
+    '.oBrrrMMMMrrrBo.',
+    '.oBbbbbbbbbbbBo.',
+    '.oBRRRRRRRRRRBo.',
+    '.oBrrrrrrrrrrBo.',
+    '.oBBBBBBBBBBBBo.',
+    '.oooooooooooooo.',
+    '................',
+  ],
   shovel: [
     '................',
     '.............oo.',
@@ -692,6 +712,7 @@ export const ITEMS = {
   flowerbox: { name: 'Flower Box', stack: 16, place: true, furn: true, art: TOOL_ART.flowerbox },
   seat: { name: 'Bench', stack: 16, place: true, furn: true, art: TOOL_ART.seat },
   pennant: { name: 'Pennant Pole', stack: 16, place: true, furn: true, art: TOOL_ART.pennant },
+  chest: { name: 'Chest', stack: 16, place: true, furn: true, art: TOOL_ART.chest }, // stores 24 stacks (main.js useChest)
   boat: { name: 'Cabin Boat', stack: 1, boat: true, hull: 0, art: TOOL_ART.boat }, // launched on open water (main.js), then walked on and sailed
   rod: { name: 'Fishing Rod', stack: 1, tool: 'rod', art: TOOL_ART.rod }, // cast, wait for the bite, reel in (fishing.js)
   ...Object.fromEntries(FISH.map((f) => [f.id, { name: f.name, stack: 16, fish: true, food: f.food, art: fishArt(f) }])), // what you catch
@@ -731,6 +752,7 @@ export const RECIPES = [
   { out: 'flowerbox', n: 1, at: 'bench', cost: { wood: 2, dirt: 1, berries: 2 } },
   { out: 'seat', n: 1, at: 'bench', cost: { wood: 4, stick: 2 } },
   { out: 'pennant', n: 1, at: 'bench', cost: { stick: 3, leaves: 4, berries: 1 } },
+  { out: 'chest', n: 1, at: 'bench', cost: { wood: 6, pebble: 1 } }, // the pebble is its latch
   { out: 'rod', n: 1, at: 'bench', cost: { stick: 3, leaves: 2, pebble: 1 } },
   { out: 'rowboat', n: 1, at: 'bench', cost: { wood: 6, stick: 4 } },
   { out: 'boat', n: 1, at: 'bench', cost: { wood: 12, log: 4, leaves: 4 } },
@@ -738,6 +760,25 @@ export const RECIPES = [
   // clothes, from Cotton Balls (outfit.js CLOTHES). Dyes and dyeing are worked out from what you carry (Inventory.dyeRecipes)
   ...CLOTHES.map((c) => ({ out: c.type, n: 1, at: 'bench', cost: c.cost })),
 ];
+
+// Item categories, for the filter tabs above the crafting and creative lists: [key, label, icon item].
+export const CATEGORIES = [
+  ['all', 'All', null], ['tools', 'Tools', 'axe'], ['materials', 'Materials', 'log'], ['blocks', 'Blocks', 'dirt'],
+  ['furniture', 'Furniture & decorations', 'chair'], ['boats', 'Boats', 'boat'], ['food', 'Food', 'berries'],
+  ['clothes', 'Clothes', 'tee'], ['dyes', 'Flowers & dyes', 'dye_red'],
+];
+export function categoryOf(id) {
+  const it = ITEMS[id];
+  if (!it) return 'materials';
+  if (it.cloth) return 'clothes';
+  if (it.dye || it.flower) return 'dyes';
+  if (it.boat) return 'boats';
+  if (it.tool || it.unlock) return 'tools';
+  if (it.block) return 'blocks';
+  if (it.furn) return 'furniture';
+  if (it.food || it.fish || id === 'coconut') return 'food';
+  return 'materials';
+}
 
 // draw each icon once into a data URL
 const iconCache = new Map();
@@ -765,7 +806,7 @@ const WEAR_HINT = { hat: 'cap', top: 'tee', bottom: 'pants', shoes: 'shoes', nec
 const CRAFT_KEY = 'settleon.craftpanel'; // is the crafting panel shown beside the inventory ('0' = hidden)
 
 export class Inventory {
-  /** @param {{ onChange?: () => void, toast?: (s: string) => void }} opts */
+  /** @param {{ onChange?: () => void, toast?: (s: string) => void, onDrop?: (id: string, n: number) => void }} opts */
   constructor(opts = {}) {
     this.onChange = opts.onChange ?? (() => {});
     this.toast = opts.toast ?? (() => {});
@@ -777,6 +818,9 @@ export class Inventory {
     this.cursor = null; // stack held by the mouse while the inventory is open
     this.wear = cleanWear(null); // what's worn, slot -> clothing item id (see outfit.js)
     this.list = []; // the recipes shown now (buildCraft)
+    this.filter = { craft: { cat: 'all', q: '' }, all: { cat: 'all', q: '' } }; // the filter tabs and search of each list
+    this.chest = null; // the open chest's slots (openChest), or null
+    this.onDrop = opts.onDrop ?? null; // (id, n): items dropped from the inventory screen land on the ground (main.js)
     this.isOpen = false;
     this.page = 'bag'; // the tab shown on the left: 'bag', 'wear' or 'creative'
     this.buildDOM();
@@ -791,6 +835,17 @@ export class Inventory {
     this.cursor = null;
     this.wear = cleanWear(null);
     this.render();
+  }
+
+  // A slot index: 0..SLOTS-1 your own slots, CHEST_BASE + i slot i of the open chest (this.chest).
+  get(i) { return i >= CHEST_BASE ? this.chest?.[i - CHEST_BASE] ?? null : this.slots[i]; }
+  set(i, v) { if (i >= CHEST_BASE) { if (this.chest) this.chest[i - CHEST_BASE] = v; } else this.slots[i] = v; }
+  /** Put a stack into these slots (topping up matching stacks first). Returns how many didn't fit. */
+  moveInto(id, n, range) {
+    const max = ITEMS[id].stack;
+    for (const j of range) { const t = this.get(j); if (n > 0 && t?.id === id && t.count < max) { const k = Math.min(n, max - t.count); t.count += k; n -= k; } }
+    for (const j of range) if (n > 0 && !this.get(j)) { const k = Math.min(n, max); this.set(j, { id, count: k }); n -= k; }
+    return n;
   }
 
   /** What's in the selected hotbar slot (or null). */
@@ -831,6 +886,33 @@ export class Inventory {
     this.onChange();
     return true;
   }
+
+  /** Take the held stack (all of it) or one of it out of your hands, to drop it: { id, count } or null. */
+  takeForDrop(all) {
+    const s = this.held;
+    if (!s) return null;
+    const n = all ? s.count : 1;
+    s.count -= n;
+    if (!s.count) this.slots[this.selected] = null;
+    this.render();
+    this.onChange();
+    return { id: s.id, count: n };
+  }
+
+  // ---------- chests ----------
+  /**
+   * Open the inventory screen at a chest: `slots` is the chest's array (CHEST_SLOTS entries, { id, count } or null),
+   * changed in place. onChange() runs after every change to it, onClose() when the screen closes.
+   */
+  openChest(slots, { onChange, onClose } = {}) {
+    if (this.isOpen) this.close();
+    this.chest = slots;
+    this.onChestChange = onChange ?? (() => {});
+    this.onChestClose = onClose ?? (() => {});
+    this.open('chest');
+  }
+  /** The open chest's contents changed elsewhere (another player): show them. */
+  chestChanged() { if (this.chest) this.render(); }
 
   /** How many of an item there are in all slots. */
   count(id) { return this.slots.reduce((n, s) => n + (s?.id === id ? s.count : 0), 0); }
@@ -933,7 +1015,10 @@ export class Inventory {
     $('inventory').hidden = false;
     document.body.classList.add('inv-open'); // the regular hotbar, bars and held name step aside
     $('inv-craft-title').textContent = station === 'bench' ? 'Workbench' : 'Crafting';
-    this.showCraft(station === 'bench' || this.craftOpen()); // a workbench always shows its recipes
+    $('inv-chest-box').hidden = station !== 'chest';
+    if (station !== 'chest') this.chest = null;
+    if (station === 'chest' && this.page === 'creative') this.page = 'bag';
+    this.showCraft(station === 'bench' || (station !== 'chest' && this.craftOpen())); // a workbench always shows its recipes; a chest hides them
     this.showPage();
     this.buildCraft();
     this.render();
@@ -962,10 +1047,15 @@ export class Inventory {
     try { localStorage.setItem(CRAFT_KEY, on ? '1' : '0'); } catch {}
   }
   close() {
-    if (this.cursor) { const left = this.add(this.cursor.id, this.cursor.count); this.cursor = left ? { ...this.cursor, count: left } : null; }
+    if (this.cursor) { // back into your slots; what doesn't fit goes into the open chest, or falls at your feet
+      let left = this.add(this.cursor.id, this.cursor.count);
+      if (left && this.chest) { left = this.moveInto(this.cursor.id, left, Array.from({ length: this.chest.length }, (_, k) => CHEST_BASE + k)); this.onChestChange?.(); }
+      if (left) this.onDrop?.(this.cursor.id, left);
+    }
     this.cursor = null;
     this.isOpen = false;
     $('inventory').hidden = true;
+    if (this.chest) { const done = this.onChestClose; this.chest = null; this.station = 'hand'; done?.(); }
     document.body.classList.remove('inv-open');
     this.render();
   }
@@ -991,38 +1081,53 @@ export class Inventory {
 
   // ---------- clicks (inventory screen) ----------
   clickSlot(i, button, shift) {
-    const s = this.slots[i], max = (id) => ITEMS[id].stack;
-    if (i >= this.size) return; // the bag needs a backpack
-    if (shift && s && !this.cursor && parseCloth(s.id)) return void this.wearFrom(i); // shift-click clothes to put them on
-    if (shift && s && !this.cursor) { // quick-move between hotbar and bag
-      if (!this.hasBag) return;
-      const range = i < HOTBAR ? [HOTBAR, SLOTS] : [0, HOTBAR];
-      let n = s.count;
-      for (let j = range[0]; j < range[1] && n > 0; j++) { const t = this.slots[j]; if (t?.id === s.id && t.count < max(s.id)) { const k = Math.min(n, max(s.id) - t.count); t.count += k; n -= k; } }
-      for (let j = range[0]; j < range[1] && n > 0; j++) if (!this.slots[j]) { this.slots[j] = { id: s.id, count: n }; n = 0; }
-      this.slots[i] = n ? { id: s.id, count: n } : null;
+    const s = this.get(i), max = (id) => ITEMS[id].stack, inChest = i >= CHEST_BASE;
+    if (!inChest && i >= this.size) return; // the bag needs a backpack
+    if (inChest && !this.chest) return;
+    const before = this.chest ? JSON.stringify(this.chest) : '';
+    const range = (a, b) => Array.from({ length: b - a }, (_, k) => a + k);
+    if (shift && s && !this.cursor && !this.chest && parseCloth(s.id)) return void this.wearFrom(i); // shift-click clothes to put them on
+    if (shift && s && !this.cursor) { // quick-move: between a chest and your inventory, or between hotbar and bag
+      let to;
+      if (this.chest) to = inChest ? [...range(0, HOTBAR), ...(this.hasBag ? range(HOTBAR, SLOTS) : [])] : range(CHEST_BASE, CHEST_BASE + this.chest.length);
+      else if (this.hasBag) to = i < HOTBAR ? range(HOTBAR, SLOTS) : range(0, HOTBAR);
+      else return;
+      const n = this.moveInto(s.id, s.count, to);
+      this.set(i, n ? { id: s.id, count: n } : null);
     } else if (button === 2) { // right click: half / one
       if (!this.cursor && s) {
         const k = Math.ceil(s.count / 2);
         this.cursor = { id: s.id, count: k };
-        this.slots[i] = s.count - k ? { id: s.id, count: s.count - k } : null;
+        this.set(i, s.count - k ? { id: s.id, count: s.count - k } : null);
       } else if (this.cursor && (!s || (s.id === this.cursor.id && s.count < max(s.id)))) {
-        this.slots[i] = { id: this.cursor.id, count: (s?.count ?? 0) + 1 };
+        this.set(i, { id: this.cursor.id, count: (s?.count ?? 0) + 1 });
         this.cursor = this.cursor.count > 1 ? { ...this.cursor, count: this.cursor.count - 1 } : null;
       }
     } else if (!this.cursor) { // left click: pick up
       this.cursor = s;
-      this.slots[i] = null;
+      this.set(i, null);
     } else if (!s) { // put down
-      this.slots[i] = this.cursor;
+      this.set(i, this.cursor);
       this.cursor = null;
     } else if (s.id === this.cursor.id && s.count < max(s.id)) { // merge
       const k = Math.min(this.cursor.count, max(s.id) - s.count);
       s.count += k;
       this.cursor = this.cursor.count - k ? { ...this.cursor, count: this.cursor.count - k } : null;
     } else { // swap
-      [this.slots[i], this.cursor] = [this.cursor, s];
+      this.set(i, this.cursor);
+      this.cursor = s;
     }
+    this.render();
+    this.onChange();
+    if (this.chest && JSON.stringify(this.chest) !== before) this.onChestChange?.();
+  }
+  /** A click outside the panels with a stack on the cursor drops it (right click: just one). */
+  dropCursor(all) {
+    const c = this.cursor;
+    if (!c) return;
+    const n = all ? c.count : 1;
+    this.cursor = c.count > n ? { id: c.id, count: c.count - n } : null;
+    this.onDrop?.(c.id, n);
     this.render();
     this.onChange();
   }
@@ -1056,7 +1161,10 @@ export class Inventory {
     bag.innerHTML = bar.innerHTML = '';
     for (let i = HOTBAR; i < SLOTS; i++) bag.append(slotEl(i));
     for (let i = 0; i < HOTBAR; i++) bar.append(slotEl(i));
-    for (const grid of [bag, bar]) {
+    const chest = $('inv-chest');
+    chest.innerHTML = '';
+    for (let i = 0; i < CHEST_SLOTS; i++) chest.append(slotEl(CHEST_BASE + i));
+    for (const grid of [bag, bar, chest]) {
       grid.addEventListener('mousedown', (e) => {
         const el = e.target.closest('.inv-slot');
         if (!el) return;
@@ -1065,13 +1173,20 @@ export class Inventory {
       });
       grid.addEventListener('contextmenu', (e) => e.preventDefault());
     }
+    // clicking outside the panels with a stack on the cursor drops it on the ground (right click: one)
+    $('inventory').addEventListener('mousedown', (e) => {
+      if (!this.cursor || e.target.closest('.inv-box, .inv-foot, .inv-sidetab, #inv-name, button')) return;
+      e.preventDefault();
+      this.dropCursor(e.button !== 2);
+    });
+    $('inventory').addEventListener('contextmenu', (e) => e.preventDefault());
     // the stack held by the mouse follows the pointer
     $('inventory').addEventListener('mousemove', (e) => {
       const c = $('inv-cursor');
       c.style.left = `${e.clientX}px`;
       c.style.top = `${e.clientY}px`;
       const el = e.target.closest?.('.inv-slot');
-      const s = el ? this.slots[Number(el.dataset.slot)] : null;
+      const s = el ? this.get(Number(el.dataset.slot)) : null;
       if ((el || !e.target.closest?.('.craft')) && !el?.classList.contains('wear-slot')) $('inv-name').textContent = s ? ITEMS[s.id].name : '';
     });
     // the wardrobe: one slot per kind of clothing (click with clothes on the cursor to put them on, shift-click to take off)
@@ -1103,6 +1218,7 @@ export class Inventory {
       const el = document.createElement('button');
       el.className = 'inv-pick';
       el.tabIndex = -1;
+      el.dataset.id = id;
       el.title = `${it.name} (click: ${it.stack > 1 ? `a stack of ${it.stack}` : 'one'}, right-click: one)`;
       el.innerHTML = `<img alt="" draggable="false" src="${iconURL(id)}" />`;
       el.addEventListener('mousedown', (e) => {
@@ -1113,6 +1229,9 @@ export class Inventory {
       el.addEventListener('mouseenter', () => { $('inv-name').textContent = it.name; });
       all.append(el);
     }
+    this.filterBar('craft', () => this.applyCraftFilter());
+    this.filterBar('all', () => this.applyCreativeFilter());
+    this.applyCreativeFilter();
     // tabs with icons: pages on the left, Crafting on the right
     const tabs = $('inv-tabs-left');
     tabs.innerHTML = '';
@@ -1131,6 +1250,49 @@ export class Inventory {
     $('inv-bar').title = 'Click: pick up / drop · Right-click: half / one · Shift-click: quick move';
     $('inv-close').addEventListener('click', (e) => { e.currentTarget.blur(); this.close(); });
     $('inv-clear').addEventListener('click', (e) => { e.currentTarget.blur(); this.slots.fill(null); this.cursor = null; this.render(); this.onChange(); });
+  }
+
+  // ---------- filters ----------
+  /** The category tabs and search box above a list ('craft' or 'all'); onChange re-filters it. */
+  filterBar(which, onChange) {
+    const f = this.filter[which], bar = $(`inv-${which}-filters`), search = $(`inv-${which}-search`);
+    bar.innerHTML = '';
+    for (const [key, label, icon] of CATEGORIES) {
+      const b = document.createElement('button');
+      b.className = 'inv-filter';
+      b.tabIndex = -1;
+      b.dataset.cat = key;
+      b.title = label;
+      b.innerHTML = icon ? `<img alt="${label}" draggable="false" src="${iconURL(icon)}" />` : label;
+      b.addEventListener('click', () => { b.blur(); f.cat = key; onChange(); });
+      b.addEventListener('mouseenter', () => { $('inv-name').textContent = label; });
+      bar.append(b);
+    }
+    search.addEventListener('input', () => { f.q = search.value.trim().toLowerCase(); onChange(); });
+    search.addEventListener('keydown', (e) => { if (e.key === 'Escape') { search.blur(); e.stopPropagation(); } else if (e.key !== 'Tab') e.stopPropagation(); });
+  }
+  /** Show the entries of a list that match its filter; tabs with nothing in them are greyed out. */
+  applyFilter(which, entries) { // entries: [{ el, id }]
+    const f = this.filter[which], has = new Set(entries.map((e) => categoryOf(e.id)));
+    if (f.cat !== 'all' && !has.has(f.cat)) f.cat = 'all'; // that category has nothing here (any more)
+    const words = (id) => `${ITEMS[id].name} ${id}`.toLowerCase();
+    let shown = 0;
+    for (const { el, id } of entries) {
+      const ok = (f.cat === 'all' || categoryOf(id) === f.cat) && (!f.q || words(id).includes(f.q));
+      el.hidden = !ok;
+      if (ok) shown++;
+    }
+    for (const b of $(`inv-${which}-filters`).children) {
+      b.classList.toggle('on', b.dataset.cat === f.cat);
+      b.disabled = b.dataset.cat !== 'all' && !has.has(b.dataset.cat);
+    }
+    $(`inv-${which}-empty`).hidden = shown > 0;
+  }
+  applyCraftFilter() {
+    this.applyFilter('craft', [...$('inv-craft').children].map((el) => ({ el, id: this.list[Number(el.dataset.recipe)].out })));
+  }
+  applyCreativeFilter() {
+    this.applyFilter('all', [...$('inv-all').children].map((el) => ({ el, id: el.dataset.id })));
   }
 
   // crafting: one row per recipe on offer (the result, its name, and the ingredients), lit when you have them
@@ -1152,6 +1314,7 @@ export class Inventory {
       el.addEventListener('mouseenter', () => { $('inv-name').textContent = el.title; });
       craft.append(el);
     });
+    this.applyCraftFilter();
     craft.scrollTop = scroll;
     $('inv-craft-hint').textContent = this.station === 'bench' ? '' : 'More recipes at a workbench';
   }
@@ -1176,7 +1339,7 @@ export class Inventory {
     if (this.isOpen && this.dyeRecipes().map((r) => r.out + Object.keys(r.cost)).join() !== this.dynSig) this.buildCraft(); // what you carry changed what can be made
     document.querySelectorAll('.inv-slot[data-slot]').forEach((el) => {
       const i = Number(el.dataset.slot);
-      paint(el, this.slots[i]);
+      paint(el, this.get(i));
       el.classList.toggle('selected', i === this.selected && i < HOTBAR);
     });
     document.querySelectorAll('#inv-craft .craft').forEach((el) => el.classList.toggle('off', !this.canCraft(this.list[Number(el.dataset.recipe)])));

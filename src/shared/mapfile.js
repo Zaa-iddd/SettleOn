@@ -13,7 +13,7 @@
 // Endless worlds (endless.js) are generated from the seed alone, so their file is tiny:
 // { v: 1, type: 'endless', name, seed, edits?: [[ix, iz, level, kind]...] }  (edits = player digging)
 
-import { WORLD, STEP, SEA, K, MAX_KIND, MAX_FURNITURE, MIN_LEVEL, WORLD_LIMIT, inWorld } from './world.js';
+import { WORLD, STEP, SEA, K, MAX_KIND, MAX_FURNITURE, MIN_LEVEL, WORLD_LIMIT, CHEST_SLOTS, inWorld } from './world.js';
 import { cleanLook } from './boatlook.js';
 
 export const MAP_VERSION = 1;
@@ -45,7 +45,7 @@ const cellOk = (ix, iz) => Number.isInteger(ix) && Number.isInteger(iz) && inWor
 
 /** A saved endless world. */
 export const MAX_EDITS = 20000;
-export const endlessMap = (name, seed, edits = [], chops = [], benches = [], picks = [], piles = [], boats = []) => ({
+export const endlessMap = (name, seed, edits = [], chops = [], benches = [], picks = [], piles = [], boats = [], chests = []) => ({
   v: MAP_VERSION, type: 'endless', name: String(name ?? 'Endless world').slice(0, 40), seed: seed >>> 0,
   ...(edits.length ? { edits: edits.slice(-MAX_EDITS) } : {}),
   ...(chops.length ? { chops: chops.slice(-MAX_EDITS) } : {}),
@@ -53,7 +53,35 @@ export const endlessMap = (name, seed, edits = [], chops = [], benches = [], pic
   ...(picks.length ? { picks: picks.slice(-MAX_EDITS) } : {}),
   ...(piles.length ? { piles: piles.slice(-MAX_EDITS) } : {}),
   ...(boats.length ? { boats: boats.slice(-MAX_BOATS) } : {}),
+  ...(chests.length ? { chests: chests.slice(-MAX_CHESTS) } : {}),
 });
+/**
+ * A chest's contents on the wire and in saves: CHEST_SLOTS entries, each [item id, count] or 0. Item ids are only
+ * checked for their shape here (the client drops ids it doesn't know); counts are 1..64. Returns null if it's bad.
+ */
+export function cleanChestSlots(s) {
+  if (!Array.isArray(s) || s.length > CHEST_SLOTS) return null;
+  const out = [];
+  for (let i = 0; i < CHEST_SLOTS; i++) {
+    const e = s[i];
+    if (!e) { out.push(0); continue; }
+    if (!Array.isArray(e) || e.length !== 2 || typeof e[0] !== 'string' || !/^[a-z_]{1,32}$/.test(e[0]) || !Number.isInteger(e[1]) || e[1] < 1 || e[1] > 64) return null;
+    out.push([e[0], e[1]]);
+  }
+  return out;
+}
+/** Validate a list of chests [[ix, iz, slots]...]; bad entries are dropped. */
+export const MAX_CHESTS = 5000;
+export function cleanChests(list) {
+  if (!Array.isArray(list)) return [];
+  const lim = WORLD_LIMIT + WORLD, out = [];
+  for (const e of list.slice(-MAX_CHESTS)) {
+    if (!Array.isArray(e) || e.length !== 3 || !Number.isInteger(e[0]) || !Number.isInteger(e[1]) || Math.abs(e[0]) > lim || Math.abs(e[1]) > lim) continue;
+    const s = cleanChestSlots(e[2]);
+    if (s) out.push([e[0], e[1], s]);
+  }
+  return out;
+}
 /** Validate a list of boats [[id, x, z, yaw, look?]...] (look: see boatlook.js) (id a positive integer, x/z world units); bad entries are dropped. */
 export const MAX_BOATS = 200;
 export function cleanBoats(list) {
@@ -103,7 +131,7 @@ export function decodeEndless(m) {
   if (!isEndlessMap(m)) throw new Error('not an endless world');
   if (m.v !== MAP_VERSION) throw new Error(`unsupported map version ${m.v}`);
   if (!Number.isFinite(m.seed)) throw new Error('endless world has no seed');
-  return endlessMap(m.name, m.seed, cleanEdits(m.edits), cleanChops(m.chops), cleanBenches(m.benches), cleanPicks(m.picks), cleanPiles(m.piles), cleanBoats(m.boats));
+  return endlessMap(m.name, m.seed, cleanEdits(m.edits), cleanChops(m.chops), cleanBenches(m.benches), cleanPicks(m.picks), cleanPiles(m.piles), cleanBoats(m.boats), cleanChests(m.chests));
 }
 
 /** Parse and validate an island map object (from a file, storage or the network). Throws on bad input. */

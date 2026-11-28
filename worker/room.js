@@ -3,7 +3,7 @@
 // gets its own room, addressed as /parties/room/<instanceId>. Each room has its own seed: with no
 // custom map it plays the endless world generated from that seed.
 //
-// The room's world (seed, map, clock, digging, chopped trees, furniture, picks, log piles, boats)
+// The room's world (seed, map, clock, digging, chopped trees, furniture, chests, picks, log piles, boats)
 // is kept in memory and written through to the Durable Object's SQLite storage, so a deploy or a
 // Cloudflare restart doesn't swap everyone onto a new world. Player positions are only in memory.
 // 30 minutes after the last player leaves, the room's storage is wiped (a cleanup alarm).
@@ -12,7 +12,7 @@ import { Server } from 'partyserver';
 import { cleanLook } from '../src/shared/boatlook.js';
 import { WORLD, WORLD_LIMIT, MAX_PLAYERS, PLAYER_COLORS, MAX_KIND, MAX_FURNITURE, MAX_PICK, MIN_LEVEL, cellKey, clockHour } from '../src/shared/world.js';
 import { cleanLook as cleanPlayerLook, cleanWear } from '../src/shared/outfit.js';
-import { decodeMap, isEndlessMap, decodeEndless } from '../src/shared/mapfile.js';
+import { decodeMap, isEndlessMap, decodeEndless, cleanChestSlots } from '../src/shared/mapfile.js';
 
 const SNAPSHOT_MS = 80; // ~12 position updates per second
 const BOAT_FLUSH_MS = 5000; // boat moves are saved at most this often
@@ -21,7 +21,7 @@ const MAX_MSG = 4096; // only map messages may be bigger
 const MSGS_PER_SEC = 60; // simple flood guard
 const LIM = WORLD_LIMIT + WORLD; // endless worlds reach out to the world border
 // What the room remembers for late joiners, and how many of each (oldest dropped first; boats refuse).
-const LIMITS = { edits: 50_000, chops: 50_000, benches: 50_000, picks: 50_000, piles: 50_000, boats: 200 };
+const LIMITS = { edits: 50_000, chops: 50_000, benches: 50_000, picks: 50_000, piles: 50_000, boats: 200, chests: 5000 };
 
 const newSeed = () => Math.floor(Math.random() * 2 ** 31);
 const round2 = (v) => Math.round(v * 100) / 100;
@@ -253,8 +253,24 @@ export class Room extends Server {
       case 'bench': {
         const { ix, iz, on } = msg, r = msg.r | 0, t = msg.t | 0;
         if (![ix, iz].every(Number.isInteger) || !inLim(ix, iz) || r < 0 || r > 3 || t < 0 || t > MAX_FURNITURE) return;
-        if (on) this.put('benches', cellKey(ix, iz), [ix, iz, r, t]); else this.del('benches', cellKey(ix, iz));
+        if (on) this.put('benches', cellKey(ix, iz), [ix, iz, r, t]);
+        else { this.del('benches', cellKey(ix, iz)); if (this.items.chests.has(cellKey(ix, iz))) this.del('chests', cellKey(ix, iz)); } // a chest taken up spills its things
         this.sendAll({ type: 'bench', id: player.id, ix, iz, r, t, on: !!on }, conn);
+        return;
+      }
+      // a chest's contents changed (s: CHEST_SLOTS entries, [item id, count] or 0): keep them and tell everyone else
+      case 'chest': {
+        const { ix, iz } = msg, slots = cleanChestSlots(msg.s);
+        if (![ix, iz].every(Number.isInteger) || !inLim(ix, iz) || !slots) return;
+        if (slots.some(Boolean)) this.put('chests', cellKey(ix, iz), [ix, iz, slots]); else if (this.items.chests.has(cellKey(ix, iz))) this.del('chests', cellKey(ix, iz));
+        this.sendAll({ type: 'chest', id: player.id, ix, iz, s: slots }, conn);
+        return;
+      }
+      // a player opened (o) or closed a chest: only relayed, so everyone sees its lid move
+      case 'lid': {
+        const { ix, iz } = msg;
+        if (![ix, iz].every(Number.isInteger) || !inLim(ix, iz)) return;
+        this.sendAll({ type: 'lid', id: player.id, ix, iz, o: !!msg.o }, conn);
         return;
       }
       // a player put on or took off clothes: remember what they wear and tell everyone (the roster carries it)
@@ -325,6 +341,7 @@ export class Room extends Server {
       type: 'welcome', you: p.id, seed: this.seed, map: this.map,
       edits: [...it.edits.values()], chops: [...it.chops.values()], benches: [...it.benches.values()],
       picks: [...it.picks.values()], piles: [...it.piles.values()], boats: [...it.boats.values()],
+      chests: [...it.chests.values()],
       time: clockHour(this.clock.h, Date.now() - this.clock.at),
     }));
     this.sendAll({ type: 'roster', players: this.roster() });

@@ -2,9 +2,9 @@ import '@fontsource/pixelify-sans/400.css';
 import '@fontsource/pixelify-sans/700.css';
 import * as THREE from 'three';
 import PartySocket from 'partysocket';
-import { finishWorld, spawnPoint, groundAt, toCell, toWorld, WORLD, SEA, STEP, K, cellKey, keyX, keyZ, PICK, isWood, PILE_MAX, FURNITURE, clockHour } from '../shared/world.js';
+import { finishWorld, spawnPoint, groundAt, toCell, toWorld, WORLD, SEA, STEP, K, cellKey, keyX, keyZ, PICK, isWood, PILE_MAX, FURNITURE, CHEST, CHEST_SLOTS, clockHour } from '../shared/world.js';
 import { createEndlessWorld } from '../shared/endless.js';
-import { decodeMap, isEndlessMap, decodeEndless, endlessMap, encodeMap, cleanEdits, cleanChops, cleanBenches, cleanPicks, cleanPiles, cleanBoats } from '../shared/mapfile.js';
+import { decodeMap, isEndlessMap, decodeEndless, endlessMap, encodeMap, cleanEdits, cleanChops, cleanBenches, cleanPicks, cleanPiles, cleanBoats, cleanChests } from '../shared/mapfile.js';
 import { WAVE_DIR, waveAt } from './waves.js';
 // how the swell handles a boat you sail (scaled by how rough the sea is there): top speed lost heading straight into
 // it / gained running with it, the push down a wave's slope (tiles/s² per unit of slope), and the drift (tiles/s)
@@ -91,6 +91,8 @@ function connect() {
     else if (msg.type === 'dig') onDig(msg);
     else if (msg.type === 'chop') onChop(msg);
     else if (msg.type === 'bench') onBench(msg);
+    else if (msg.type === 'chest') onChest(msg);
+    else if (msg.type === 'lid') { if (msg.id !== game.me && game.world) lidBy(msg.ix, msg.iz, msg.id, msg.o); }
     else if (msg.type === 'pick') onPick(msg);
     else if (msg.type === 'pile') onPile(msg);
     else if (msg.type === 'time') onTime(msg);
@@ -111,10 +113,10 @@ const send = (obj) => {
   return true;
 };
 
-function onWelcome({ you, seed, map, edits, chops, benches, picks, piles, boats, time }) {
+function onWelcome({ you, seed, map, edits, chops, benches, picks, piles, boats, chests, time }) {
   game.me = you;
   if (FROZEN === null && Number.isFinite(time)) setClock(time); // the room's time of day
-  if (mapKey(seed, map) !== game.mapKey) buildWorld(seed, map, cleanEdits(edits), cleanChops(chops), cleanBenches(benches), cleanPicks(picks), cleanPiles(piles), cleanBoats(boats));
+  if (mapKey(seed, map) !== game.mapKey) buildWorld(seed, map, cleanEdits(edits), cleanChops(chops), cleanBenches(benches), cleanPicks(picks), cleanPiles(piles), cleanBoats(boats), cleanChests(chests));
   else { // reconnected: catch up
     for (const [ix, iz, lvl, k, ul, uk] of cleanEdits(edits)) applyDig(ix, iz, lvl * STEP, k, ul >= 0 ? [ul * STEP, uk] : null);
     for (const [ix, iz] of cleanChops(chops)) applyChop(ix, iz);
@@ -122,6 +124,7 @@ function onWelcome({ you, seed, map, edits, chops, benches, picks, piles, boats,
     for (const [ix, iz, t] of cleanPicks(picks)) applyPick(ix, iz, t);
     for (const [ix, iz, r, n] of cleanPiles(piles)) applyPile(ix, iz, r, n);
     for (const [id, x, z, yaw, look] of cleanBoats(boats)) game.boats.set(id, x, z, yaw, false, look);
+    for (const [ix, iz, sl] of cleanChests(chests)) onChest({ ix, iz, s: sl });
   }
   $('loading').hidden = true;
   game.lastSent.a = -1; // force a position update
@@ -210,7 +213,7 @@ window.addEventListener('pagehide', () => { // closing or reloading the tab: kee
   if (game.world) vitals.save();
 });
 
-function buildWorld(seed, map = null, roomEdits = [], roomChops = [], roomBenches = [], roomPicks = [], roomPiles = [], roomBoats = []) {
+function buildWorld(seed, map = null, roomEdits = [], roomChops = [], roomBenches = [], roomPicks = [], roomPiles = [], roomBoats = [], roomChests = []) {
   game.seed = seed;
   game.mapKey = mapKey(seed, map);
   // no map: the endless world from the seed; otherwise a saved endless world or an island map
@@ -227,6 +230,11 @@ function buildWorld(seed, map = null, roomEdits = [], roomChops = [], roomBenche
   // workbenches: saved with the world (endless saves, or an island save's extra field), then the room's
   const savedBenches = endless?.benches ?? (map && !isEndlessMap(map) ? cleanBenches(map.benches) : []);
   for (const [ix, iz, r, t] of [...savedBenches, ...roomBenches]) game.world.benches.set(cellKey(ix, iz), [ix, iz, r, t]);
+  // what's stored in chests: saved with the world, then the room's (world.chests: cellKey -> slots)
+  game.world.chests = new Map();
+  game.lidOpen = new Map();
+  const savedChests = endless?.chests ?? (map && !isEndlessMap(map) ? cleanChests(map.chests) : []);
+  for (const [ix, iz, sl] of [...savedChests, ...roomChests]) game.world.chests.set(cellKey(ix, iz), chestIn(sl));
   // log piles: saved with the world, then the room's
   const savedPiles = endless?.piles ?? (map && !isEndlessMap(map) ? cleanPiles(map.piles) : []);
   for (const [ix, iz, r, n] of [...savedPiles, ...roomPiles]) game.world.piles.set(cellKey(ix, iz), [ix, iz, r, n]);
@@ -378,6 +386,9 @@ setClock(initialTime());
 
 function onRoster(players) {
   game.roster = new Map(players.map((p) => [p.id, p]));
+  for (const [key, set] of game.lidOpen ?? []) { // chests left open by players who've gone
+    for (const who of [...set]) if (who !== game.me && !game.roster.has(who)) lidBy(keyX(key), keyZ(key), who, false);
+  }
   if (game.scene) {
     for (const [id, p] of game.roster) ensureCharacter(id, p);
     for (const [id, r] of game.remotes) {
@@ -657,6 +668,10 @@ function frame() {
   if (game.scene.sun.castShadow !== settings.v.shadows) game.scene.sun.castShadow = game.scene.cloudSun.castShadow = settings.v.shadows; // the Shadows setting
   game.scene.cloudRes.value.set(pixel.rt.width, pixel.rt.height);
   game.scene.update(t, dt, c.pos, cam.dist);
+  for (const key of game.scene.takeThuds()) { // a chest lid banged shut: a puff of dust
+    const ix = keyX(key), iz = keyZ(key);
+    game.scene.effects.impact(toWorld(ix), game.world.H(ix, iz) + 0.42, toWorld(iz), 0.7, 'wood');
+  }
   camera.updateMatrixWorld();
   game.scene.setSeeThrough(camera, game.boatEdit ? null : c.pos, pixel.rt.width, pixel.rt.height); // no cutaway while customizing the boat
   pixel.render(game.scene.scene, camera);
@@ -749,9 +764,9 @@ function onTap(px, py, first) {
     if (pile) return takeLog(pile);
     const tree = treeAt(px, py);
     if (tree) return chopTree(tree);
-  } else if (!item?.block && !item?.place) { // a workbench opens its crafting (unless you're placing something)
+  } else if (!item?.block && !item?.place) { // a workbench opens its crafting, a chest opens (unless you're placing something)
     const bench = benchAt(px, py);
-    if (bench && bench[3] === 0) return useWorkbench(bench);
+    if (usable(bench)) return useFurniture(bench);
   }
   if (canClimb(item)) { const palm = palmAt(px, py); if (palm) return climbPalm(palm); } // an empty hand climbs a palm
   const bush = bushAt(px, py);
@@ -1023,7 +1038,7 @@ function onRight(px, py) {
   if (!game.world || !game.ctrl || editor.active || inventory.isOpen || (game.mode !== 'single' && game.mode !== 'multi')) return;
   if (game.ride) { if (ITEMS[inventory.held?.id]?.food) eatHeld(); else if (ITEMS[inventory.held?.id]?.cloth) wearHeld(); return; } // aboard: right-click only eats or dresses
   const wb = benchAt(px, py);
-  if (wb && wb[3] === 0) return useWorkbench(wb); // right-clicking a workbench opens it too
+  if (usable(wb)) return useFurniture(wb); // right-clicking a workbench or a chest opens it too
   // a small menu: a boat can go back in your inventory, a bush can be searched for berries
   const boat = boatAt(px, py), b = boat ? null : bushAt(px, py);
   if (!boat && !b) { if (ITEMS[inventory.held?.id]?.food) eatHeld(); else if (ITEMS[inventory.held?.id]?.cloth) wearHeld(); return; } // nothing to right-click: eat or wear what's in hand
@@ -1621,7 +1636,7 @@ function walkOnDeck(dt, t, keys, yaw) {
 
 // ---------- inventory ----------
 // The selected hotbar slot is what you hold: a shovel or pickaxe there is the tool.
-const inventory = new Inventory({ onChange: () => { syncTool(); syncWear(); saveInventory(); }, toast: (s) => toast(s) });
+const inventory = new Inventory({ onChange: () => { syncTool(); syncWear(); saveInventory(); }, toast: (s) => toast(s), onDrop: (id, n) => dropFromPlayer(id, n) });
 // the Wardrobe page shows you, dressed as you are, in a little live preview (appearance.js)
 const doll = new CharacterPreview($('inv-doll'), { camY: 0.62, dist: 2.25, aimY: 0.44 });
 function drawDoll(dt, t) {
@@ -1873,7 +1888,7 @@ function hoverTarget(px, py) {
     if (tree) return { kind: 'tree', obj: tree };
   } else if (!item?.block && !item?.place) {
     const bench = benchAt(px, py);
-    if (bench && bench[3] === 0) return { kind: 'bench', obj: bench }; // a workbench opens its crafting
+    if (usable(bench)) return { kind: 'bench', obj: bench }; // a workbench opens its crafting, a chest opens
   }
   if (canClimb(item)) { const palm = palmAt(px, py); if (palm) return { kind: 'palm', obj: palm }; }
   const bush = bushAt(px, py);
@@ -2102,7 +2117,8 @@ function decoPlan(px, py) {
   if (!onDeck(lx, lz, hl)) return null;
   const rot = ((Math.round(Math.atan2(r.lx - lx, r.lz - lz) / (Math.PI / 2)) % 4) + 4 + (game.rot ?? 0)) % 4; // facing you, plus R turns
   const plan = { b, type, lx, lz, rot, why: null };
-  if (b.look.f.length >= MAX_DECO) plan.why = 'This boat is full of things already';
+  if (type === CHEST) plan.why = 'Chests only work on land';
+  else if (b.look.f.length >= MAX_DECO) plan.why = 'This boat is full of things already';
   else if (!decoFits(type, rot, lx, lz, b.obs, hl)) plan.why = "There's no room for that there";
   else if (!walkable(hl.HELM[0], hl.HELM[1], undefined, { rects: [decoFoot(type, rot, lx, lz)], circles: [] }, hl) || !walkable(r.lx, r.lz, 0.15, { rects: [decoFoot(type, rot, lx, lz)], circles: [] }, hl)) plan.why = "You're standing there";
   else { // it mustn't cut a real part of the deck off from the wheel; closing a small dead-end nook is fine
@@ -2205,6 +2221,12 @@ function applyBench(ix, iz, r, on, type = 0) {
   const cur = w.benches.get(key);
   if (on ? cur?.[2] === r && cur[3] === type : !cur) return;
   if (on) w.benches.set(key, [ix, iz, r, type]); else w.benches.delete(key);
+  if (!on && cur?.[3] === CHEST) { // a chest taken up: whoever took it spills its things
+    if (game.openChest === key) inventory.close();
+    w.chests?.delete(key);
+    game.lidOpen?.delete(key);
+    game.scene.setChestOpen(ix, iz, false);
+  }
   game.scene.setBenches(w.benches);
   game.digVersion = (game.digVersion ?? 0) + 1;
 }
@@ -2216,6 +2238,77 @@ function useWorkbench(b) {
   hideCtx();
   inventory.open('bench');
 }
+// ---------- chests: store things (world.chests: cellKey -> CHEST_SLOTS slots, synced and saved) ----------
+const usable = (b) => !!b && (b[3] === 0 || b[3] === CHEST); // a click opens these
+const useFurniture = (b) => (b[3] === CHEST ? useChest(b) : useWorkbench(b));
+const chestOut = (slots) => slots.map((st) => (st ? [st.id, st.count] : 0));
+// from the wire or a save: unknown items are dropped
+const chestIn = (arr) => Array.from({ length: CHEST_SLOTS }, (_, i) => {
+  const e = arr?.[i], it = e && ITEMS[e[0]];
+  return it && !it.unlock ? { id: e[0], count: Math.min(e[1], it.stack) } : null;
+});
+function chestSlots(key) {
+  let sl = game.world.chests.get(key);
+  if (!sl) { sl = chestIn(null); game.world.chests.set(key, sl); }
+  return sl;
+}
+// open a chest: walk up to it, the lid swings open, and the inventory screen shows its slots above yours
+function useChest(b) {
+  const o = { x: toWorld(b[0]), z: toWorld(b[1]) }, key = cellKey(b[0], b[1]);
+  if (!inReach(o, () => { const q = game.world.benches.get(key); if (q?.[3] === CHEST) useChest(q); })) return;
+  const w = game.world, [ix, iz] = b;
+  game.ctrl.ry = Math.atan2(o.x - game.ctrl.pos.x, o.z - game.ctrl.pos.z);
+  hideCtx();
+  inventory.openChest(chestSlots(key), {
+    onChange: () => {
+      if (game.world !== w) return;
+      if (game.mode === 'multi') send({ type: 'chest', ix, iz, s: chestOut(chestSlots(key)) });
+      saveDigging();
+    },
+    onClose: () => {
+      if (game.openChest === key) game.openChest = null;
+      if (game.world !== w) return;
+      lidBy(ix, iz, game.me, false);
+      if (game.mode === 'multi') send({ type: 'lid', ix, iz, o: false });
+    },
+  });
+  game.openChest = key;
+  lidBy(ix, iz, game.me, true);
+  if (game.mode === 'multi') send({ type: 'lid', ix, iz, o: true });
+}
+// the lid is open while anyone has the chest open
+function lidBy(ix, iz, who, open) {
+  const key = cellKey(ix, iz), set = game.lidOpen.get(key) ?? new Set();
+  if (open) set.add(who); else set.delete(who);
+  if (set.size) game.lidOpen.set(key, set); else game.lidOpen.delete(key);
+  game.scene.setChestOpen(ix, iz, set.size > 0);
+}
+// someone else changed what's in a chest (also when catching up after a reconnect)
+function onChest({ id, ix, iz, s: sl }) {
+  if ((id && id === game.me) || !game.world?.chests) return;
+  const key = cellKey(ix, iz), next = chestIn(sl), cur = game.world.chests.get(key);
+  if (cur) cur.splice(0, cur.length, ...next); else game.world.chests.set(key, next); // in place: an open chest shows it
+  if (game.openChest === key) inventory.chestChanged();
+}
+
+// ---------- dropping things ----------
+// G (or the inventory screen) drops items: tossed a step ahead of you as a floating icon (drops.js), picked up
+// again once you've walked away from it and come back. Client-only, like every drop.
+function dropFromPlayer(id, n) {
+  const c = game.ctrl;
+  if (!c || !game.world || !(n > 0)) return;
+  if (!game.drops || game.drops.scene !== game.scene?.scene) return give(id, n);
+  const dx = Math.sin(c.ry), dz = Math.cos(c.ry);
+  game.drops.toss(id, n, c.pos.x + dx * 0.25, c.pos.y + 0.7, c.pos.z + dz * 0.25, dx, dz);
+}
+function dropHeld(all) {
+  if (!game.ctrl || game.climb) return;
+  const st = inventory.takeForDrop(all);
+  if (!st) return;
+  dropFromPlayer(st.id, st.count);
+  if (game.local) swingTool(game.local.char);
+}
+
 function onBench({ id, ix, iz, r, t = 0, on }) {
   if (id === game.me) return;
   applyBench(ix, iz, r, on, t);
@@ -2249,6 +2342,7 @@ function takeBench(b) {
   const w = game.world;
   setTimeout(() => {
     if (game.world !== w || !w.benches.has(cellKey(ix, iz))) return;
+    for (const st of w.chests?.get(cellKey(ix, iz)) ?? []) if (st) dropItem(st.id, st.count, x, w.H(ix, iz) + 0.5, z, 1.0); // a chest spills what's in it
     applyBench(ix, iz, 0, false);
     game.scene.effects.impact(x, w.H(ix, iz) + 0.4, z, 1.4, 'wood');
     dropItem(id, 1, x, w.H(ix, iz) + 0.6, z, 0.6);
@@ -2329,7 +2423,8 @@ function writeSave() {
     const w = game.world, name = game.saveName;
     if (game.mode !== 'single' || !w || !name || !getSave(name)) return;
     const benches = [...w.benches.values()], picks = w.pickList(), piles = [...w.piles.values()], boats = game.boats?.listOut() ?? [];
-    putSave(name, w.endless ? endlessMap(name, w.seed, w.editsList(), w.choppedList(), benches, picks, piles, boats) : { ...encodeMap(w.base, name), ...(benches.length ? { benches } : {}), ...(picks.length ? { picks } : {}), ...(piles.length ? { piles } : {}), ...(boats.length ? { boats } : {}) });
+    const chests = [...(w.chests ?? [])].filter(([, sl]) => sl.some(Boolean)).map(([k, sl]) => [keyX(k), keyZ(k), chestOut(sl)]);
+    putSave(name, w.endless ? endlessMap(name, w.seed, w.editsList(), w.choppedList(), benches, picks, piles, boats, chests) : { ...encodeMap(w.base, name), ...(benches.length ? { benches } : {}), ...(picks.length ? { picks } : {}), ...(piles.length ? { piles } : {}), ...(boats.length ? { boats } : {}), ...(chests.length ? { chests } : {}) });
   }
 }
 
@@ -3023,6 +3118,7 @@ window.addEventListener('keydown', (e) => {
   if (e.code === 'KeyI' || e.code === 'Tab') { e.preventDefault(); hideCtx(); inventory.toggle(); return; }
   if (e.code === 'KeyC' && inventory.isOpen) { inventory.toggleCraft(); return; } // show / hide the crafting panel
   if (e.code === 'KeyR' && !inventory.isOpen) { rotateKey(); return; }
+  if (e.code === 'KeyG' && !inventory.isOpen && !game.boatEdit) { dropHeld(e.shiftKey || e.ctrlKey); return; } // drop one (Shift: the whole stack)
   const n = e.code.startsWith('Digit') ? Number(e.code.slice(5)) - 1 : -1;
   if (n >= 0 && n < HOTBAR) inventory.select(n);
 });
@@ -3049,7 +3145,7 @@ function openEditor() {
     return;
   }
   pixel.renderer.setAnimationLoop(frame);
-  if (import.meta.env.DEV) window.__dbg = { game, pixel, camera, inventory, vitals, actAt, useWorkbench, launchAt, launchPlan, boatKey, editPick }; // dev only: lets headless tests inspect the renderer and act
+  if (import.meta.env.DEV) window.__dbg = { game, pixel, camera, inventory, vitals, actAt, useWorkbench, useChest, dropHeld, launchAt, launchPlan, boatKey, editPick }; // dev only: lets headless tests inspect the renderer and act
   // ?room=... jumps straight into multiplayer (handy for testing); otherwise the main menu
   if (new URLSearchParams(location.search).has('room')) startMulti(identity.room);
   else toMenu();

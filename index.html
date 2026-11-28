@@ -81,6 +81,8 @@
           <dt>Right-click bush</dt><dd>search for berries</dd>
           <dt>1–8</dt><dd>pick a hotbar slot</dd>
           <dt>I / Tab</dt><dd>inventory (C: show / hide crafting)</dd>
+          <dt>G</dt><dd>drop one of what's in hand (Shift+G: the whole stack) · in the inventory, click outside the panels to drop what's on the cursor</dd>
+          <dt>Click chest</dt><dd>open it to store things (shift-click moves a stack in or out)</dd>
           <dt>R</dt><dd>rotate</dd>
           <dt>Q / E</dt><dd>turn camera</dd>
           <dt>Wheel</dt><dd>zoom</dd>
@@ -115,6 +117,11 @@
       <div id="inventory" hidden>
         <div class="inv-layout">
           <div class="inv-main">
+            <!-- an open chest (main.js useChest): its 24 slots above your own -->
+            <section class="inv-box inv-chestbox" id="inv-chest-box" hidden>
+              <div class="inv-tab">Chest</div>
+              <div id="inv-chest" class="inv-grid"></div>
+            </section>
             <!-- one wooden panel: page tabs with icons stick out on the left, the Crafting tab on the right -->
             <section class="inv-box inv-book">
               <div class="inv-sidetabs" id="inv-tabs-left"></div>
@@ -130,7 +137,9 @@
               </div>
               <div class="inv-page" id="inv-creative" data-page="creative" hidden>
                 <p class="inv-note">Every item · click: a stack · right-click: one</p>
+                <div class="inv-filterbar"><div class="inv-filters" id="inv-all-filters"></div><input class="inv-search" id="inv-all-search" type="search" placeholder="Search" spellcheck="false" autocomplete="off" /></div>
                 <div id="inv-all"></div>
+                <p class="inv-empty" id="inv-all-empty" hidden>Nothing matches</p>
                 <button id="inv-clear" class="inv-btn" tabindex="-1">Empty inventory</button>
               </div>
             </section>
@@ -145,7 +154,9 @@
           </div>
           <section class="inv-box inv-craftbox" id="inv-craft-box">
             <div class="inv-tab" id="inv-craft-title">Crafting</div>
+            <div class="inv-filterbar"><div class="inv-filters" id="inv-craft-filters"></div><input class="inv-search" id="inv-craft-search" type="search" placeholder="Search" spellcheck="false" autocomplete="off" /></div>
             <div id="inv-craft"></div>
+            <p class="inv-empty" id="inv-craft-empty" hidden>Nothing to make here</p>
             <p id="inv-craft-hint"></p>
           </section>
         </div>

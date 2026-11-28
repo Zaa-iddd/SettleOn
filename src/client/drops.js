@@ -58,6 +58,25 @@ export class Drops {
     while (this.list.length > MAX_DROPS) this.remove(this.list[0]);
   }
 
+  /**
+   * The player drops n of item `id` from (x, y, z): one icon tossed forward along (dx, dz). It isn't picked up again
+   * until you've stepped away from it (and a moment has passed), so it doesn't fly straight back into you.
+   */
+  toss(id, n, x, y, z, dx, dz) {
+    if (!(n > 0)) return;
+    const sprite = new THREE.Sprite(materialFor(id));
+    sprite.scale.set(SIZE, SIZE, SIZE);
+    const sp = 2.1 + Math.random() * 0.3, side = (Math.random() - 0.5) * 0.5;
+    const d = {
+      id, count: n, sprite, x, y, z, vx: dx * sp - dz * side, vy: 3.2, vz: dz * sp + dx * side,
+      age: 0, landed: false, phase: Math.random() * 6, magnet: false, delay: 1.2, away: false,
+    };
+    sprite.position.set(x, y, z);
+    this.group.add(sprite);
+    this.list.push(d);
+    while (this.list.length > MAX_DROPS) this.remove(this.list[0]);
+  }
+
   remove(d) {
     d.sprite.removeFromParent();
     const i = this.list.indexOf(d);
@@ -81,7 +100,8 @@ export class Drops {
       d.age += dt;
       if (d.age > LIFETIME) { this.remove(d); continue; }
       const dist = p ? Math.hypot(p.x - d.x, p.y + 0.45 - d.y, p.z - d.z) : Infinity;
-      if (p && d.age > PICK_DELAY && dist < MAGNET_R && !(t < d.noMagnetUntil)) d.magnet = true;
+      if (d.away === false && dist > MAGNET_R + 0.3) d.away = true; // a dropped item: you've stepped away from it
+      if (p && d.age > (d.delay ?? PICK_DELAY) && d.away !== false && dist < MAGNET_R && !(t < d.noMagnetUntil)) d.magnet = true;
       if (d.magnet) { // fly to the player, quicker the closer it gets
         const k = Math.min(1, dt * (8 + 10 / Math.max(0.2, dist)));
         d.x += (p.x - d.x) * k; d.y += (p.y + 0.45 - d.y) * k; d.z += (p.z - d.z) * k;

@@ -131,6 +131,19 @@ body.inv-open #hotbar, body.inv-open #vitals, body.inv-open #held-name { visibil
 .inv-tabbtn.on { background: var(--tab-line); color: var(--tab); text-shadow: none; box-shadow: inset 0 0 0 2px var(--tab), 3px 3px 0 rgba(0, 0, 0, 0.35); }
 .inv-help { margin: -16px 0 0; font-size: 11px; color: var(--cream); opacity: 0.8; text-shadow: 1px 1px 0 var(--clay-edge); }
 .inv-note { margin: 0 0 8px; font-size: 11px; color: var(--cream); }
+/* filters above the crafting and creative lists: icon tabs per category and a search box */
+.inv-filterbar { display: flex; flex-direction: column; gap: 6px; margin: 0 0 8px; }
+.inv-filters { display: flex; flex-wrap: wrap; gap: 3px; }
+.inv-filter { position: relative; min-width: 27px; height: 28px; padding: 0 3px; font: inherit; font-size: 12px; color: var(--cream); cursor: pointer; background: var(--slot); border: 2px solid var(--slot-edge); box-shadow: inset 2px 2px 0 var(--well, #2a1a0e), inset -2px -2px 0 var(--slot-hi); }
+.inv-filter img { width: 18px; height: 18px; display: block; image-rendering: pixelated; pointer-events: none; }
+.inv-filter:hover { border-color: var(--brass, #e0b040); }
+.inv-filter.on { background: var(--brass, #e0b040); color: var(--wood-frame, #3a2414); border-color: var(--wood-frame, #3a2414); box-shadow: inset 2px 2px 0 var(--brass-hi, #ffe8a0), inset -2px -2px 0 var(--brass-lo, #9a6a18); }
+.inv-filter[disabled] { opacity: 0.35; cursor: default; border-color: var(--slot-edge); }
+.inv-filter[hidden], .inv-pick[hidden], #inv-craft .craft[hidden], .inv-empty[hidden] { display: none; }
+.inv-search { width: 100%; box-sizing: border-box; padding: 4px 8px; font: inherit; font-size: 12px; color: var(--cream); background: var(--well, #2a1a0e); border: 2px solid var(--slot-edge); outline: none; }
+.inv-search:focus { border-color: var(--brass, #e0b040); }
+.inv-search::placeholder { color: var(--cream); opacity: 0.5; }
+.inv-empty { margin: 6px 0; font-size: 12px; color: var(--cream); opacity: 0.75; }
 /* creative mode (debug): every item */
 #inv-all { display: grid; grid-template-columns: repeat(8, 44px); gap: 6px; max-height: 200px; overflow-y: auto; }
 .inv-pick { width: 44px; height: 44px; padding: 0; border-radius: 6px; background: var(--slot); border: 2px solid var(--slot-edge); box-shadow: inset 2px 2px 0 var(--slot-hi), inset -2px -2px 0 var(--slot-lo); cursor: pointer; }
@@ -577,6 +590,8 @@ body.no-labels #labels { display: none; }
 #inventory .inv-barbox .inv-slot { background: var(--deep); }
 #inventory .inv-slot:hover, #inventory .inv-barbox .inv-slot:hover, .inv-pick:hover { background: #5e3a20; border-color: var(--brass); }
 #inventory .inv-barbox .inv-slot.selected { border-color: var(--brass); box-shadow: inset 2px 2px 0 var(--well), 0 0 0 2px var(--brass); }
+/* an open chest: a darker, iron-trimmed box above your own */
+.inv-chestbox { background: var(--nails), linear-gradient(rgba(40, 20, 8, 0.28), rgba(40, 20, 8, 0.28)), var(--wood); border-color: #2a2c30; box-shadow: inset 2px 2px 0 #9aa0a6, inset -2px -2px 0 #4a4e54, 4px 4px 0 var(--edge); }
 #inv-nobag { background: #3a221288; border-color: var(--well-edge); border-radius: 0; }
 #inv-craft .craft { border-radius: 0; background: #3a2212b0; border-color: var(--well-edge); box-shadow: inset 2px 2px 0 #6e4426; }
 #inv-craft .craft:hover { background: #5e3a20; border-color: var(--brass); }

@@ -12,7 +12,7 @@ export const ANIM = { IDLE: 0, WALK: 1, RUN: 2, AIR: 3, SWIM: 4, ROW: 5, CLIMB: 
 // what the hand can hold (index 0 = empty): the two tools, then blocks (the network sends this index)
 // held-item index → id. Sent to others as the tens of the `a` code (the server allows up to 29).
 export const TOOLS = [null, 'shovel', 'pickaxe', 'dirt', 'stone', 'sand', 'snow', 'frog', 'axe', 'wood', 'log', 'workbench', 'stick', 'pebble', 'berries',
-  'leaves', 'wall', 'chair', 'table', 'bed', 'lamp', 'shelf', 'boat', 'rod', 'coconut', 'coconut_half'];
+  'leaves', 'wall', 'chair', 'table', 'bed', 'lamp', 'shelf', 'boat', 'rod', 'coconut', 'coconut_half', 'chest'];
 const BLOCK_COLORS = { wall: [0x8a5730, 0xc08a56], dirt: [0x8d5c3a, 0x6fb33a], stone: [0x8e8c88, 0x8e8c88], sand: [0xe2cf92, 0xe2cf92], snow: [0xeef3f8, 0xeef3f8] };
 export const SWING_SECS = 0.38; // one tool swing: wind up over the head, then chop down
 
@@ -648,6 +648,11 @@ export function setTool(ch, tool) {
     ch.toolGrip.add(box(0.025, 0.025, 0.2, 0x94633a, 0, 0, 0.08));
     ch.toolGrip.add(box(0.07, 0.08, 0.07, 0x3a3532, 0, 0, 0.2));
     ch.toolGrip.add(box(0.05, 0.06, 0.05, 0xffd860, 0, 0, 0.2));
+  } else if (TOOLS[tool] === 'chest') { // a little plank chest with its latch
+    ch.toolGrip.add(box(0.17, 0.09, 0.12, 0xb07a48, 0, -0.02, 0.08));
+    ch.toolGrip.add(box(0.18, 0.05, 0.13, 0xa06a3c, 0, 0.05, 0.08));
+    ch.toolGrip.add(box(0.185, 0.012, 0.135, 0x5a3418, 0, 0.022, 0.08));
+    ch.toolGrip.add(box(0.03, 0.04, 0.01, 0x9aa0a6, 0, 0.02, 0.15));
   } else if (TOOLS[tool] === 'shelf') {
     ch.toolGrip.add(box(0.16, 0.2, 0.07, 0x94633a, 0, 0.03, 0.07));
     ch.toolGrip.add(box(0.12, 0.06, 0.02, 0x4f8fd0, 0, 0.07, 0.11));
